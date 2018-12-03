@@ -17,3 +17,6 @@ tests/.tests
 pytest_session.txt
 .cache/
 .pytest_cache
+
+# added for EAS
+python/lsst/ts/EAS/ospl-info.log
