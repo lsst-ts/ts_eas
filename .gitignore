@@ -8,6 +8,8 @@ config.log
 *.pyc
 *_wrap.cc
 *Lib.py
+.eggs/
+.githooks/
 
 # Built by sconsUtils
 version.py
@@ -17,6 +19,8 @@ tests/.tests
 pytest_session.txt
 .cache/
 .pytest_cache
+.coverage
+ospl-error.log
+ospl-info.log
 
-# added for EAS
-python/lsst/ts/EAS/ospl-info.log
+.idea/
