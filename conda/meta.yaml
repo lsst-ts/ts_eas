@@ -31,7 +31,6 @@ test:
     - pyyaml
     - boto3
     - moto
-    - pyserial
     - ts-simactuators
     - ts-dds
     - ts-idl
