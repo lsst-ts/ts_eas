@@ -1,6 +1,6 @@
 # This file is part of ts_eas.
 #
-# Developed for the Telescope and Site team.
+# Developed for the Vera C. Rubin Observatory Telescope and Site Systems.
 # This product includes software developed by the LSST Project
 # (https://www.lsst.org).
 # See the COPYRIGHT file at the top-level directory of this distribution
@@ -25,18 +25,34 @@ import logging
 from lsst.ts import salobj
 from lsst.ts import eas
 
-logging.basicConfig(format="%(asctime)s:%(levelname)s:%(name)s:%(message)s", level=logging.DEBUG)
+logging.basicConfig(
+    format="%(asctime)s:%(levelname)s:%(name)s:%(message)s", level=logging.DEBUG
+)
 
 
 class CscTestCase(salobj.BaseCscTestCase, asynctest.TestCase):
     def basic_make_csc(self, initial_state, config_dir, simulation_mode, **kwargs):
         return eas.EasCsc(
-            initial_state=initial_state, config_dir=config_dir, simulation_mode=simulation_mode,
+            initial_state=initial_state,
+            config_dir=config_dir,
+            simulation_mode=simulation_mode,
         )
 
     async def test_standard_state_transitions(self):
-        async with self.make_csc(initial_state=salobj.State.STANDBY, config_dir=None, simulation_mode=1):
+        async with self.make_csc(
+            initial_state=salobj.State.STANDBY, config_dir=None, simulation_mode=1
+        ):
             await self.check_standard_state_transitions(enabled_commands=(),)
+
+    async def test_version(self):
+        async with self.make_csc(
+            initial_state=salobj.State.STANDBY, config_dir=None, simulation_mode=1
+        ):
+            await self.assert_next_sample(
+                self.remote.evt_softwareVersions,
+                cscVersion=eas.__version__,
+                subsystemVersions="",
+            )
 
     async def test_bin_script(self):
         await self.check_bin_script(name="EAS", index=None, exe_name="run_eas.py")
