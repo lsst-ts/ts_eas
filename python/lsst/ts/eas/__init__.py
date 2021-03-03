@@ -19,16 +19,10 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-"""Sphinx configuration file for an LSST stack package.
+try:
+    from .version import *
+except ModuleNotFoundError:
+    __version__ = "?"
 
-This configuration only affects single-package Sphinx documentation builds.
-"""
-
-from documenteer.conf.pipelinespkg import *  # noqa
-import lsst.ts.eas  # noqa
-
-project = "ts_eas"
-html_theme_options["logotext"] = project  # noqa
-html_title = project
-html_short_title = project
-doxylink = {}  # Avoid warning: Could not find tag file _doxygen/doxygen.tag
+from .eas_csc import *
+from .config_schema import CONFIG_SCHEMA
