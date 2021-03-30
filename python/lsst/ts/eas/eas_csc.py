@@ -43,7 +43,10 @@ class EasCsc(salobj.ConfigurableCsc):
     version = __version__
 
     def __init__(
-        self, config_dir=None, initial_state=salobj.State.STANDBY, simulation_mode=0,
+        self,
+        config_dir=None,
+        initial_state=salobj.State.STANDBY,
+        simulation_mode=0,
     ):
         self.config = None
         self._config_dir = config_dir
@@ -79,8 +82,7 @@ class EasCsc(salobj.ConfigurableCsc):
             self.eas.connect()
 
     async def disconnect(self):
-        """Disconnect the EAS CSC, if connected.
-        """
+        """Disconnect the EAS CSC, if connected."""
         self.log.info("Disconnecting")
         if self.eas:
             self.eas.disconnect()
