@@ -6,6 +6,17 @@
 Version History
 ###############
 
+v0.3.0
+======
+
+Prepared for salobj 7.
+
+Requires:
+
+* ts_salobj 7.0
+* ts_idl 3.1
+* IDL file for MTEEC from ts_xml 8.0
+
 v0.2.0
 ======
 

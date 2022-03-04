@@ -26,9 +26,9 @@ import yaml
 CONFIG_SCHEMA = yaml.safe_load(
     """
     $schema: http://json-schema.org/draft-07/schema#
-    $id: https://github.com/lsst-ts/ts_eas/blob/master/python/lsst/ts/eas/config_schema.py
+    $id: https://github.com/lsst-ts/ts_eas/blob/main/python/lsst/ts/eas/config_schema.py
     # title must end with one or more spaces followed by the schema version, which must begin with "v"
-    title: EAS v1
+    title: EAS v2
     description: Schema for EAS configuration files
     type: object
     properties:
@@ -36,12 +36,10 @@ CONFIG_SCHEMA = yaml.safe_load(
         description: Time limit for connecting to the TCP/IP interface (sec)
         type: number
         exclusiveMinimum: 0
-        default: 10
       read_timeout:
         description: Time limit for reading data from the TCP/IP interface (sec)
         type: number
         exclusiveMinimum: 0
-        default: 10
     required:
       - connection_timeout
       - read_timeout
