@@ -40,7 +40,9 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
 
     async def test_standard_state_transitions(self):
         async with self.make_csc(
-            initial_state=salobj.State.STANDBY, config_dir=None, simulation_mode=1
+            initial_state=salobj.State.STANDBY,
+            config_dir="tests/data/config",
+            simulation_mode=1,
         ):
             await self.check_standard_state_transitions(
                 enabled_commands=(),
@@ -48,7 +50,9 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
 
     async def test_version(self):
         async with self.make_csc(
-            initial_state=salobj.State.STANDBY, config_dir=None, simulation_mode=1
+            initial_state=salobj.State.STANDBY,
+            config_dir="tests/data/config",
+            simulation_mode=1,
         ):
             await self.assert_next_sample(
                 self.remote.evt_softwareVersions,
