@@ -20,6 +20,7 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import logging
+import pathlib
 import unittest
 
 from lsst.ts import salobj
@@ -28,6 +29,7 @@ from lsst.ts import eas
 logging.basicConfig(
     format="%(asctime)s:%(levelname)s:%(name)s:%(message)s", level=logging.DEBUG
 )
+TEST_CONFIG_DIR = pathlib.Path(__file__).parents[1].joinpath("tests", "data", "config")
 
 
 class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
@@ -41,7 +43,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
     async def test_standard_state_transitions(self):
         async with self.make_csc(
             initial_state=salobj.State.STANDBY,
-            config_dir="tests/data/config",
+            config_dir=TEST_CONFIG_DIR,
             simulation_mode=1,
         ):
             await self.check_standard_state_transitions(
@@ -51,7 +53,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
     async def test_version(self):
         async with self.make_csc(
             initial_state=salobj.State.STANDBY,
-            config_dir="tests/data/config",
+            config_dir=TEST_CONFIG_DIR,
             simulation_mode=1,
         ):
             await self.assert_next_sample(
