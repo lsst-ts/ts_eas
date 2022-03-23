@@ -19,8 +19,8 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-import asynctest
 import logging
+import unittest
 
 from lsst.ts import salobj
 from lsst.ts import eas
@@ -30,7 +30,7 @@ logging.basicConfig(
 )
 
 
-class CscTestCase(salobj.BaseCscTestCase, asynctest.TestCase):
+class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
     def basic_make_csc(self, initial_state, config_dir, simulation_mode, **kwargs):
         return eas.EasCsc(
             initial_state=initial_state,
@@ -40,13 +40,19 @@ class CscTestCase(salobj.BaseCscTestCase, asynctest.TestCase):
 
     async def test_standard_state_transitions(self):
         async with self.make_csc(
-            initial_state=salobj.State.STANDBY, config_dir=None, simulation_mode=1
+            initial_state=salobj.State.STANDBY,
+            config_dir="tests/data/config",
+            simulation_mode=1,
         ):
-            await self.check_standard_state_transitions(enabled_commands=(),)
+            await self.check_standard_state_transitions(
+                enabled_commands=(),
+            )
 
     async def test_version(self):
         async with self.make_csc(
-            initial_state=salobj.State.STANDBY, config_dir=None, simulation_mode=1
+            initial_state=salobj.State.STANDBY,
+            config_dir="tests/data/config",
+            simulation_mode=1,
         ):
             await self.assert_next_sample(
                 self.remote.evt_softwareVersions,

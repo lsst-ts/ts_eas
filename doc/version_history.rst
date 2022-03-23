@@ -6,6 +6,29 @@
 Version History
 ###############
 
+v0.3.0
+======
+
+Prepared for salobj 7.
+
+Requires:
+
+* ts_salobj 7.0
+* ts_idl 3.1
+* IDL file for MTEEC from ts_xml 8.0
+
+v0.2.0
+======
+
+Upgraded black to version 20 and ts-conda-build to 0.3
+
+Requires:
+
+* ts_salobj 6.3
+* ts_idl 3.1
+* IDL file for EAS from ts_xml 8.0
+
+
 v0.1.0
 ======
 
@@ -17,4 +40,4 @@ Requires:
 
 * ts_salobj 6.3
 * ts_idl 3.0
-* IDL file for Dome from ts_xml 8.0
+* IDL file for EAS from ts_xml 8.0

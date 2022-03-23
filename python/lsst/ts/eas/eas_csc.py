@@ -37,13 +37,20 @@ class EasCsc(salobj.ConfigurableCsc):
         The initial state of the CSC
     simulation_mode : `int`
         Simulation mode (1) or not (0)
+    override : `str`, optional
+        Override of settings if ``initial_state`` is `State.DISABLED`
+        or `State.ENABLED`.
     """
 
     valid_simulation_modes = (0, 1)
     version = __version__
 
     def __init__(
-        self, config_dir=None, initial_state=salobj.State.STANDBY, simulation_mode=0,
+        self,
+        config_dir=None,
+        initial_state=salobj.State.STANDBY,
+        simulation_mode=0,
+        override="",
     ):
         self.config = None
         self._config_dir = config_dir
@@ -54,6 +61,7 @@ class EasCsc(salobj.ConfigurableCsc):
             config_dir=config_dir,
             initial_state=initial_state,
             simulation_mode=simulation_mode,
+            override=override,
         )
         self.eas = None
         self.log.info("__init__")
@@ -79,8 +87,7 @@ class EasCsc(salobj.ConfigurableCsc):
             self.eas.connect()
 
     async def disconnect(self):
-        """Disconnect the EAS CSC, if connected.
-        """
+        """Disconnect the EAS CSC, if connected."""
         self.log.info("Disconnecting")
         if self.eas:
             self.eas.disconnect()
