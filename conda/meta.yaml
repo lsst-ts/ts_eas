@@ -7,8 +7,10 @@ source:
   path: ../
 
 build:
-  noarch: python
+  noarch: generic
   script: python -m pip install --no-deps --ignore-installed .
+  entry_points:
+    - run_eas = lsst.ts.eas.cli:execute_csc
   script_env:
     - PATH
     - PYTHONPATH
@@ -30,6 +32,7 @@ test:
     - bin
     - tests
     - setup.cfg
+    - pyproject.toml
   commands:
     - py.test
 
