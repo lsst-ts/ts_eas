@@ -1,5 +1,3 @@
-#!/usr/bin/env python
-
 # This file is part of ts_eas.
 #
 # Developed for the Vera C. Rubin Observatory Telescope and Site Systems.
@@ -21,15 +19,12 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+__all__ = ["execute_csc"]
+
 import asyncio
-import logging
 
-from lsst.ts import eas
-
-logging.basicConfig(
-    format="%(asctime)s:%(levelname)s:%(name)s:%(message)s",
-    level=logging.INFO,
-)
+from .eas_csc import EasCsc
 
 
-asyncio.run(eas.EasCsc.amain(index=None))
+def execute_csc():
+    asyncio.run(EasCsc.amain(index=None))
