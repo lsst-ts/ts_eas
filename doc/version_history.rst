@@ -6,6 +6,19 @@
 Version History
 ###############
 
+v0.4.0
+======
+
+* Modernize pre-commit config versions.
+* Switch to pyproject.toml.
+* Use entry_points instead of bin scripts.
+
+Requires:
+
+* ts_salobj 7.0
+* ts_idl 3.1
+* IDL file for MTEEC from ts_xml 8.0
+
 v0.3.0
 ======
 

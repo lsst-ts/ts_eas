@@ -24,5 +24,6 @@ try:
 except ModuleNotFoundError:
     __version__ = "?"
 
+from .cli import *
 from .eas_csc import *
 from .config_schema import CONFIG_SCHEMA
