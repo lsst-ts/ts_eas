@@ -20,6 +20,7 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import logging
+import typing
 import unittest
 
 from lsst.ts import eas, salobj
@@ -30,14 +31,20 @@ logging.basicConfig(
 
 
 class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
-    def basic_make_csc(self, initial_state, config_dir, simulation_mode, **kwargs):
+    def basic_make_csc(
+        self,
+        initial_state: salobj.State,
+        config_dir: str,
+        simulation_mode: int,
+        **kwargs: typing.Any,
+    ) -> None:
         return eas.EasCsc(
             initial_state=initial_state,
             config_dir=config_dir,
             simulation_mode=simulation_mode,
         )
 
-    async def test_standard_state_transitions(self):
+    async def test_standard_state_transitions(self) -> None:
         async with self.make_csc(
             initial_state=salobj.State.STANDBY,
             config_dir="tests/data/config",
@@ -47,7 +54,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 enabled_commands=(),
             )
 
-    async def test_version(self):
+    async def test_version(self) -> None:
         async with self.make_csc(
             initial_state=salobj.State.STANDBY,
             config_dir="tests/data/config",
@@ -59,5 +66,5 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 subsystemVersions="",
             )
 
-    async def test_bin_script(self):
+    async def test_bin_script(self) -> None:
         await self.check_bin_script(name="EAS", index=None, exe_name="run_eas")
