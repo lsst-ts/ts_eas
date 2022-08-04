@@ -23,9 +23,10 @@ __all__ = ["EasCsc", "run_eas"]
 
 import asyncio
 
-from .config_schema import CONFIG_SCHEMA
-from . import __version__
 from lsst.ts import salobj
+
+from . import __version__
+from .config_schema import CONFIG_SCHEMA
 
 
 def run_eas():
