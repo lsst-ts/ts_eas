@@ -6,6 +6,21 @@
 Version History
 ###############
 
+v0.5.0
+======
+
+* Improve entry point.
+* Add support for multiple Python versions for conda.
+* Sort imports with isort.
+* Install new pre-commit hooks.
+* Add MyPy support.
+
+Requires:
+
+* ts_salobj 7.0
+* ts_idl 3.1
+* IDL file for EAS from ts_xml 8.0
+
 v0.4.0
 ======
 
@@ -17,7 +32,7 @@ Requires:
 
 * ts_salobj 7.0
 * ts_idl 3.1
-* IDL file for MTEEC from ts_xml 8.0
+* IDL file for EAS from ts_xml 8.0
 
 v0.3.0
 ======
@@ -28,7 +43,7 @@ Requires:
 
 * ts_salobj 7.0
 * ts_idl 3.1
-* IDL file for MTEEC from ts_xml 8.0
+* IDL file for EAS from ts_xml 8.0
 
 v0.2.0
 ======
