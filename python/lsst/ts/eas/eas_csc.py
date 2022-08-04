@@ -19,11 +19,17 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-__all__ = ["EasCsc"]
+__all__ = ["EasCsc", "run_eas"]
+
+import asyncio
 
 from .config_schema import CONFIG_SCHEMA
 from . import __version__
 from lsst.ts import salobj
+
+
+def run_eas():
+    asyncio.run(EasCsc.amain(index=None))
 
 
 class EasCsc(salobj.ConfigurableCsc):

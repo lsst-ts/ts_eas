@@ -17,7 +17,7 @@ version = { attr = "setuptools_scm.get_version" }
 where = [ "python" ]
 
 [project.scripts]
-run_eas = "lsst.ts.eas.cli:execute_csc"
+run_eas = "lsst.ts.eas.eas_csc:run_eas"
 
 [tool.setuptools_scm]
 write_to = "python/lsst/ts/eas/version.py"

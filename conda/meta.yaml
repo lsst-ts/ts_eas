@@ -10,7 +10,7 @@ build:
   noarch: generic
   script: python -m pip install --no-deps --ignore-installed .
   entry_points:
-    - run_eas = lsst.ts.eas.cli:execute_csc
+    - run_eas = lsst.ts.eas.eas_csc:run_eas
   script_env:
     - PATH
     - LD_LIBRARY_PATH
