@@ -19,11 +19,20 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-__all__ = ["EasCsc"]
+__all__ = ["EasCsc", "run_eas"]
 
-from .config_schema import CONFIG_SCHEMA
-from . import __version__
+import asyncio
+import typing
+from types import SimpleNamespace
+
 from lsst.ts import salobj
+
+from . import __version__
+from .config_schema import CONFIG_SCHEMA
+
+
+def run_eas() -> None:
+    asyncio.run(EasCsc.amain(index=None))
 
 
 class EasCsc(salobj.ConfigurableCsc):
@@ -47,12 +56,12 @@ class EasCsc(salobj.ConfigurableCsc):
 
     def __init__(
         self,
-        config_dir=None,
-        initial_state=salobj.State.STANDBY,
-        simulation_mode=0,
-        override="",
-    ):
-        self.config = None
+        config_dir: typing.Optional[str] = None,
+        initial_state: salobj.State = salobj.State.STANDBY,
+        simulation_mode: int = 0,
+        override: str = "",
+    ) -> None:
+        self.config: typing.Optional[SimpleNamespace] = None
         self._config_dir = config_dir
         super().__init__(
             name="EAS",
@@ -66,7 +75,7 @@ class EasCsc(salobj.ConfigurableCsc):
         self.eas = None
         self.log.info("__init__")
 
-    async def connect(self):
+    async def connect(self) -> None:
         """Connect the EAS CSC or start the mock client, if in
         simulation mode.
         """
@@ -86,13 +95,13 @@ class EasCsc(salobj.ConfigurableCsc):
         if self.eas:
             self.eas.connect()
 
-    async def disconnect(self):
+    async def disconnect(self) -> None:
         """Disconnect the EAS CSC, if connected."""
         self.log.info("Disconnecting")
         if self.eas:
             self.eas.disconnect()
 
-    async def handle_summary_state(self):
+    async def handle_summary_state(self) -> None:
         """Override of the handle_summary_state function to connect or
         disconnect to the EAS CSC (or the mock client) when needed.
         """
@@ -103,14 +112,14 @@ class EasCsc(salobj.ConfigurableCsc):
         else:
             await self.disconnect()
 
-    async def configure(self, config):
+    async def configure(self, config: SimpleNamespace) -> None:
         self.config = config
 
     @property
-    def connected(self):
+    def connected(self) -> bool:
         # TODO Add code to determine if the CSC is connected or not.
         return True
 
     @staticmethod
-    def get_config_pkg():
+    def get_config_pkg() -> str:
         return "ts_config_ocs"
