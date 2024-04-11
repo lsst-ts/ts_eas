@@ -6,6 +6,17 @@
 Version History
 ###############
 
+v0.5.1
+======
+
+* Update the version of ts-conda-build to 0.4 in the conda recipe.
+
+Requires:
+
+* ts_salobj 7.0
+* ts_idl 3.1
+* IDL file for EAS from ts_xml 8.0
+
 v0.5.0
 ======
 
