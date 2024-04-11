@@ -11,17 +11,10 @@ build:
   script: {{ PYTHON }} -m pip install --no-deps --ignore-installed .
   entry_points:
     - run_eas = lsst.ts.eas.eas_csc:run_eas
-  script_env:
-    - PATH
-    - LD_LIBRARY_PATH
-    - OSPL_HOME
-    - PYTHON_BUILD_LOCATION
-    - LSST_DDS_PARTITION_PREFIX
-    - TS_CONFIG_OCS_DIR
 
 test:
   requires:
-    - ts-conda-build =0.3
+    - ts-conda-build =0.4
     - ts-idl {{ idl_version }}
     - ts-salobj {{ salobj_version }}
     - ts-dds
@@ -44,7 +37,6 @@ requirements:
     - python {{ python }}
     - setuptools_scm
     - setuptools
-    - ts-conda-build =0.3
   run:
     - python {{ python }}
     - setuptools
