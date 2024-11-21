@@ -29,6 +29,7 @@ from lsst.ts import salobj
 
 from . import __version__
 from .config_schema import CONFIG_SCHEMA
+from .m1m3_thermal import ControlLoopManager
 
 
 def run_eas() -> None:
@@ -73,6 +74,7 @@ class EasCsc(salobj.ConfigurableCsc):
             override=override,
         )
         self.eas = None
+        self.m1m3_thermal_system: ControlLoopManager | None = None
         self.log.info("__init__")
 
     async def connect(self) -> None:
@@ -92,12 +94,23 @@ class EasCsc(salobj.ConfigurableCsc):
         else:
             # TODO Add code for non-simulation case
             pass
+
+        if self.m1m3_thermal_system is None:
+            self.m1m3_thermal_system = ControlLoopManager(self.domain, self.log)
+            await self.m1m3_thermal_system.start_control_loop()
+
         if self.eas:
             self.eas.connect()
 
     async def disconnect(self) -> None:
         """Disconnect the EAS CSC, if connected."""
         self.log.info("Disconnecting")
+
+        if self.m1m3_thermal_system is not None:
+            await self.m1m3_thermal_system.stop_control_loop()
+            await self.m1m3_thermal_system.cleanup()
+            self.m1m3_thermal_system = None
+
         if self.eas:
             self.eas.disconnect()
 
