@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# This file is part of ts_dream.
+# This file is part of ts_eas.
 #
 # Developed for the Vera C. Rubin Observatory Telescope and Site Systems.
 # This product includes software developed by the LSST Project
@@ -79,7 +79,7 @@ class ControlLoopManager:
             # Wait for remotes to get set up...
             await asyncio.sleep(5.0)
 
-            mixing = self.m1m3ts.tel_mixingValve.get()
+            mixing = await self.m1m3ts.tel_mixingValve.next()
             currentvalveposition = mixing.valvePosition
             oldvalveposition = currentvalveposition
 
