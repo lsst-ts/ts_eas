@@ -169,7 +169,6 @@ class ControlLoopManager:
 
         except asyncio.CancelledError:
             self.log.info("M1M3 thermal control loop cancelled.")
-            raise
 
     async def start_control_loop(self):
         """
@@ -185,7 +184,7 @@ class ControlLoopManager:
 
     async def cleanup(self) -> None:
         """
-        Closes the domain and cleans up resources.
+        Cleans up resources.
         """
         await self.m1m3ts.close()
         await self.ess.close()
