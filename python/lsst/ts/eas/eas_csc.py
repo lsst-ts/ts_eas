@@ -26,10 +26,9 @@ import logging
 import typing
 from types import SimpleNamespace
 
-import m1m3_thermal
 from lsst.ts import salobj
 
-from . import __version__
+from . import __version__, m1m3_thermal
 from .config_schema import CONFIG_SCHEMA
 
 
