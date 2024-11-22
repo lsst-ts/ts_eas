@@ -22,14 +22,15 @@
 __all__ = ["EasCsc", "run_eas"]
 
 import asyncio
+import logging
 import typing
 from types import SimpleNamespace
 
+import m1m3_thermal
 from lsst.ts import salobj
 
 from . import __version__
 from .config_schema import CONFIG_SCHEMA
-from .m1m3_thermal import ControlLoopManager
 
 
 def run_eas() -> None:
@@ -74,7 +75,11 @@ class EasCsc(salobj.ConfigurableCsc):
             override=override,
         )
         self.eas = None
-        self.m1m3_thermal_system: ControlLoopManager | None = None
+        self.m1m3_thermal_task: asyncio.Task | None = None
+
+        ch = logging.StreamHandler()
+        self.log.addHandler(ch)
+
         self.log.info("__init__")
 
     async def connect(self) -> None:
@@ -95,21 +100,12 @@ class EasCsc(salobj.ConfigurableCsc):
             # TODO Add code for non-simulation case
             pass
 
-        if self.m1m3_thermal_system is None:
-            self.m1m3_thermal_system = ControlLoopManager(self.domain, self.log)
-            await self.m1m3_thermal_system.start_control_loop()
-
         if self.eas:
             self.eas.connect()
 
     async def disconnect(self) -> None:
         """Disconnect the EAS CSC, if connected."""
         self.log.info("Disconnecting")
-
-        if self.m1m3_thermal_system is not None:
-            await self.m1m3_thermal_system.stop_control_loop()
-            await self.m1m3_thermal_system.cleanup()
-            self.m1m3_thermal_system = None
 
         if self.eas:
             self.eas.disconnect()
@@ -121,8 +117,16 @@ class EasCsc(salobj.ConfigurableCsc):
         self.log.info(f"handle_summary_state {salobj.State(self.summary_state).name}")
         if self.disabled_or_enabled:
             if not self.connected:
+                if self.m1m3_termal_task is None:
+                    self.m1m3_thermal_task.cancel()
+                self.m1m3_thermal_task = asyncio.create_task(
+                    m1m3_thermal.run_control_loop(self.domain, self.log)
+                )
                 await self.connect()
         else:
+            if self.m1m3_thermal_task is not None:
+                self.m1m3_thermal_task.cancel()
+                self.m1m3_thermal_task = None
             await self.disconnect()
 
     async def configure(self, config: SimpleNamespace) -> None:
