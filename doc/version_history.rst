@@ -6,6 +6,11 @@
 Version History
 ###############
 
+v0.6.0
+======
+
+* Add Brian Stadler's script for M1M3 thermal control.
+
 v0.5.1
 ======
 
