@@ -36,7 +36,6 @@ REMOTE_STARTUP_TIME = 5.0  # Time for remotes to get set up
 SUMMARY_STATE_TIME = 5.0  # Wait time for a summary state change
 FAN_SLEEP_TIME = 30.0  # Time to wait after changing the fans
 VALVE_SLEEP_TIME = 60.0  # Time to wait after changing the valve
-DDS_RESTART_TIME = 60.0  # Time to wait after a DDS exception
 
 
 def run_eas() -> None:
