@@ -11,10 +11,6 @@ config.log
 .eggs/
 .githooks/
 
-.flake8
-.isort.cfg
-.mypy.ini
-
 # Built by sconsUtils
 version.py
 
@@ -28,3 +24,4 @@ ospl-error.log
 ospl-info.log
 
 .idea/
+.pre-commit-config.yaml

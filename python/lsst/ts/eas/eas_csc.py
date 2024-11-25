@@ -116,7 +116,8 @@ class EasCsc(salobj.ConfigurableCsc):
         self.log.info(f"handle_summary_state {salobj.State(self.summary_state).name}")
         if self.disabled_or_enabled:
             if not self.connected:
-                if self.m1m3_termal_task is None:
+                if self.m1m3_termal_task is not None:
+                    assert self.m1m3_thermal_task is not None  # Get it together mypy
                     self.m1m3_thermal_task.cancel()
                 self.m1m3_thermal_task = asyncio.create_task(
                     m1m3_thermal.run_control_loop(self.domain, self.log)
