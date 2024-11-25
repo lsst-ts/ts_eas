@@ -28,6 +28,16 @@ import logging
 from dds import DDSException
 from lsst.ts import salobj
 
+__all__ = [
+    "SAL_TIMEOUT",
+    "REMOTE_STARTUP_TIME",
+    "SUMMARY_STATE_TIME",
+    "FAN_SLEEP_TIME",
+    "VALVE_SLEEP_TIME",
+    "DDS_RESTART_TIME",
+    "run_control",
+]
+
 SAL_TIMEOUT = 5.0  # SAL telemetry/command timeout
 REMOTE_STARTUP_TIME = 5.0  # Time for remotes to get set up
 SUMMARY_STATE_TIME = 5.0  # Wait time for a summary state change
@@ -36,7 +46,122 @@ VALVE_SLEEP_TIME = 60.0  # Time to wait after changing the valve
 DDS_RESTART_TIME = 60.0  # Time to wait after a DDS exception
 
 
-async def run_control_loop(domain: salobj.Domain, log: logging.Logger) -> None:
+async def run_loop(
+    *,
+    log: logging.Logger,
+    m1m3ts: salobj.Remote,
+    ess: salobj.Remote,
+    oldvalveposition: float,
+    heaterdemand: list[int],
+    fandemand: list[int],
+) -> float:
+    """The core loop that regulates the M1M3 temperature."""
+
+    glycol = await m1m3ts.tel_glycolLoopTemperature.next(
+        flush=True, timeout=SAL_TIMEOUT
+    )
+    mixing = await m1m3ts.tel_mixingValve.next(flush=True, timeout=SAL_TIMEOUT)
+    fcu = await m1m3ts.tel_thermalData.next(flush=True, timeout=SAL_TIMEOUT)
+    currenttemp = (
+        glycol.insideCellTemperature1
+        + glycol.insideCellTemperature2
+        + glycol.insideCellTemperature3
+    ) / 3
+    currentvalveposition = mixing.valvePosition
+
+    fcu = await m1m3ts.tel_thermalData.next(flush=True, timeout=SAL_TIMEOUT)
+    fanspeed = fcu.fanRPM
+    fcutemp = fcu.absoluteTemperature
+
+    airtemp = await ess.tel_temperature.next(flush=True, timeout=SAL_TIMEOUT)
+    targettemp = airtemp.temperatureItem[0]
+
+    log.info(
+        f"""
+        target cell temp (above air temp): {targettemp}
+        current cell temp: {currenttemp}
+        current valve position: {currentvalveposition}
+        current fan speed: {fanspeed[50]}
+        current FCU temp: {fcutemp[50]}
+        """
+    )
+
+    # if the FCUs are off, try to turn them on
+    if fanspeed[50] > 60000:
+        log.info(f"fans off, turning them on and waiting {FAN_SLEEP_TIME} seconds...")
+        await salobj.set_summary_state(
+            m1m3ts,
+            salobj.State.STANDBY,
+            timeout=SAL_TIMEOUT,
+        )
+        await asyncio.sleep(SUMMARY_STATE_TIME)
+        await salobj.set_summary_state(
+            m1m3ts,
+            salobj.State.ENABLED,
+            timeout=SAL_TIMEOUT,
+        )
+        await asyncio.sleep(SUMMARY_STATE_TIME)
+        await m1m3ts.cmd_setEngineeringMode.set_start(
+            enableEngineeringMode=True,
+            timeout=SAL_TIMEOUT,
+        )
+        await m1m3ts.cmd_heaterFanDemand.set_start(
+            heaterPWM=heaterdemand,
+            fanRPM=fandemand,
+            timeout=SAL_TIMEOUT,
+        )
+        await asyncio.sleep(FAN_SLEEP_TIME)
+    elif fanspeed[50] < 50:
+        log.info(
+            "fans rpms too low, turning them back up and waiting {FAN_SLEEP_TIME} seconds..."
+        )
+        await salobj.set_summary_state(m1m3ts, salobj.State.STANDBY)
+        await asyncio.sleep(SUMMARY_STATE_TIME)
+        await salobj.set_summary_state(m1m3ts, salobj.State.ENABLED)
+        await asyncio.sleep(SUMMARY_STATE_TIME)
+        await m1m3ts.cmd_setEngineeringMode.set_start(
+            enableEngineeringMode=True,
+            timeout=SAL_TIMEOUT,
+        )
+        await m1m3ts.cmd_heaterFanDemand.set_start(
+            heaterPWM=heaterdemand,
+            fanRPM=fandemand,
+            timeout=SAL_TIMEOUT,
+        )
+        await asyncio.sleep(FAN_SLEEP_TIME)
+
+    if currenttemp - targettemp >= 0.05:
+        newvalveposition = min(10.0, oldvalveposition + 5.0)
+        log.info(f"temp high, adjusting mixing valve to: {newvalveposition}")
+        await m1m3ts.cmd_setMixingValve.set_start(
+            mixingValveTarget=newvalveposition,
+            timeout=SAL_TIMEOUT,
+        )
+        oldvalveposition = newvalveposition
+        log.debug(f"waiting {VALVE_SLEEP_TIME} seconds...")
+        await asyncio.sleep(VALVE_SLEEP_TIME)
+    elif currenttemp - targettemp <= -0.05:
+        newvalveposition = max(0.0, oldvalveposition - 5.0)
+        log.info(f"temp low, adjusting mixing valve to: {newvalveposition}")
+        await m1m3ts.cmd_setMixingValve.set_start(
+            mixingValveTarget=newvalveposition, timeout=5
+        )
+        oldvalveposition = newvalveposition
+        log.debug(f"waiting {VALVE_SLEEP_TIME} seconds...")
+        await asyncio.sleep(VALVE_SLEEP_TIME)
+    else:
+        log.debug(
+            f"""
+            doing nothing, valve position: {currentvalveposition}
+            waiting {VALVE_SLEEP_TIME} seconds for update...
+            """
+        )
+        await asyncio.sleep(VALVE_SLEEP_TIME)
+
+    return oldvalveposition
+
+
+async def run_control(domain: salobj.Domain, log: logging.Logger) -> None:
     """Runs the control loop for the fans and the heaters.
 
     Parameters
@@ -63,110 +188,14 @@ async def run_control_loop(domain: salobj.Domain, log: logging.Logger) -> None:
 
         while True:
             try:
-                glycol = await m1m3ts.tel_glycolLoopTemperature.next(
-                    flush=True, timeout=SAL_TIMEOUT
+                oldvalveposition = await run_loop(
+                    log=log,
+                    m1m3ts=m1m3ts,
+                    ess=ess,
+                    oldvalveposition=oldvalveposition,
+                    heaterdemand=heaterdemand,
+                    fandemand=fandemand,
                 )
-                mixing = await m1m3ts.tel_mixingValve.next(
-                    flush=True, timeout=SAL_TIMEOUT
-                )
-                fcu = await m1m3ts.tel_thermalData.next(flush=True, timeout=SAL_TIMEOUT)
-                currenttemp = (
-                    glycol.insideCellTemperature1
-                    + glycol.insideCellTemperature2
-                    + glycol.insideCellTemperature3
-                ) / 3
-                currentvalveposition = mixing.valvePosition
-
-                fcu = await m1m3ts.tel_thermalData.next(flush=True, timeout=SAL_TIMEOUT)
-                fanspeed = fcu.fanRPM
-                fcutemp = fcu.absoluteTemperature
-
-                airtemp = await ess.tel_temperature.next(
-                    flush=True, timeout=SAL_TIMEOUT
-                )
-                targettemp = airtemp.temperatureItem[0]
-
-                log.info(
-                    f"""
-                    target cell temp (above air temp): {targettemp}
-                    current cell temp: {currenttemp}
-                    current valve position: {currentvalveposition}
-                    current fan speed: {fanspeed[50]}
-                    current FCU temp: {fcutemp[50]}
-                    """
-                )
-
-                # if the FCUs are off, try to turn them on
-                if fanspeed[50] > 60000:
-                    log.info(
-                        f"fans off, turning them on and waiting {FAN_SLEEP_TIME} seconds..."
-                    )
-                    await salobj.set_summary_state(
-                        m1m3ts,
-                        salobj.State.STANDBY,
-                        timeout=SAL_TIMEOUT,
-                    )
-                    await asyncio.sleep(SUMMARY_STATE_TIME)
-                    await salobj.set_summary_state(
-                        m1m3ts,
-                        salobj.State.ENABLED,
-                        timeout=SAL_TIMEOUT,
-                    )
-                    await asyncio.sleep(SUMMARY_STATE_TIME)
-                    await m1m3ts.cmd_setEngineeringMode.set_start(
-                        enableEngineeringMode=True,
-                        timeout=SAL_TIMEOUT,
-                    )
-                    await m1m3ts.cmd_heaterFanDemand.set_start(
-                        heaterPWM=heaterdemand,
-                        fanRPM=fandemand,
-                        timeout=SAL_TIMEOUT,
-                    )
-                    await asyncio.sleep(FAN_SLEEP_TIME)
-                elif fanspeed[50] < 50:
-                    log.info(
-                        "fans rpms too low, turning them back up and waiting {FAN_SLEEP_TIME} seconds..."
-                    )
-                    await salobj.set_summary_state(m1m3ts, salobj.State.STANDBY)
-                    await asyncio.sleep(SUMMARY_STATE_TIME)
-                    await salobj.set_summary_state(m1m3ts, salobj.State.ENABLED)
-                    await asyncio.sleep(SUMMARY_STATE_TIME)
-                    await m1m3ts.cmd_setEngineeringMode.set_start(
-                        enableEngineeringMode=True,
-                        timeout=SAL_TIMEOUT,
-                    )
-                    await m1m3ts.cmd_heaterFanDemand.set_start(
-                        heaterPWM=heaterdemand,
-                        fanRPM=fandemand,
-                        timeout=SAL_TIMEOUT,
-                    )
-                    await asyncio.sleep(FAN_SLEEP_TIME)
-
-                if currenttemp - targettemp >= 0.05:
-                    newvalveposition = min(10.0, oldvalveposition + 5.0)
-                    log.info(
-                        f"temp high, adjusting mixing valve to: {newvalveposition}"
-                    )
-                    await m1m3ts.cmd_setMixingValve.set_start(
-                        mixingValveTarget=newvalveposition,
-                        timeout=SAL_TIMEOUT,
-                    )
-                    oldvalveposition = newvalveposition
-                    log.debug(f"waiting {VALVE_SLEEP_TIME} seconds...")
-                    await asyncio.sleep(VALVE_SLEEP_TIME)
-                elif currenttemp - targettemp <= -0.05:
-                    newvalveposition = max(0.0, oldvalveposition - 5.0)
-                    log.info(f"temp low, adjusting mixing valve to: {newvalveposition}")
-                    await m1m3ts.cmd_setMixingValve.set_start(
-                        mixingValveTarget=newvalveposition, timeout=5
-                    )
-                    oldvalveposition = newvalveposition
-                    log.debug(f"waiting {VALVE_SLEEP_TIME} seconds...")
-                    await asyncio.sleep(VALVE_SLEEP_TIME)
-                else:
-                    log.debug(f"doing nothing, valve position: {currentvalveposition}")
-                    log.debug(f"waiting {VALVE_SLEEP_TIME} seconds for update...")
-                    await asyncio.sleep(VALVE_SLEEP_TIME)
 
             except DDSException:
                 log.exception("DDS exception in main loop. Trying again.")

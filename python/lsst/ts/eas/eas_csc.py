@@ -120,7 +120,7 @@ class EasCsc(salobj.ConfigurableCsc):
                     assert self.m1m3_thermal_task is not None  # Get it together mypy
                     self.m1m3_thermal_task.cancel()
                 self.m1m3_thermal_task = asyncio.create_task(
-                    m1m3_thermal.run_control_loop(self.domain, self.log)
+                    m1m3_thermal.run_control(self.domain, self.log)
                 )
                 await self.connect()
         else:
