@@ -11,6 +11,12 @@ config.log
 .eggs/
 .githooks/
 
+.flake8
+.isort.cfg
+.mypy.ini
+.clang-format
+.ruff.toml
+
 # Built by sconsUtils
 version.py
 
