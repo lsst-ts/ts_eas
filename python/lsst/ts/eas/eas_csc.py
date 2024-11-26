@@ -87,8 +87,12 @@ class EasCsc(salobj.ConfigurableCsc):
         self.heaterdemand: list[int] = [0] * 96
         self.fandemand: list[int] = [30] * 96
 
-        self.m1m3ts: salobj.Remote = salobj.Remote(self.domain, "MTM1M3TS")
-        self.ess: salobj.Remote = salobj.Remote(self.domain, "ESS", index=112)
+        self.m1m3ts: salobj.Remote | None = None
+        self.ess: salobj.Remote | None = None
+
+        if simulation_mode == 0:
+            self.m1m3ts = salobj.Remote(self.domain, "MTM1M3TS")
+            self.ess = salobj.Remote(self.domain, "ESS", index=112)
 
         self.oldvalveposition: float = float("nan")
 
@@ -152,6 +156,8 @@ class EasCsc(salobj.ConfigurableCsc):
         """The core loop that regulates the M1M3 temperature."""
 
         assert not isnan(self.oldvalveposition)
+        assert self.m1m3ts is not None
+        assert self.ess is not None
 
         glycol = await self.m1m3ts.tel_glycolLoopTemperature.next(
             flush=True, timeout=SAL_TIMEOUT
@@ -267,6 +273,12 @@ class EasCsc(salobj.ConfigurableCsc):
         log: logging.Logger
             A logger for log messages.
         """
+
+        if self.simulation_mode != 0:
+            return
+
+        assert self.m1m3ts is not None
+        assert self.ess is not None
 
         try:
 
