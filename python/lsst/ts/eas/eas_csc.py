@@ -90,10 +90,6 @@ class EasCsc(salobj.ConfigurableCsc):
         self.m1m3ts: salobj.Remote | None = None
         self.ess: salobj.Remote | None = None
 
-        if simulation_mode == 0:
-            self.m1m3ts = salobj.Remote(self.domain, "MTM1M3TS")
-            self.ess = salobj.Remote(self.domain, "ESS", index=112)
-
         self.oldvalveposition: float = float("nan")
 
         self.log.info("__init__")
@@ -277,8 +273,8 @@ class EasCsc(salobj.ConfigurableCsc):
         if self.simulation_mode != 0:
             return
 
-        assert self.m1m3ts is not None
-        assert self.ess is not None
+        self.m1m3ts = salobj.Remote(self.domain, "MTM1M3TS")
+        self.ess = salobj.Remote(self.domain, "ESS", index=112)
 
         try:
 
@@ -297,6 +293,10 @@ class EasCsc(salobj.ConfigurableCsc):
         except asyncio.CancelledError:
             self.log.info("M1M3 thermal control loop cancelled.")
             raise
+
+        finally:
+            self.m1m3ts.close()
+            self.ess.close()
 
     @staticmethod
     def get_config_pkg() -> str:
