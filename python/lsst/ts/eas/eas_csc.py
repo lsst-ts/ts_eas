@@ -22,6 +22,7 @@
 __all__ = ["EasCsc", "run_eas"]
 
 import asyncio
+import traceback
 import typing
 from math import isnan
 from types import SimpleNamespace
@@ -36,6 +37,8 @@ REMOTE_STARTUP_TIME = 5.0  # Time for remotes to get set up
 SUMMARY_STATE_TIME = 5.0  # Wait time for a summary state change
 FAN_SLEEP_TIME = 30.0  # Time to wait after changing the fans
 VALVE_SLEEP_TIME = 60.0  # Time to wait after changing the valve
+
+THERMAL_LOOP_ERROR = 100
 
 
 def run_eas() -> None:
@@ -259,22 +262,16 @@ class EasCsc(salobj.ConfigurableCsc):
             await asyncio.sleep(VALVE_SLEEP_TIME)
 
     async def run_control(self) -> None:
-        """Runs the control loop for the fans and the heaters.
-
-        Parameters
-        ----------
-        domain: salobj.Domain
-            The SALObj domain instance to use.
-
-        log: logging.Logger
-            A logger for log messages.
-        """
+        """Runs the control loop for the fans and the heaters."""
 
         if self.simulation_mode != 0:
             return
 
         self.m1m3ts = salobj.Remote(self.domain, "MTM1M3TS")
         self.ess = salobj.Remote(self.domain, "ESS", index=112)
+
+        await self.m1m3ts.start_task
+        await self.ess.start_task
 
         try:
 
@@ -288,11 +285,20 @@ class EasCsc(salobj.ConfigurableCsc):
             self.oldvalveposition = currentvalveposition
 
             while True:
-                await self.run_loop()
+                try:
+                    await self.run_loop()
 
-        except asyncio.CancelledError:
-            self.log.info("M1M3 thermal control loop cancelled.")
-            raise
+                except asyncio.CancelledError:
+                    self.log.info("M1M3 thermal control loop cancelled.")
+                    raise
+                except Exception:
+                    self.log.exception("Error running the thermal loop.")
+                    await self.fault(
+                        code=THERMAL_LOOP_ERROR,
+                        report="Error running thermal loop.",
+                        traceback=traceback.format_exc(),
+                    )
+                    break
 
         finally:
             self.m1m3ts.close()
