@@ -264,9 +264,6 @@ class EasCsc(salobj.ConfigurableCsc):
     async def run_control(self) -> None:
         """Runs the control loop for the fans and the heaters."""
 
-        if self.simulation_mode != 0:
-            return
-
         self.m1m3ts = salobj.Remote(self.domain, "MTM1M3TS")
         self.ess = salobj.Remote(self.domain, "ESS", index=112)
 
@@ -301,8 +298,8 @@ class EasCsc(salobj.ConfigurableCsc):
                     break
 
         finally:
-            self.m1m3ts.close()
-            self.ess.close()
+            await self.m1m3ts.close()
+            await self.ess.close()
 
     @staticmethod
     def get_config_pkg() -> str:
