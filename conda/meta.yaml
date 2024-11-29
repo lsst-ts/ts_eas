@@ -15,14 +15,13 @@ build:
 test:
   requires:
     - ts-conda-build =0.4
-    - ts-idl {{ idl_version }}
+    - ts-xml {{ xml_version }}
     - ts-salobj {{ salobj_version }}
     - ts-dds
   source_files:
     - python
     - bin
     - tests
-    - setup.cfg
     - pyproject.toml
   commands:
     - py.test
@@ -41,5 +40,5 @@ requirements:
     - python {{ python }}
     - setuptools
     - setuptools_scm
-    - ts-idl {{ idl_version }}
+    - ts-xml {{ xml_version }}
     - ts-salobj {{ salobj_version }}
