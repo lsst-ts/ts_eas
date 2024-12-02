@@ -83,6 +83,8 @@ class EasCsc(salobj.ConfigurableCsc):
             override=override,
         )
         self.eas = None
+        self.m1m3ts = salobj.Remote(self.domain, "MTM1M3TS")
+        self.ess = salobj.Remote(self.domain, "ESS", index=112)
 
         # Variables for the m1m3ts loop
         self.m1m3_thermal_task: asyncio.Task | None = None
@@ -267,42 +269,35 @@ class EasCsc(salobj.ConfigurableCsc):
         if self.simulation_mode != 0:
             return
 
-        self.m1m3ts = salobj.Remote(self.domain, "MTM1M3TS")
-        self.ess = salobj.Remote(self.domain, "ESS", index=112)
-
-        await self.m1m3ts.start_task
-        await self.ess.start_task
-
         try:
-
-            # Wait for remotes to get set up...
-            await asyncio.sleep(REMOTE_STARTUP_TIME)
-
             mixing = await self.m1m3ts.tel_mixingValve.next(
-                flush=True, timeout=SAL_TIMEOUT
-            )
-            currentvalveposition = mixing.valvePosition
-            self.oldvalveposition = currentvalveposition
-
-            while True:
-                try:
-                    await self.run_loop()
-
-                except asyncio.CancelledError:
-                    self.log.info("M1M3 thermal control loop cancelled.")
-                    raise
-                except Exception:
-                    self.log.exception("Error running the thermal loop.")
-                    await self.fault(
-                        code=THERMAL_LOOP_ERROR,
-                        report="Error running thermal loop.",
-                        traceback=traceback.format_exc(),
+            flush=True, timeout=SAL_TIMEOUT
+        )
+        except Exception:
+            await self.fault(
+                    code=THERMAL_LOOP_ERROR,
+                    report="Failed to get mixing valve telemetry from M1M3TS.",
+                    traceback=traceback.format_exc()
                     )
-                    break
 
-        finally:
-            self.m1m3ts.close()
-            self.ess.close()
+        currentvalveposition = mixing.valvePosition
+        self.oldvalveposition = currentvalveposition
+
+        while True:
+            try:
+                await self.run_loop()
+
+            except asyncio.CancelledError:
+                self.log.info("M1M3 thermal control loop cancelled.")
+                raise
+            except Exception:
+                self.log.exception("Error running the thermal loop.")
+                await self.fault(
+                    code=THERMAL_LOOP_ERROR,
+                    report="Error running thermal loop.",
+                    traceback=traceback.format_exc(),
+                )
+                break
 
     @staticmethod
     def get_config_pkg() -> str:
