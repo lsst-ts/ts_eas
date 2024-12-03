@@ -33,7 +33,6 @@ from . import __version__
 from .config_schema import CONFIG_SCHEMA
 
 SAL_TIMEOUT = 5.0  # SAL telemetry/command timeout
-REMOTE_STARTUP_TIME = 5.0  # Time for remotes to get set up
 SUMMARY_STATE_TIME = 5.0  # Wait time for a summary state change
 FAN_SLEEP_TIME = 30.0  # Time to wait after changing the fans
 VALVE_SLEEP_TIME = 60.0  # Time to wait after changing the valve
@@ -92,10 +91,10 @@ class EasCsc(salobj.ConfigurableCsc):
             asyncio.Event()
         )  # An event that is set when the CSC is enabled.
 
-        self.heaterdemand: list[int] = [0] * 96
-        self.fandemand: list[int] = [30] * 96
+        self.heater_demand: list[int] = [0] * 96
+        self.fan_demand: list[int] = [30] * 96
 
-        self.oldvalveposition: float = float("nan")
+        self.old_valve_position: float = float("nan")
 
         self.log.info("__init__")
 
@@ -167,39 +166,39 @@ class EasCsc(salobj.ConfigurableCsc):
 
         await self.enabled_event.wait()
 
-        assert not isnan(self.oldvalveposition)
+        assert not isnan(self.old_valve_position)
 
         glycol = await self.m1m3ts.tel_glycolLoopTemperature.next(
             flush=True, timeout=SAL_TIMEOUT
         )
         mixing = await self.m1m3ts.tel_mixingValve.next(flush=True, timeout=SAL_TIMEOUT)
         fcu = await self.m1m3ts.tel_thermalData.next(flush=True, timeout=SAL_TIMEOUT)
-        currenttemp = (
+        current_temp = (
             glycol.insideCellTemperature1
             + glycol.insideCellTemperature2
             + glycol.insideCellTemperature3
         ) / 3
-        currentvalveposition = mixing.valvePosition
+        current_valve_position = mixing.valvePosition
 
         fcu = await self.m1m3ts.tel_thermalData.next(flush=True, timeout=SAL_TIMEOUT)
-        fanspeed = fcu.fanRPM
-        fcutemp = fcu.absoluteTemperature
+        fan_speed = fcu.fanRPM
+        fcu_temp = fcu.absoluteTemperature
 
-        airtemp = await self.ess.tel_temperature.next(flush=True, timeout=SAL_TIMEOUT)
-        targettemp = airtemp.temperatureItem[0]
+        air_temp = await self.ess.tel_temperature.next(flush=True, timeout=SAL_TIMEOUT)
+        target_temp = air_temp.temperatureItem[0]
 
         self.log.info(
             f"""
-            target cell temp (above air temp): {targettemp}
-            current cell temp: {currenttemp}
-            current valve position: {currentvalveposition}
-            current fan speed: {fanspeed[50]}
-            current FCU temp: {fcutemp[50]}
+            target cell temp (above air temp): {target_temp}
+            current cell temp: {current_temp}
+            current valve position: {current_valve_position}
+            current fan speed: {fan_speed[50]}
+            current FCU temp: {fcu_temp[50]}
             """
         )
 
         # if the FCUs are off, try to turn them on
-        if fanspeed[50] > 60000:
+        if fan_speed[50] > 60000:
             self.log.info(
                 f"fans off, turning them on and waiting {FAN_SLEEP_TIME} seconds..."
             )
@@ -219,13 +218,13 @@ class EasCsc(salobj.ConfigurableCsc):
                 enableEngineeringMode=True,
                 timeout=SAL_TIMEOUT,
             )
-            await self.m1m3ts.cmd_heaterFanDemand.set_start(
-                heaterPWM=self.heaterdemand,
-                fanRPM=self.fandemand,
+            await self.m1m3ts.cmd_heaterfan_demand.set_start(
+                heaterPWM=self.heater_demand,
+                fanRPM=self.fan_demand,
                 timeout=SAL_TIMEOUT,
             )
             await asyncio.sleep(FAN_SLEEP_TIME)
-        elif fanspeed[50] < 50:
+        elif fan_speed[50] < 50:
             self.log.info(
                 "fans rpms too low, turning them back up and waiting {FAN_SLEEP_TIME} seconds..."
             )
@@ -237,36 +236,36 @@ class EasCsc(salobj.ConfigurableCsc):
                 enableEngineeringMode=True,
                 timeout=SAL_TIMEOUT,
             )
-            await self.m1m3ts.cmd_heaterFanDemand.set_start(
-                heaterPWM=self.heaterdemand,
-                fanRPM=self.fandemand,
+            await self.m1m3ts.cmd_heaterfan_demand.set_start(
+                heaterPWM=self.heater_demand,
+                fanRPM=self.fan_demand,
                 timeout=SAL_TIMEOUT,
             )
             await asyncio.sleep(FAN_SLEEP_TIME)
 
-        if currenttemp - targettemp >= 0.05:
-            newvalveposition = min(10.0, self.oldvalveposition + 5.0)
-            self.log.info(f"temp high, adjusting mixing valve to: {newvalveposition}")
+        if current_temp - target_temp >= 0.05:
+            new_valve_position = min(10.0, self.old_valve_position + 5.0)
+            self.log.info(f"temp high, adjusting mixing valve to: {new_valve_position}")
             await self.m1m3ts.cmd_setMixingValve.set_start(
-                mixingValveTarget=newvalveposition,
+                mixingValveTarget=new_valve_position,
                 timeout=SAL_TIMEOUT,
             )
-            self.oldvalveposition = newvalveposition
+            self.old_valve_position = new_valve_position
             self.log.debug(f"waiting {VALVE_SLEEP_TIME} seconds...")
             await asyncio.sleep(VALVE_SLEEP_TIME)
-        elif currenttemp - targettemp <= -0.05:
-            newvalveposition = max(0.0, self.oldvalveposition - 5.0)
-            self.log.info(f"temp low, adjusting mixing valve to: {newvalveposition}")
+        elif current_temp - target_temp <= -0.05:
+            new_valve_position = max(0.0, self.old_valve_position - 5.0)
+            self.log.info(f"temp low, adjusting mixing valve to: {new_valve_position}")
             await self.m1m3ts.cmd_setMixingValve.set_start(
-                mixingValveTarget=newvalveposition, timeout=5
+                mixingValveTarget=new_valve_position, timeout=5
             )
-            self.oldvalveposition = newvalveposition
+            self.old_valve_position = new_valve_position
             self.log.debug(f"waiting {VALVE_SLEEP_TIME} seconds...")
             await asyncio.sleep(VALVE_SLEEP_TIME)
         else:
             self.log.debug(
                 f"""
-                doing nothing, valve position: {currentvalveposition}
+                doing nothing, valve position: {current_valve_position}
                 waiting {VALVE_SLEEP_TIME} seconds for update...
                 """
             )
@@ -289,8 +288,8 @@ class EasCsc(salobj.ConfigurableCsc):
                 traceback=traceback.format_exc(),
             )
 
-        currentvalveposition = mixing.valvePosition
-        self.oldvalveposition = currentvalveposition
+        current_valve_position = mixing.valvePosition
+        self.old_valve_position = current_valve_position
 
         while True:
             try:
