@@ -88,6 +88,9 @@ class EasCsc(salobj.ConfigurableCsc):
 
         # Variables for the m1m3ts loop
         self.m1m3_thermal_task = utils.make_done_future()
+        self.enabled_event = (
+            asyncio.Event()
+        )  # An event that is set when the CSC is enabled.
 
         self.heaterdemand: list[int] = [0] * 96
         self.fandemand: list[int] = [30] * 96
@@ -129,6 +132,12 @@ class EasCsc(salobj.ConfigurableCsc):
         disconnect to the EAS CSC (or the mock client) when needed.
         """
         self.log.info(f"handle_summary_state {salobj.State(self.summary_state).name}")
+
+        if self.summary_state == salobj.State.ENABLED:
+            self.enabled_event.set()
+        else:
+            self.enabled_event.clear()
+
         if self.disabled_or_enabled:
             if self.m1m3_thermal_task.done():
                 self.m1m3_thermal_task = asyncio.create_task(self.run_control())
@@ -155,6 +164,8 @@ class EasCsc(salobj.ConfigurableCsc):
 
     async def run_loop(self) -> None:
         """The core loop that regulates the M1M3 temperature."""
+
+        await self.enabled_event.wait()
 
         assert not isnan(self.oldvalveposition)
 
