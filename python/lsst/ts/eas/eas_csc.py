@@ -27,7 +27,7 @@ import typing
 from math import isnan
 from types import SimpleNamespace
 
-from lsst.ts import salobj
+from lsst.ts import salobj, utils
 
 from . import __version__
 from .config_schema import CONFIG_SCHEMA
@@ -87,7 +87,7 @@ class EasCsc(salobj.ConfigurableCsc):
         self.ess = salobj.Remote(self.domain, "ESS", index=112)
 
         # Variables for the m1m3ts loop
-        self.m1m3_thermal_task: asyncio.Task | None = None
+        self.m1m3_thermal_task = utils.make_done_future()
 
         self.heaterdemand: list[int] = [0] * 96
         self.fandemand: list[int] = [30] * 96
@@ -130,16 +130,19 @@ class EasCsc(salobj.ConfigurableCsc):
         """
         self.log.info(f"handle_summary_state {salobj.State(self.summary_state).name}")
         if self.disabled_or_enabled:
-            if self.m1m3_thermal_task is not None:
-                self.m1m3_thermal_task.cancel()
-            self.m1m3_thermal_task = asyncio.create_task(self.run_control())
+            if self.m1m3_thermal_task.done():
+                self.m1m3_thermal_task = asyncio.create_task(self.run_control())
 
             if not self.connected:
                 await self.connect()
         else:
-            if self.m1m3_thermal_task is not None:
+            if not self.m1m3_thermal_task.done():
                 self.m1m3_thermal_task.cancel()
-                self.m1m3_thermal_task = None
+                try:
+                    await self.m1m3_thermal_task
+                except asyncio.CancelledError:
+                    pass
+
             await self.disconnect()
 
     async def configure(self, config: SimpleNamespace) -> None:
