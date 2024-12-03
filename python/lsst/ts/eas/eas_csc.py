@@ -93,6 +93,7 @@ class EasCsc(salobj.ConfigurableCsc):
 
         self.heater_demand: list[int] = [0] * 96
         self.fan_demand: list[int] = [30] * 96
+        self.temperature_target_offset = -1.0
 
         self.old_valve_position: float = float("nan")
 
@@ -185,7 +186,7 @@ class EasCsc(salobj.ConfigurableCsc):
         fcu_temp = fcu.absoluteTemperature
 
         air_temp = await self.ess.tel_temperature.next(flush=True, timeout=SAL_TIMEOUT)
-        target_temp = air_temp.temperatureItem[0]
+        target_temp = air_temp.temperatureItem[0] + self.temperature_target_offset
 
         self.log.info(
             f"""
