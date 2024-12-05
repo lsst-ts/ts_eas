@@ -146,20 +146,6 @@ class EasCsc(salobj.ConfigurableCsc):
         else:
             self.enabled_event.clear()
 
-        if self.summary_state == salobj.State.DISABLED:
-            try:
-                async with self.control_loop_lock:
-                    await asyncio.wait(
-                        [asyncio.create_task(self.m1m3_stop())],
-                        timeout=M1M3TS_STOP_TIMEOUT,
-                    )
-            except TimeoutError:
-                self.fault(
-                    code=M1M3TS_STOP_TIMEOUT,
-                    report="Failed to stop fans/valve.",
-                    traceback=traceback.format_exc(),
-                )
-
         if self.disabled_or_enabled:
             if not self.connected:
                 await self.connect()
@@ -172,6 +158,34 @@ class EasCsc(salobj.ConfigurableCsc):
                     pass
 
             await self.disconnect()
+
+    async def end_disable(self, id_data: salobj.BaseDdsDataType) -> None:
+        """End do_disable; called after state changes but before command
+        acknowledged.
+
+        This method acknowledges the do_disable command and stops the
+        M1M3TS control loop.
+
+        Parameters
+        ----------
+        id_data: `CommandIdData`
+            Command ID and data
+        """
+
+        await self.cmd_disable.ack_in_progress(id_data, timeout=SAL_TIMEOUT)
+        try:
+            async with self.control_loop_lock:
+                await asyncio.wait(
+                    [asyncio.create_task(self.m1m3_stop())],
+                    timeout=M1M3TS_STOP_TIMEOUT,
+                )
+        except TimeoutError:
+            self.fault(
+                code=M1M3TS_STOP_TIMEOUT,
+                report="Failed to stop fans/valve.",
+                traceback=traceback.format_exc(),
+            )
+        await super().end_enable(id_data)
 
     async def configure(self, config: SimpleNamespace) -> None:
         self.config = config
