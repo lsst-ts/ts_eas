@@ -219,7 +219,7 @@ class EasCsc(salobj.ConfigurableCsc):
                 enableEngineeringMode=True,
                 timeout=SAL_TIMEOUT,
             )
-            await self.m1m3ts.cmd_heaterfan_demand.set_start(
+            await self.m1m3ts.cmd_heaterFanDemand.set_start(
                 heaterPWM=self.heater_demand,
                 fanRPM=self.fan_demand,
                 timeout=SAL_TIMEOUT,
@@ -237,7 +237,7 @@ class EasCsc(salobj.ConfigurableCsc):
                 enableEngineeringMode=True,
                 timeout=SAL_TIMEOUT,
             )
-            await self.m1m3ts.cmd_heaterfan_demand.set_start(
+            await self.m1m3ts.cmd_heaterFanDemand.set_start(
                 heaterPWM=self.heater_demand,
                 fanRPM=self.fan_demand,
                 timeout=SAL_TIMEOUT,
