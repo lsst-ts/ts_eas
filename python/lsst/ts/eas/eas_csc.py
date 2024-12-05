@@ -33,6 +33,8 @@ from . import __version__
 from .config_schema import CONFIG_SCHEMA
 
 SAL_TIMEOUT = 5.0  # SAL telemetry/command timeout
+M1M3TS_STOP_TIMEOUT = 30.0  # Time to wait for fans and valve to stop
+STOP_LOOP_TIME = 1.0  # How often to check fan and valves when stopping
 SUMMARY_STATE_TIME = 5.0  # Wait time for a summary state change
 FAN_SLEEP_TIME = 30.0  # Time to wait after changing the fans
 VALVE_SLEEP_TIME = 60.0  # Time to wait after changing the valve
@@ -258,7 +260,7 @@ class EasCsc(salobj.ConfigurableCsc):
             new_valve_position = max(0.0, self.old_valve_position - 5.0)
             self.log.info(f"temp low, adjusting mixing valve to: {new_valve_position}")
             await self.m1m3ts.cmd_setMixingValve.set_start(
-                mixingValveTarget=new_valve_position, timeout=5
+                mixingValveTarget=new_valve_position, timeout=SAL_TIMEOUT
             )
             self.old_valve_position = new_valve_position
             self.log.debug(f"waiting {VALVE_SLEEP_TIME} seconds...")
@@ -307,6 +309,67 @@ class EasCsc(salobj.ConfigurableCsc):
                     traceback=traceback.format_exc(),
                 )
                 break
+
+    async def m1m3_stop(self) -> None:
+        """Ends the M1M3 control loop.
+
+        Commands the mixing valve to close and the fans to stop.
+        Waits for telemetry to report that the mixing valve
+        has closed and the fans have stopped.
+        """
+
+        await self.m1m3ts.cmd_setMixingValve.set_start(
+            mixingValveTarget=0, timeout=SAL_TIMEOUT
+        )
+        await self.m1m3ts.cmd_heaterFanDemand.set_start(
+            heaterPWM=[0] * 96,
+            fanRPM=[0] * 96,
+            timeout=SAL_TIMEOUT,
+        )
+        await asyncio.wait(
+            [
+                asyncio.create_task(self.mixing_valve_wait()),
+                asyncio.create_task(self.fan_wait()),
+            ],
+            timeout=M1M3TS_STOP_TIMEOUT,
+        )
+
+    async def mixing_valve_wait(self) -> None:
+        """Returns when the mixing valve reports a position of zero.
+
+        If an error occurs, the CSC is set to fault.
+        """
+
+        try:
+            mixing = 100
+            while mixing != 0:
+                mixing = await self.m1m3ts.tel_mixingValve.next(
+                    flush=True, timeout=SAL_TIMEOUT
+                )
+                await asyncio.sleep(STOP_LOOP_TIME)
+        except Exception:
+            await self.fault(
+                code=THERMAL_LOOP_ERROR,
+                report="Failed to get mixing valve telemetry from M1M3TS.",
+                traceback=traceback.format_exc(),
+            )
+
+    async def fan_wait(self) -> None:
+        """Returns when the fan RPM reports zero for all fans.
+
+        If an error occurs, the CSC is set to fault.
+        """
+        try:
+            fan_rpm = [1] * 96
+            while sum(fan_rpm) > 0:
+                fan_rpm = self.m1m3.tel_fanRPM.next(flush=True, timeout=SAL_TIMEOUT)
+                await asyncio.sleep(STOP_LOOP_TIME)
+        except Exception:
+            await self.fault(
+                code=THERMAL_LOOP_ERROR,
+                report="Failed to get mixing valve telemetry from M1M3TS.",
+                traceback=traceback.format_exc(),
+            )
 
     @staticmethod
     def get_config_pkg() -> str:
