@@ -138,7 +138,7 @@ class EasCsc(salobj.ConfigurableCsc):
         self.log.info(f"handle_summary_state {salobj.State(self.summary_state).name}")
 
         if self.disabled_or_enabled:
-            if self.m1m3_thermal_task.done():
+            if self.m1m3_thermal_task.done() and self.simulation_mode == 0:
                 self.m1m3_thermal_task = asyncio.create_task(self.run_control())
 
         if self.summary_state == salobj.State.ENABLED:
@@ -349,6 +349,9 @@ class EasCsc(salobj.ConfigurableCsc):
         Waits for telemetry to report that the mixing valve
         has closed and the fans have stopped.
         """
+
+        if self.simulation_mode != 0:
+            return
 
         try:
             await self.m1m3ts.cmd_setMixingValve.set_start(
