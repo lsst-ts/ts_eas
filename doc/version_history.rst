@@ -6,6 +6,11 @@
 Version History
 ###############
 
+v0.6.1
+======
+
+* Implemented fans and valve off on CSC disable.
+
 v0.6.0
 ======
 
