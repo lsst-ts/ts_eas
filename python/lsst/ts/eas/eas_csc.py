@@ -138,18 +138,16 @@ class EasCsc(salobj.ConfigurableCsc):
         self.log.info(f"handle_summary_state {salobj.State(self.summary_state).name}")
 
         if self.disabled_or_enabled:
+            # Start the thermal task if not already started
             if self.m1m3_thermal_task.done() and self.simulation_mode == 0:
                 self.m1m3_thermal_task = asyncio.create_task(self.run_control())
 
-        if self.summary_state == salobj.State.ENABLED:
-            self.enabled_event.set()
-        else:
-            self.enabled_event.clear()
-
-        if self.disabled_or_enabled:
+            # Connect if not already connected
             if not self.connected:
                 await self.connect()
         else:
+
+            # Cancel the thermal task
             if not self.m1m3_thermal_task.done():
                 self.m1m3_thermal_task.cancel()
                 try:
@@ -157,7 +155,14 @@ class EasCsc(salobj.ConfigurableCsc):
                 except asyncio.CancelledError:
                     pass
 
+            # Disconnect
             await self.disconnect()
+
+        # Set the state of the enabled event
+        if self.summary_state == salobj.State.ENABLED:
+            self.enabled_event.set()
+        else:
+            self.enabled_event.clear()
 
     async def end_disable(self, id_data: salobj.BaseDdsDataType) -> None:
         """End do_disable; called after state changes but before command
