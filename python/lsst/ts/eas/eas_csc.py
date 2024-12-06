@@ -33,7 +33,7 @@ from . import __version__
 from .config_schema import CONFIG_SCHEMA
 
 SAL_TIMEOUT = 5.0  # SAL telemetry/command timeout
-M1M3TS_STOP_TIMEOUT = 30.0  # Time to wait for fans and valve to stop
+M1M3TS_STOP_TIMEOUT = 120.0  # Time to wait for fans to stop and valve to close
 STOP_LOOP_TIME = 1.0  # How often to check fan and valves when stopping
 SUMMARY_STATE_TIME = 5.0  # Wait time for a summary state change
 FAN_SLEEP_TIME = 30.0  # Time to wait after changing the fans
@@ -175,13 +175,13 @@ class EasCsc(salobj.ConfigurableCsc):
         await self.cmd_disable.ack_in_progress(id_data, timeout=SAL_TIMEOUT)
         try:
             async with self.control_loop_lock:
-                await asyncio.wait(
-                    [asyncio.create_task(self.m1m3_stop())],
+                await asyncio.wait_for(
+                    self.m1m3_stop(),
                     timeout=M1M3TS_STOP_TIMEOUT,
                 )
         except TimeoutError:
-            self.fault(
-                code=M1M3TS_STOP_TIMEOUT,
+            await self.fault(
+                code=THERMAL_SHUTDOWN_ERROR,
                 report="Failed to stop fans/valve.",
                 traceback=traceback.format_exc(),
             )
