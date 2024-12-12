@@ -358,7 +358,7 @@ class EasCsc(salobj.ConfigurableCsc):
         try:
             await salobj.set_summary_state(
                 self.m1m3ts,
-                salobj.State.ENABLED,
+                salobj.State.DISABLED,
                 timeout=SAL_TIMEOUT,
             )
         except Exception:
