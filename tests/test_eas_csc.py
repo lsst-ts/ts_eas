@@ -19,6 +19,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+import contextlib
 import logging
 import typing
 import unittest
@@ -31,6 +32,22 @@ logging.basicConfig(
 
 
 class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
+    @contextlib.asynccontextmanager
+    async def mock_mtm1m3ts(self) -> typing.AsyncGenerator[None, None]:
+        try:
+            async with salobj.Controller("MTM1M3TS") as self.mtm1m3ts:
+                log = logging.getLogger("root")
+                log.error("Started MTM1M3TS.")
+                await self.mtm1m3ts.evt_summaryState.set_write(
+                    summaryState=salobj.State.ENABLED
+                )
+                await self.mtm1m3ts.tel_mixingValve.set_write(
+                    rawValvePosition=0, valvePosition=0
+                )
+                yield
+        except Exception as exception:
+            raise exception
+
     def basic_make_csc(
         self,
         initial_state: salobj.State,
@@ -43,6 +60,15 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             config_dir=config_dir,
             simulation_mode=simulation_mode,
         )
+
+    async def test_standard_state_transitions(self) -> None:
+        async with self.make_csc(
+            initial_state=salobj.State.STANDBY,
+            simulation_mode=1,
+        ), self.mock_mtm1m3ts():
+            await self.check_standard_state_transitions(
+                enabled_commands=(),
+            )
 
     async def test_version(self) -> None:
         async with self.make_csc(
