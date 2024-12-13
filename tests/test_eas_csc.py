@@ -39,7 +39,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 log = logging.getLogger("root")
                 log.error("Started MTM1M3TS.")
                 await self.mtm1m3ts.evt_summaryState.set_write(
-                    summaryState=salobj.State.ENABLED
+                    summaryState=salobj.State.DISABLED
                 )
                 await self.mtm1m3ts.tel_mixingValve.set_write(
                     rawValvePosition=0, valvePosition=0
