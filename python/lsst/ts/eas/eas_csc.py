@@ -33,11 +33,14 @@ from . import __version__
 from .config_schema import CONFIG_SCHEMA
 
 SAL_TIMEOUT = 5.0  # SAL telemetry/command timeout
+M1M3TS_STOP_TIMEOUT = 120.0  # Time to wait for fans to stop and valve to close
+STOP_LOOP_TIME = 1.0  # How often to check fan and valves when stopping
 SUMMARY_STATE_TIME = 5.0  # Wait time for a summary state change
 FAN_SLEEP_TIME = 30.0  # Time to wait after changing the fans
 VALVE_SLEEP_TIME = 60.0  # Time to wait after changing the valve
 
 THERMAL_LOOP_ERROR = 100
+THERMAL_SHUTDOWN_ERROR = 101
 
 
 def run_eas() -> None:
@@ -90,6 +93,7 @@ class EasCsc(salobj.ConfigurableCsc):
         self.enabled_event = (
             asyncio.Event()
         )  # An event that is set when the CSC is enabled.
+        self.control_loop_lock = asyncio.Lock()
 
         self.heater_demand: list[int] = [0] * 96
         self.fan_demand: list[int] = [30] * 96
@@ -133,18 +137,17 @@ class EasCsc(salobj.ConfigurableCsc):
         """
         self.log.info(f"handle_summary_state {salobj.State(self.summary_state).name}")
 
-        if self.summary_state == salobj.State.ENABLED:
-            self.enabled_event.set()
-        else:
-            self.enabled_event.clear()
-
         if self.disabled_or_enabled:
-            if self.m1m3_thermal_task.done():
+            # Start the thermal task if not already started
+            if self.m1m3_thermal_task.done() and self.simulation_mode == 0:
                 self.m1m3_thermal_task = asyncio.create_task(self.run_control())
 
+            # Connect if not already connected
             if not self.connected:
                 await self.connect()
         else:
+
+            # Cancel the thermal task
             if not self.m1m3_thermal_task.done():
                 self.m1m3_thermal_task.cancel()
                 try:
@@ -152,7 +155,42 @@ class EasCsc(salobj.ConfigurableCsc):
                 except asyncio.CancelledError:
                     pass
 
+            # Disconnect
             await self.disconnect()
+
+        # Set the state of the enabled event
+        if self.summary_state == salobj.State.ENABLED:
+            self.enabled_event.set()
+        else:
+            self.enabled_event.clear()
+
+    async def begin_disable(self, id_data: salobj.BaseDdsDataType) -> None:
+        """Begin do_disable; called before state changes.
+
+        This method acknowledges the do_disable command and stops the
+        M1M3TS control loop.
+
+        Parameters
+        ----------
+        id_data: `CommandIdData`
+            Command ID and data
+        """
+
+        await self.cmd_disable.ack_in_progress(id_data, timeout=SAL_TIMEOUT)
+        try:
+            async with self.control_loop_lock:
+                await asyncio.wait_for(
+                    self.stop_m1m3_thermal_system(),
+                    timeout=M1M3TS_STOP_TIMEOUT,
+                )
+        except TimeoutError:
+            await self.fault(
+                code=THERMAL_SHUTDOWN_ERROR,
+                report="Failed to stop fans/valve.",
+                traceback=traceback.format_exc(),
+            )
+            raise
+        await super().begin_disable(id_data)
 
     async def configure(self, config: SimpleNamespace) -> None:
         self.config = config
@@ -164,8 +202,6 @@ class EasCsc(salobj.ConfigurableCsc):
 
     async def run_loop(self) -> None:
         """The core loop that regulates the M1M3 temperature."""
-
-        await self.enabled_event.wait()
 
         assert not isnan(self.old_valve_position)
 
@@ -258,7 +294,7 @@ class EasCsc(salobj.ConfigurableCsc):
             new_valve_position = max(0.0, self.old_valve_position - 5.0)
             self.log.info(f"temp low, adjusting mixing valve to: {new_valve_position}")
             await self.m1m3ts.cmd_setMixingValve.set_start(
-                mixingValveTarget=new_valve_position, timeout=5
+                mixingValveTarget=new_valve_position, timeout=SAL_TIMEOUT
             )
             self.old_valve_position = new_valve_position
             self.log.debug(f"waiting {VALVE_SLEEP_TIME} seconds...")
@@ -282,6 +318,9 @@ class EasCsc(salobj.ConfigurableCsc):
             mixing = await self.m1m3ts.tel_mixingValve.next(
                 flush=True, timeout=SAL_TIMEOUT
             )
+
+            current_valve_position = mixing.valvePosition
+            self.old_valve_position = current_valve_position
         except Exception:
             await self.fault(
                 code=THERMAL_LOOP_ERROR,
@@ -289,12 +328,11 @@ class EasCsc(salobj.ConfigurableCsc):
                 traceback=traceback.format_exc(),
             )
 
-        current_valve_position = mixing.valvePosition
-        self.old_valve_position = current_valve_position
-
         while True:
             try:
-                await self.run_loop()
+                await self.enabled_event.wait()
+                async with self.control_loop_lock:
+                    await self.run_loop()
 
             except asyncio.CancelledError:
                 self.log.info("M1M3 thermal control loop cancelled.")
@@ -307,6 +345,29 @@ class EasCsc(salobj.ConfigurableCsc):
                     traceback=traceback.format_exc(),
                 )
                 break
+
+    async def stop_m1m3_thermal_system(self) -> None:
+        """Stops the M1M3 thermal control loop for maintenance or idling.
+
+        Changes the summary state of MTM1M3TS to DISABLED. This
+        has the effect of stopping the fans and closing the
+        mixing valve. Once this is done, it is safe to enter
+        and work inside the mirror cell.
+        """
+
+        try:
+            await salobj.set_summary_state(
+                self.m1m3ts,
+                salobj.State.DISABLED,
+                timeout=SAL_TIMEOUT,
+            )
+        except Exception:
+            await self.fault(
+                code=THERMAL_LOOP_ERROR,
+                report="Failed to get mixing valve telemetry from M1M3TS.",
+                traceback=traceback.format_exc(),
+            )
+            raise
 
     @staticmethod
     def get_config_pkg() -> str:
