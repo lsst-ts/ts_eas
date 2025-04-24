@@ -28,21 +28,31 @@ CONFIG_SCHEMA = yaml.safe_load(
     $schema: http://json-schema.org/draft-07/schema#
     $id: https://github.com/lsst-ts/ts_eas/blob/main/python/lsst/ts/eas/config_schema.py
     # title must end with one or more spaces followed by the schema version, which must begin with "v"
-    title: EAS v2
+    title: EAS v3
     description: Schema for EAS configuration files
     type: object
     properties:
-      connection_timeout:
-        description: Time limit for connecting to the TCP/IP interface (sec)
+      wind_threshold:
+        description: Windspeed limit for the VEC-04 fan (m/s)
         type: number
         exclusiveMinimum: 0
-      read_timeout:
-        description: Time limit for reading data from the TCP/IP interface (sec)
+      wind_average_window:
+        description: Time over which to average windspeed for threshold determination (s)
         type: number
         exclusiveMinimum: 0
+      wind_minimum_window:
+        description: Minimum amount of time to collect wind data before acting on it. (s)
+        type: number
+        exclusiveMinimum: 0
+      vec04_hold_time:
+        description: >
+          Minimum time to wait before changing the state of the VEC-04 fan. This
+          value is ignored if the dome is opened or closed. (s)
     required:
-      - connection_timeout
-      - read_timeout
+      - wind_threshold
+      - wind_average_window
+      - wind_minimum_window
+      - vec04_hold_time
     additionalProperties: false
     """
 )
