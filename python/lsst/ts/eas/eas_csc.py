@@ -27,7 +27,12 @@ import typing
 from math import isnan
 from types import SimpleNamespace
 
+import astropy.units as u
+import lsst_efd_client
+import pandas as pd
+from astropy.time import Time
 from lsst.ts import salobj, utils
+from lsst.ts.xml.enums.HVAC import DeviceId
 
 from . import __version__
 from .config_schema import CONFIG_SCHEMA
@@ -38,6 +43,8 @@ STOP_LOOP_TIME = 1.0  # How often to check fan and valves when stopping
 SUMMARY_STATE_TIME = 5.0  # Wait time for a summary state change
 FAN_SLEEP_TIME = 30.0  # Time to wait after changing the fans
 VALVE_SLEEP_TIME = 60.0  # Time to wait after changing the valve
+HVAC_SLEEP_TIME = 60.0  # How often to check the HVAC state
+WINDSPEED_WINDOW = 30 * 60  # Maximum age of windspeed data to consider
 
 THERMAL_LOOP_ERROR = 100
 THERMAL_SHUTDOWN_ERROR = 101
@@ -368,6 +375,126 @@ class EasCsc(salobj.ConfigurableCsc):
                 traceback=traceback.format_exc(),
             )
             raise
+
+    async def get_wind_history(self) -> None:
+        """Retrieves windspeed history from the EFD.
+
+        The last 30 minutes of airFlow telemetry are queried from
+        the EFD and stored in a table for use in `monitor_dome_shutter`.
+        """
+        if self.config is None:
+            raise RuntimeError("Not yet configured")
+
+        topic = "lsst.sal.ESS.airFlow"
+        fields = ["speed", "private_sndStamp"]
+        sal_index = 301
+        end_date = Time.now()
+        start_date = end_date - WINDSPEED_WINDOW * u.s
+        client = lsst_efd_client.EfdClient(self.config.efd_instance)
+        self.wind_history = await client.select_time_series(
+            topic, fields, start_date, end_date, index=sal_index
+        )
+
+    async def air_flow_callback(self, air_flow: salobj.BaseMsgType) -> None:
+        """Callback for ESS.tel_airFlow.
+
+        This function appends new airflow data to the existing table.
+        Note that `get_wind_history` must be called first.
+
+        Parameters
+        ----------
+        air_flow : salobj.BaseMsgType
+           A newly received air_flow telemetry item.
+
+        """
+        new_row = pd.Datagram(
+            [
+                {
+                    "speed": air_flow.speed,
+                    "private_sndStamp": air_flow.private_sndStamp,
+                }
+            ]
+        )
+        self.wind_history = pd.concat([self.wind_history, new_row], ignore_index=True)
+
+    async def monitor_dome_shutter(self) -> None:
+        """Monitors the dome status and windspeed to control the HVAC.
+
+        This monitor does the following:
+         * If the dome is open, it turns on the four AHUs.
+         * If the dome is closed, it turns off the AHUs.
+         * If the dome is open and the wind is calm, it turns on VEC-04.
+        """
+        if self.config is None:
+            raise RuntimeError("Not yet configured")
+
+        cached_shutter_closed = None
+        cached_wind_threshold = None
+
+        async with (
+            salobj.Remote(domain=self.domain, name="MTDome") as dome_remote,
+            salobj.Remote(domain=self.domain, name="HVAC") as hvac_remote,
+            salobj.Remote(domain=self.domain, name="ESS", index=301) as weather_remote,
+        ):
+            await self.get_wind_history()
+            weather_remote.tel_airFlow.callback = self.air_flow_callback
+
+            while True:
+                await asyncio.sleep(HVAC_SLEEP_TIME)
+
+                # Check the aperture state
+                aperture_shutter = dome_remote.tel_apertureShutter.get()
+                if not aperture_shutter:
+                    continue
+                shutter_closed = (
+                    aperture_shutter.positionAcutal[0] < 0.1
+                    and aperture_shutter.positionActual[1] < 0.1
+                )
+
+                if not shutter_closed:
+                    # Remove old wind history
+                    time_horizon = utils.current_tai() - WINDSPEED_WINDOW
+                    self.wind_history = self.wind_history[
+                        self.wind_history["private_sndStamp"] >= time_horizon
+                    ]
+
+                    # Check windspeed threshold
+                    wind_threshold = (
+                        self.wind_history["speed"].mean() < self.config.wind_threshold
+                    )
+                    if wind_threshold != cached_wind_threshold:
+                        cached_wind_threshold = wind_threshold
+                        if wind_threshold:
+                            # Turn on VEC-04 fan
+                            await hvac_remote.cmd_enableDevice(
+                                device_id=DeviceId.lowerDamperFan03P04
+                            )
+                        else:
+                            # Turn off VEC-04 fan
+                            await hvac_remote.cmd_enableDevice(
+                                device_id=DeviceId.lowerDamperFan03P04
+                            )
+
+                if shutter_closed != cached_shutter_closed:
+                    cached_shutter_closed = shutter_closed
+                    ahus = (
+                        DeviceId.lowerAHU01P05,
+                        DeviceId.lowerAHU02P05,
+                        DeviceId.lowerAHU03P05,
+                        DeviceId.lowerAHU04P05,
+                    )
+                    if shutter_closed:
+                        # Enable the four AHUs
+                        for device in ahus:
+                            await hvac_remote.cmd_enableDevice(device_id=device)
+
+                        # Disable the VEC-04 fan
+                        await hvac_remote.cmd_disableDevice(
+                            device_id=DeviceId.lowerDamperFan03P04
+                        )
+                    else:
+                        for device in ahus:
+                            hvac_remote.disableDevice(device_id=device)
 
     @staticmethod
     def get_config_pkg() -> str:
