@@ -1,0 +1,5 @@
+connection_timeout: 10
+read_timeout: 10
+efd_instance: tucson_teststand_efd
+wind_threshold: 5
+wind_average_window: 1800

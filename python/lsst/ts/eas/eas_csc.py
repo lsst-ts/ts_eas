@@ -36,11 +36,14 @@ from . import __version__
 from .config_schema import CONFIG_SCHEMA
 
 HVAC_SLEEP_TIME = 60.0  # How often to check the HVAC state
-WINDSPEED_WINDOW = 30 * 60  # Maximum age of windspeed data to consider
 
 # If MAX_FAILURES occur in FAILURE_WINDOW seconds, the CSC will fault.
 MAX_FAILURES = 3
 FAILURE_WINDOW = 600
+STD_TIMEOUT = 1.0
+
+# Error codes
+DOME_MONITOR_FAILED = 101
 
 
 def run_eas() -> None:
@@ -86,6 +89,9 @@ class EasCsc(salobj.ConfigurableCsc):
         )
 
         self.health_monitor_task = utils.make_done_future()
+        self.efd_client = (
+            None  # Substitute this with an InfluxDBClient mock for testing.
+        )
 
     async def handle_summary_state(self) -> None:
         """Override of the handle_summary_state function to
@@ -94,7 +100,8 @@ class EasCsc(salobj.ConfigurableCsc):
         self.log.debug(f"handle_summary_state {salobj.State(self.summary_state).name}")
 
         if self.disabled_or_enabled:
-            self.health_monitor_task = asyncio.create_task(self.health_monitor())
+            if self.health_monitor_task.done():
+                self.health_monitor_task = asyncio.create_task(self.health_monitor())
 
         else:
             self.health_monitor_task.cancel()
@@ -102,6 +109,16 @@ class EasCsc(salobj.ConfigurableCsc):
                 await self.health_monitor_task
             except asyncio.CancelledError:
                 pass
+
+    async def close_tasks(self) -> None:
+        """Stop active tasks."""
+        self.health_monitor_task.cancel()
+        try:
+            await self.health_monitor_task
+        except asyncio.CancelledError:
+            pass
+
+        await super().close_tasks()
 
     async def configure(self, config: SimpleNamespace) -> None:
         self.config = config
@@ -119,17 +136,18 @@ class EasCsc(salobj.ConfigurableCsc):
             try:
                 start_times.append(utils.current_tai())
                 await self.monitor_dome_shutter()
-            except Exception:
+            except Exception as ex:
                 self.log.exception("monitor_dome_shutter threw exception")
+                self.log.error(f"{start_times=}")
                 if (
-                    len(start_times) > MAX_FAILURES
+                    len(start_times) >= MAX_FAILURES
                     and utils.current_tai() - start_times[-MAX_FAILURES]
                     < FAILURE_WINDOW
                 ):
-                    self.log.fatal(
+                    self.log.error(
                         "Too many failures in the time window. CSC will fault."
                     )
-                    await self.fault()
+                    await self.fault(code=DOME_MONITOR_FAILED, report=str(ex))
                     return
 
     async def get_wind_history(self) -> None:
@@ -146,8 +164,10 @@ class EasCsc(salobj.ConfigurableCsc):
         fields = ["speed", "private_sndStamp"]
         sal_index = 301
         end_date = Time.now()
-        start_date = end_date - WINDSPEED_WINDOW * u.s
-        client = lsst_efd_client.EfdClient(self.config.efd_instance)
+        start_date = end_date - self.config.wind_average_window * u.s
+        client = lsst_efd_client.EfdClient(
+            self.config.efd_instance, client=self.efd_client
+        )
         self.wind_history = await client.select_time_series(
             topic, fields, start_date, end_date, index=sal_index
         )
@@ -165,7 +185,7 @@ class EasCsc(salobj.ConfigurableCsc):
 
         """
         self.log.debug(f"air_flow_callback: {air_flow.speed=}")
-        new_row = pd.Datagram(
+        new_row = pd.DataFrame(
             [
                 {
                     "speed": air_flow.speed,
@@ -174,6 +194,31 @@ class EasCsc(salobj.ConfigurableCsc):
             ]
         )
         self.wind_history = pd.concat([self.wind_history, new_row], ignore_index=True)
+
+    @property
+    def average_windspeed(self) -> float:
+        """Average windspeed in m/s.
+
+        The measurement returned by this function combines EFD
+        data (collected at CSC startup) and ESS CSC telemetry
+        (collected while the monitor loop runs).
+
+        Returns
+        -------
+        float
+            The average of all wind speed samples collected
+            in the past `self.config.wind_average_window` seconds. (m/s)
+        """
+        if self.config is None:
+            raise RuntimeError("Not yet configured")
+
+        # Remove old wind history
+        time_horizon = utils.current_tai() - self.config.wind_average_window
+        self.wind_history = self.wind_history[
+            self.wind_history["private_sndStamp"] >= time_horizon
+        ]
+
+        return self.wind_history["speed"].mean()
 
     async def monitor_dome_shutter(self) -> None:
         """Monitors the dome status and windspeed to control the HVAC.
@@ -197,41 +242,40 @@ class EasCsc(salobj.ConfigurableCsc):
             salobj.Remote(domain=self.domain, name="HVAC") as hvac_remote,
             salobj.Remote(domain=self.domain, name="ESS", index=301) as weather_remote,
         ):
+            await dome_remote.start_task
+            await hvac_remote.start_task
+            await weather_remote.start_task
+
             weather_remote.tel_airFlow.callback = self.air_flow_callback
 
             while True:
                 # Check the aperture state
-                aperture_shutter = dome_remote.tel_apertureShutter.get()
-                if not aperture_shutter:
+                try:
+                    aperture_shutter = await dome_remote.tel_apertureShutter.aget(
+                        timeout=STD_TIMEOUT
+                    )
+                except TimeoutError:
                     continue
                 shutter_closed = (
-                    aperture_shutter.positionAcutal[0] < 0.1
+                    aperture_shutter.positionActual[0] < 0.1
                     and aperture_shutter.positionActual[1] < 0.1
                 )
                 self.log.debug(f"{aperture_shutter.positionActual=} {shutter_closed=}")
 
                 if not shutter_closed:
-                    # Remove old wind history
-                    time_horizon = utils.current_tai() - WINDSPEED_WINDOW
-                    self.wind_history = self.wind_history[
-                        self.wind_history["private_sndStamp"] >= time_horizon
-                    ]
-
                     # Check windspeed threshold
-                    wind_threshold = (
-                        self.wind_history["speed"].mean() < self.config.wind_threshold
-                    )
+                    wind_threshold = self.average_windspeed < self.config.wind_threshold
                     self.log.debug(f"VEC-04 operation demanded: {wind_threshold}")
                     if wind_threshold != cached_wind_threshold:
                         cached_wind_threshold = wind_threshold
                         if wind_threshold:
                             self.log.info("Turning on VEC-04 fan!")
-                            await hvac_remote.cmd_enableDevice(
+                            await hvac_remote.cmd_enableDevice.set_start(
                                 device_id=DeviceId.lowerDamperFan03P04
                             )
                         else:
                             self.log.info("Turning off VEC-04 fan!")
-                            await hvac_remote.cmd_disableDevice(
+                            await hvac_remote.cmd_disableDevice.set_start(
                                 device_id=DeviceId.lowerDamperFan03P04
                             )
 
@@ -247,17 +291,21 @@ class EasCsc(salobj.ConfigurableCsc):
                         # Enable the four AHUs
                         self.log.info("Enabling HVAC AHUs!")
                         for device in ahus:
-                            await hvac_remote.cmd_enableDevice(device_id=device)
+                            await hvac_remote.cmd_enableDevice.set_start(
+                                device_id=device
+                            )
 
                         # Disable the VEC-04 fan
                         self.log.info("Turning off VEC-04 fan!")
-                        await hvac_remote.cmd_disableDevice(
+                        await hvac_remote.cmd_disableDevice.set_start(
                             device_id=DeviceId.lowerDamperFan03P04
                         )
                     else:
                         self.log.info("Disabling HVAC AHUs!")
                         for device in ahus:
-                            hvac_remote.disableDevice(device_id=device)
+                            await hvac_remote.cmd_disableDevice.set_start(
+                                device_id=device
+                            )
 
                 await asyncio.sleep(HVAC_SLEEP_TIME)
 

@@ -28,7 +28,7 @@ CONFIG_SCHEMA = yaml.safe_load(
     $schema: http://json-schema.org/draft-07/schema#
     $id: https://github.com/lsst-ts/ts_eas/blob/main/python/lsst/ts/eas/config_schema.py
     # title must end with one or more spaces followed by the schema version, which must begin with "v"
-    title: EAS v2
+    title: EAS v3
     description: Schema for EAS configuration files
     type: object
     properties:
@@ -40,9 +40,22 @@ CONFIG_SCHEMA = yaml.safe_load(
         description: Time limit for reading data from the TCP/IP interface (sec)
         type: number
         exclusiveMinimum: 0
+      efd_instance:
+        description: Name of the EFD source for wind data
+        type: string
+      wind_threshold:
+        description: Windspeed limit for the VEC-04 fan (m/s)
+        type: number
+        exclusiveMinimum: 0
+      wind_average_window:
+        description: Time over which to average windspeed for threshold determination (s)
+        type: number
+        exclusiveMinimum: 0
     required:
       - connection_timeout
       - read_timeout
+      - efd_instance
+      - wind_threshold
     additionalProperties: false
     """
 )
