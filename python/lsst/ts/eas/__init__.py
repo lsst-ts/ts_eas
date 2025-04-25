@@ -20,8 +20,8 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 try:
-    from .version import *
-except ModuleNotFoundError:
+    from .version import __version__
+except ImportError:
     __version__ = "?"
 
 from .config_schema import CONFIG_SCHEMA
