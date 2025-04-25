@@ -7,4 +7,4 @@ mypy: true
 check-yaml: true
 check-xml: true
 ruff: false
-towncrier: false
+towncrier: true

@@ -1,0 +1,2 @@
+Added control loop for the HVAC based on dome and wind state.
+Added towncrier.
