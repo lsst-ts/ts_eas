@@ -25,9 +25,9 @@ import logging
 import pathlib
 import typing
 import unittest
+from unittest import mock
 
 import numpy as np
-import pandas as pd
 from astropy.table import Table
 from lsst.ts import eas, salobj, utils
 from lsst.ts.xml.enums.HVAC import DeviceId
@@ -36,40 +36,11 @@ STD_TIMEOUT = 60
 STD_SLEEP = 3
 
 TEST_CONFIG_DIR = pathlib.Path(__file__).parents[1].joinpath("tests", "config")
-TEST_EFD_DIR = pathlib.Path(__file__).parent
+TEST_WIND_DATA_DIR = pathlib.Path(__file__).parent
 
 logging.basicConfig(
     format="%(asctime)s:%(levelname)s:%(name)s:%(message)s", level=logging.DEBUG
 )
-
-
-class MockInfluxDBClient:
-    def __init__(self) -> None:
-        self._store: dict[str, pd.DataFrame] = {}  # measurement -> DataFrame
-
-    async def __aenter__(self) -> "MockInfluxDBClient":
-        return self
-
-    async def __aexit__(
-        self,
-        exc_type: typing.Type[BaseException],
-        exc_val: BaseException,
-        exc_tb: object | None,
-    ) -> None:
-        pass
-
-    async def create_database(self) -> None:
-        pass  # no-op for mock
-
-    async def write(self, df: pd.DataFrame, measurement: str) -> None:
-        self._store[measurement] = df
-
-    async def query(self, query: str, **kwargs: typing.Any) -> pd.DataFrame:
-        # For simplicity, pretend the query contains the measurement name
-        for measurement, df in self._store.items():
-            if measurement in query:
-                return df
-        return pd.DataFrame()
 
 
 class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
@@ -147,30 +118,10 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             config_dir=config_dir,
             simulation_mode=simulation_mode,
         )
-        csc.efd_client = self.efd_client_db
         return csc
-
-    @contextlib.asynccontextmanager
-    async def efd_client(
-        self, table_file: str = "air_flow.ecsv"
-    ) -> typing.AsyncGenerator[None, None]:
-        df = Table.read(TEST_EFD_DIR / table_file, format="ascii.ecsv").to_pandas()
-        df["salIndex"] = 301
-
-        # Make the data file refer to current conditions
-        df["private_sndStamp"] += utils.current_tai() - df["private_sndStamp"].max()
-
-        self.efd_data = df
-
-        async with MockInfluxDBClient() as client:
-            await client.write(df, measurement="lsst.sal.ESS.airFlow")
-            self.efd_client_db = client
-
-            yield
 
     async def test_standard_state_transitions(self) -> None:
         async with (
-            self.efd_client(),
             self.make_csc(
                 initial_state=salobj.State.STANDBY,
                 config_dir=TEST_CONFIG_DIR,
@@ -181,9 +132,24 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 enabled_commands=(),
             )
 
+    async def load_wind_history(self, wind_data_file: str) -> None:
+        self.wind_data = Table.read(
+            TEST_WIND_DATA_DIR / wind_data_file, format="ascii.ecsv"
+        )
+        self.wind_data["private_sndStamp"] += (
+            utils.current_tai() - self.wind_data["private_sndStamp"].max()
+        )
+        for row in self.wind_data:
+            with mock.patch(
+                "lsst.ts.salobj.topics.write_topic.utils.current_tai",
+                return_value=row["private_sndStamp"],
+            ):
+                await self.ess.tel_airFlow.set_write(
+                    speed=row["speed"],
+                )
+
     async def test_version(self) -> None:
         async with (
-            self.efd_client(),
             self.make_csc(
                 initial_state=salobj.State.STANDBY,
                 config_dir=TEST_CONFIG_DIR,
@@ -203,7 +169,6 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         """For dome closed, AHUs should turn on and VEC-04 should turn off."""
         async with (
             self.mock_extra_cscs(),
-            self.efd_client(),
             self.make_csc(
                 initial_state=salobj.State.ENABLED,
                 config_dir=TEST_CONFIG_DIR,
@@ -213,6 +178,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             # Give the EAS CSC time to establish an MTDome remote
             await asyncio.sleep(STD_SLEEP)
 
+            await self.load_wind_history("air_flow.ecsv")
             await self.mtdome.tel_apertureShutter.set_write(
                 positionActual=(0.0, 0.0),
             )
@@ -220,7 +186,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(STD_SLEEP)
 
         self.assertAlmostEqual(
-            self.csc.average_windspeed, self.efd_data["speed"].mean()
+            self.csc.average_windspeed, self.wind_data["speed"].mean()
         )
         self.assertEqual(self.ahu1_state, True)
         self.assertEqual(self.ahu2_state, True)
@@ -232,7 +198,6 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         """For dome open, AHUs should turn off and VEC-04 should turn on."""
         async with (
             self.mock_extra_cscs(),
-            self.efd_client(),
             self.make_csc(
                 initial_state=salobj.State.ENABLED,
                 config_dir=TEST_CONFIG_DIR,
@@ -242,6 +207,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             # Give the EAS CSC time to establish an MTDome remote
             await asyncio.sleep(STD_SLEEP)
 
+            await self.load_wind_history("air_flow.ecsv")
             await self.mtdome.tel_apertureShutter.set_write(
                 positionActual=(1.0, 1.0),
             )
@@ -249,7 +215,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(STD_SLEEP)
 
         self.assertAlmostEqual(
-            self.csc.average_windspeed, self.efd_data["speed"].mean()
+            self.csc.average_windspeed, self.wind_data["speed"].mean()
         )
         self.assertEqual(self.ahu1_state, False)
         self.assertEqual(self.ahu2_state, False)
@@ -257,11 +223,10 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.ahu4_state, False)
         self.assertEqual(self.vec04_state, True)
 
-    async def test_efd_wind(self) -> None:
+    async def test_high_wind(self) -> None:
         """In high wind, turn VEC-04 off."""
         async with (
             self.mock_extra_cscs(),
-            self.efd_client("high_wind.ecsv"),
             self.make_csc(
                 initial_state=salobj.State.ENABLED,
                 config_dir=TEST_CONFIG_DIR,
@@ -271,6 +236,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             # Give the EAS CSC time to establish an MTDome remote
             await asyncio.sleep(STD_SLEEP)
 
+            await self.load_wind_history("high_wind.ecsv")
             await self.mtdome.tel_apertureShutter.set_write(
                 positionActual=(1.0, 1.0),
             )
@@ -278,7 +244,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(STD_SLEEP)
 
         self.assertAlmostEqual(
-            self.csc.average_windspeed, self.efd_data["speed"].mean()
+            self.csc.average_windspeed, self.wind_data["speed"].mean()
         )
         self.assertEqual(self.ahu1_state, False)
         self.assertEqual(self.ahu2_state, False)
@@ -286,12 +252,11 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.ahu4_state, False)
         self.assertEqual(self.vec04_state, False)
 
-    async def test_csc_wind(self) -> None:
+    async def test_fresh_wind(self) -> None:
         """Respond correctly to wind data from the ESS CSC."""
         samples = (100, 110, 110)
         async with (
             self.mock_extra_cscs(),
-            self.efd_client("empty.ecsv"),
             self.make_csc(
                 initial_state=salobj.State.ENABLED,
                 config_dir=TEST_CONFIG_DIR,
@@ -311,7 +276,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             )
             await asyncio.sleep(STD_SLEEP)
 
-        self.assertAlmostEqual(self.csc.average_windspeed, np.mean(samples))
+        self.assertTrue(np.isnan(self.csc.average_windspeed))
         self.assertEqual(self.ahu1_state, False)
         self.assertEqual(self.ahu2_state, False)
         self.assertEqual(self.ahu3_state, False)
@@ -322,7 +287,6 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         """If no wind data available, turn VEC-04 off."""
         async with (
             self.mock_extra_cscs(),
-            self.efd_client("empty.ecsv"),
             self.make_csc(
                 initial_state=salobj.State.ENABLED,
                 config_dir=TEST_CONFIG_DIR,
@@ -353,7 +317,6 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         """
         async with (
             self.mock_extra_cscs(),
-            self.efd_client("stale_wind_data.ecsv"),
             self.make_csc(
                 initial_state=salobj.State.ENABLED,
                 config_dir=TEST_CONFIG_DIR,
@@ -363,17 +326,18 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             # Give the EAS CSC time to establish an MTDome remote
             await asyncio.sleep(STD_SLEEP)
 
+            await self.load_wind_history("stale_wind_data.ecsv")
             await self.mtdome.tel_apertureShutter.set_write(
                 positionActual=(1.0, 1.0),
             )
             # Give the telemetry time to propagate into the EAS CSC
             await asyncio.sleep(STD_SLEEP)
 
-        mask = self.efd_data["speed"] < 100
-        self.efd_data = self.efd_data[mask]
+        mask = self.wind_data["speed"] < 100
+        self.wind_data = self.wind_data[mask]
 
         self.assertAlmostEqual(
-            self.csc.average_windspeed, self.efd_data["speed"].mean()
+            self.csc.average_windspeed, self.wind_data["speed"].mean()
         )
         self.assertEqual(self.ahu1_state, False)
         self.assertEqual(self.ahu2_state, False)

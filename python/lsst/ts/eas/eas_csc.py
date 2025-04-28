@@ -25,10 +25,8 @@ import asyncio
 import typing
 from types import SimpleNamespace
 
-import astropy.units as u
-import lsst_efd_client
+import numpy as np
 import pandas as pd
-from astropy.time import Time
 from lsst.ts import salobj, utils
 from lsst.ts.xml.enums.HVAC import DeviceId
 
@@ -88,9 +86,13 @@ class EasCsc(salobj.ConfigurableCsc):
             override=override,
         )
 
+        self.last_vec04_time: float = 0  # Last time VEC-04 was changed.
         self.health_monitor_task = utils.make_done_future()
-        self.efd_client = (
-            None  # Substitute this with an InfluxDBClient mock for testing.
+        self.wind_history = pd.DataFrame(
+            {
+                "speed": pd.Series(dtype=float),
+                "private_sndStamp": pd.Series(dtype=float),
+            }
         )
 
     async def handle_summary_state(self) -> None:
@@ -150,33 +152,10 @@ class EasCsc(salobj.ConfigurableCsc):
                     await self.fault(code=DOME_MONITOR_FAILED, report=str(ex))
                     return
 
-    async def get_wind_history(self) -> None:
-        """Retrieves windspeed history from the EFD.
-
-        The last 30 minutes of airFlow telemetry are queried from
-        the EFD and stored in a table for use in `monitor_dome_shutter`.
-        """
-        if self.config is None:
-            raise RuntimeError("Not yet configured")
-
-        self.log.debug("get_wind_history")
-        topic = "lsst.sal.ESS.airFlow"
-        fields = ["speed", "private_sndStamp"]
-        sal_index = 301
-        end_date = Time.now()
-        start_date = end_date - self.config.wind_average_window * u.s
-        client = lsst_efd_client.EfdClient(
-            self.config.efd_instance, client=self.efd_client
-        )
-        self.wind_history = await client.select_time_series(
-            topic, fields, start_date, end_date, index=sal_index
-        )
-
     async def air_flow_callback(self, air_flow: salobj.BaseMsgType) -> None:
         """Callback for ESS.tel_airFlow.
 
         This function appends new airflow data to the existing table.
-        Note that `get_wind_history` must be called first.
 
         Parameters
         ----------
@@ -184,7 +163,9 @@ class EasCsc(salobj.ConfigurableCsc):
            A newly received air_flow telemetry item.
 
         """
-        self.log.debug(f"air_flow_callback: {air_flow.speed=}")
+        self.log.debug(
+            f"air_flow_callback: {air_flow.private_sndStamp=} {air_flow.speed=}"
+        )
         new_row = pd.DataFrame(
             [
                 {
@@ -199,21 +180,32 @@ class EasCsc(salobj.ConfigurableCsc):
     def average_windspeed(self) -> float:
         """Average windspeed in m/s.
 
-        The measurement returned by this function combines EFD
-        data (collected at CSC startup) and ESS CSC telemetry
+        The measurement returned by this function uses ESS CSC telemetry
         (collected while the monitor loop runs).
 
         Returns
         -------
         float
             The average of all wind speed samples collected
-            in the past `self.config.wind_average_window` seconds. (m/s)
+            in the past `self.config.wind_average_window` seconds.
+            If the oldest sample is newer than
+            `config.wind_minimum_window` seconds old, then
+            NaN is returned. Units are m/s.
         """
         if self.config is None:
             raise RuntimeError("Not yet configured")
 
+        if len(self.wind_history) < 1:
+            return np.nan
+
         # Remove old wind history
-        time_horizon = utils.current_tai() - self.config.wind_average_window
+        current_time = utils.current_tai()
+        time_horizon = current_time - self.config.wind_average_window
+        oldest_sample_age = current_time - self.wind_history["private_sndStamp"].min()
+
+        if oldest_sample_age < self.config.wind_minimum_window:
+            return np.nan
+
         self.wind_history = self.wind_history[
             self.wind_history["private_sndStamp"] >= time_horizon
         ]
@@ -236,7 +228,6 @@ class EasCsc(salobj.ConfigurableCsc):
         cached_shutter_closed = None
         cached_wind_threshold = None
 
-        await self.get_wind_history()
         async with (
             salobj.Remote(domain=self.domain, name="MTDome") as dome_remote,
             salobj.Remote(domain=self.domain, name="HVAC") as hvac_remote,
@@ -262,7 +253,10 @@ class EasCsc(salobj.ConfigurableCsc):
                 )
                 self.log.debug(f"{aperture_shutter.positionActual=} {shutter_closed=}")
 
-                if not shutter_closed:
+                if not shutter_closed and (
+                    utils.current_tai() - self.last_vec04_time
+                    > self.config.vec04_hold_time
+                ):
                     # Check windspeed threshold
                     wind_threshold = self.average_windspeed < self.config.wind_threshold
                     self.log.debug(f"VEC-04 operation demanded: {wind_threshold}")

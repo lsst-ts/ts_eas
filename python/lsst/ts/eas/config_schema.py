@@ -32,17 +32,6 @@ CONFIG_SCHEMA = yaml.safe_load(
     description: Schema for EAS configuration files
     type: object
     properties:
-      connection_timeout:
-        description: Time limit for connecting to the TCP/IP interface (sec)
-        type: number
-        exclusiveMinimum: 0
-      read_timeout:
-        description: Time limit for reading data from the TCP/IP interface (sec)
-        type: number
-        exclusiveMinimum: 0
-      efd_instance:
-        description: Name of the EFD source for wind data
-        type: string
       wind_threshold:
         description: Windspeed limit for the VEC-04 fan (m/s)
         type: number
@@ -51,11 +40,19 @@ CONFIG_SCHEMA = yaml.safe_load(
         description: Time over which to average windspeed for threshold determination (s)
         type: number
         exclusiveMinimum: 0
+      wind_minimum_window:
+        description: Minimum amount of time to collect wind data before acting on it. (s)
+        type: number
+        exclusiveMinimum: 0
+      vec04_hold_time:
+        description: >
+          Minimum time to wait before changing the state of the VEC-04 fan. This
+          value is ignored if the dome is opened or closed. (s)
     required:
-      - connection_timeout
-      - read_timeout
-      - efd_instance
       - wind_threshold
+      - wind_average_window
+      - wind_minimum_window
+      - vec04_hold_time
     additionalProperties: false
     """
 )
