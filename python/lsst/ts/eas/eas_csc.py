@@ -33,12 +33,15 @@ from lsst.ts.xml.enums.HVAC import DeviceId
 from . import __version__
 from .config_schema import CONFIG_SCHEMA
 
-HVAC_SLEEP_TIME = 60.0  # How often to check the HVAC state
+HVAC_SLEEP_TIME = 60.0  # How often to check the HVAC state (seconds)
 
-# If MAX_FAILURES occur in FAILURE_WINDOW seconds, the CSC will fault.
-MAX_FAILURES = 3
-FAILURE_WINDOW = 600
-STD_TIMEOUT = 1.0
+# Constants for the monitor_dome_shutter health monitor:
+MAX_FAILURES = 15  # Maximum number of failures allowed before the CSC will fault.
+FAILURE_TIMEOUT = 600  # Failure count will reset after monitor_dome_shutter has run for this time (seconds).
+INITIAL_BACKOFF = 1  # monitor_dome_shutter initial retry delay (seconds)
+MAX_BACKOFF = 60  # monitor_dome_shutter maximum retry delay (seconds)
+
+STD_TIMEOUT = 10  # seconds
 
 # Error codes
 DOME_MONITOR_FAILED = 101
@@ -86,7 +89,9 @@ class EasCsc(salobj.ConfigurableCsc):
             override=override,
         )
 
-        self.last_vec04_time: float = 0  # Last time VEC-04 was changed.
+        self.last_vec04_time: float = (
+            0  # Last time VEC-04 was changed (UNIX TAI seconds).
+        )
         self.health_monitor_task = utils.make_done_future()
         self.wind_history = pd.DataFrame(
             {
@@ -106,20 +111,18 @@ class EasCsc(salobj.ConfigurableCsc):
                 self.health_monitor_task = asyncio.create_task(self.health_monitor())
 
         else:
-            self.health_monitor_task.cancel()
-            try:
-                await self.health_monitor_task
-            except asyncio.CancelledError:
-                pass
+            await self.health_monitor_shutdown()
 
-    async def close_tasks(self) -> None:
-        """Stop active tasks."""
+    async def health_monitor_shutdown(self) -> None:
         self.health_monitor_task.cancel()
         try:
             await self.health_monitor_task
         except asyncio.CancelledError:
             pass
 
+    async def close_tasks(self) -> None:
+        """Stop active tasks."""
+        await self.health_monitor_shutdown()
         await super().close_tasks()
 
     async def configure(self, config: SimpleNamespace) -> None:
@@ -128,29 +131,42 @@ class EasCsc(salobj.ConfigurableCsc):
     async def health_monitor(self) -> None:
         """Manages the `monitor_dome_shutter` control loop.
 
-        This loop keeps the `monitor_dome_shutter` loop running. But if it
-        fails MAX_FAILURES times during a time of FAILURE_WINDOW, then
-        the CSC will fault and this function will give up.
+        Manages the `monitor_dome_shutter` control loop with backoff and
+        time-based failure reset, which is (hopefully) robust against
+        disconnects of the remotes, as well as any other form of
+        recoverable failure.
         """
         self.log.debug("health_monitor")
-        start_times = []
+        failure_count = 0
+        last_attempt_time = utils.current_tai()
+
         while True:
+            now = utils.current_tai()
+
+            # Reset failure count if it's been too long since last attempt
+            if now - last_attempt_time > FAILURE_TIMEOUT:
+                self.log.info(
+                    f"Resetting monitor failure count: {now - last_attempt_time:.1f}s since last attempt"
+                )
+                failure_count = 0
+
+            last_attempt_time = now
+
             try:
-                start_times.append(utils.current_tai())
                 await self.monitor_dome_shutter()
             except Exception as ex:
                 self.log.exception("monitor_dome_shutter threw exception")
-                self.log.error(f"{start_times=}")
-                if (
-                    len(start_times) >= MAX_FAILURES
-                    and utils.current_tai() - start_times[-MAX_FAILURES]
-                    < FAILURE_WINDOW
-                ):
-                    self.log.error(
-                        "Too many failures in the time window. CSC will fault."
-                    )
+
+                failure_count += 1
+                if failure_count >= MAX_FAILURES:
+                    self.log.error("Too many failures in succession. CSC will fault.")
                     await self.fault(code=DOME_MONITOR_FAILED, report=str(ex))
                     return
+
+                # Exponential backoff with cap
+                backoff = min(INITIAL_BACKOFF * 2 ** (failure_count - 1), MAX_BACKOFF)
+                self.log.info(f"Backing off for {backoff:.1f} seconds")
+                await asyncio.sleep(backoff)
 
     async def air_flow_callback(self, air_flow: salobj.BaseMsgType) -> None:
         """Callback for ESS.tel_airFlow.
@@ -228,15 +244,13 @@ class EasCsc(salobj.ConfigurableCsc):
         cached_shutter_closed = None
         cached_wind_threshold = None
 
-        async with (
-            salobj.Remote(domain=self.domain, name="MTDome") as dome_remote,
-            salobj.Remote(domain=self.domain, name="HVAC") as hvac_remote,
-            salobj.Remote(domain=self.domain, name="ESS", index=301) as weather_remote,
-        ):
-            await dome_remote.start_task
-            await hvac_remote.start_task
-            await weather_remote.start_task
-
+        async with salobj.Remote(
+            domain=self.domain, name="MTDome"
+        ) as dome_remote, salobj.Remote(
+            domain=self.domain, name="HVAC"
+        ) as hvac_remote, salobj.Remote(
+            domain=self.domain, name="ESS", index=301
+        ) as weather_remote:
             weather_remote.tel_airFlow.callback = self.air_flow_callback
 
             while True:
@@ -246,12 +260,14 @@ class EasCsc(salobj.ConfigurableCsc):
                         timeout=STD_TIMEOUT
                     )
                 except TimeoutError:
+                    self.log.error(
+                        "Timeout error while trying to read apertureShutter telemetry."
+                    )
                     continue
                 shutter_closed = (
                     aperture_shutter.positionActual[0] < 0.1
                     and aperture_shutter.positionActual[1] < 0.1
                 )
-                self.log.debug(f"{aperture_shutter.positionActual=} {shutter_closed=}")
 
                 if not shutter_closed and (
                     utils.current_tai() - self.last_vec04_time
@@ -262,6 +278,7 @@ class EasCsc(salobj.ConfigurableCsc):
                     self.log.debug(f"VEC-04 operation demanded: {wind_threshold}")
                     if wind_threshold != cached_wind_threshold:
                         cached_wind_threshold = wind_threshold
+                        self.last_vec04_time = utils.current_tai()
                         if wind_threshold:
                             self.log.info("Turning on VEC-04 fan!")
                             await hvac_remote.cmd_enableDevice.set_start(
@@ -294,6 +311,7 @@ class EasCsc(salobj.ConfigurableCsc):
                         await hvac_remote.cmd_disableDevice.set_start(
                             device_id=DeviceId.lowerDamperFan03P04
                         )
+                        self.last_vec04_time = utils.current_tai()
                     else:
                         self.log.info("Disabling HVAC AHUs!")
                         for device in ahus:

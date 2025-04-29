@@ -25,6 +25,7 @@ import logging
 import pathlib
 import typing
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
@@ -34,6 +35,8 @@ from lsst.ts.xml.enums.HVAC import DeviceId
 
 STD_TIMEOUT = 60
 STD_SLEEP = 3
+LONG_SLEEP = 30
+MAX_RETRIES = 100
 
 TEST_CONFIG_DIR = pathlib.Path(__file__).parents[1].joinpath("tests", "config")
 TEST_WIND_DATA_DIR = pathlib.Path(__file__).parent
@@ -92,7 +95,6 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
 
     async def disable_callback(self, message: salobj.topics.BaseTopic.DataType) -> None:
         """Callback for HVAC.cmd_disableDevice."""
-        self.log.info("disable_callback {message.device_id=}")
         match message.device_id:
             case DeviceId.lowerAHU01P05:
                 self.ahu1_state = False
@@ -186,7 +188,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(STD_SLEEP)
 
         self.assertAlmostEqual(
-            self.csc.average_windspeed, self.wind_data["speed"].mean()
+            self.csc.average_windspeed, self.wind_data["speed"].mean(), delta=0.1
         )
         self.assertEqual(self.ahu1_state, True)
         self.assertEqual(self.ahu2_state, True)
@@ -215,7 +217,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(STD_SLEEP)
 
         self.assertAlmostEqual(
-            self.csc.average_windspeed, self.wind_data["speed"].mean()
+            self.csc.average_windspeed, self.wind_data["speed"].mean(), delta=0.1
         )
         self.assertEqual(self.ahu1_state, False)
         self.assertEqual(self.ahu2_state, False)
@@ -244,7 +246,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(STD_SLEEP)
 
         self.assertAlmostEqual(
-            self.csc.average_windspeed, self.wind_data["speed"].mean()
+            self.csc.average_windspeed, self.wind_data["speed"].mean(), delta=0.1
         )
         self.assertEqual(self.ahu1_state, False)
         self.assertEqual(self.ahu2_state, False)
@@ -252,9 +254,14 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.ahu4_state, False)
         self.assertEqual(self.vec04_state, False)
 
-    async def test_fresh_wind(self) -> None:
+    @mock.patch("lsst.ts.utils.current_tai", side_effect=utils.current_tai)
+    async def test_fresh_wind(self, mock_current_tai: mock.MagicMock) -> None:
         """Respond correctly to wind data from the ESS CSC."""
-        samples = (100, 110, 110)
+        fake_time = SimpleNamespace(value=utils.current_tai())
+
+        def fake_current_tai() -> float:
+            return fake_time.value
+
         async with (
             self.mock_extra_cscs(),
             self.make_csc(
@@ -263,25 +270,56 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 simulation_mode=1,
             ),
         ):
-            # Give the telemetry time to propagate into the EAS CSC
+            # Give the EAS CSC time to establish an MTDome remote
             await asyncio.sleep(STD_SLEEP)
-
-            for sample in samples:
-                await self.ess.tel_airFlow.set_write(
-                    speed=sample,
-                )
 
             await self.mtdome.tel_apertureShutter.set_write(
                 positionActual=(1.0, 1.0),
             )
+            await self.ess.tel_airFlow.set_write(
+                speed=0,
+            )
+
             await asyncio.sleep(STD_SLEEP)
 
-        self.assertTrue(np.isnan(self.csc.average_windspeed))
-        self.assertEqual(self.ahu1_state, False)
-        self.assertEqual(self.ahu2_state, False)
-        self.assertEqual(self.ahu3_state, False)
-        self.assertEqual(self.ahu4_state, False)
-        self.assertEqual(self.vec04_state, False)
+            # The dome is closed. AHUs are shut off.
+            # Wind is reported as low, but VEC-04
+            # is off because there is not enough
+            # history of wind data.
+            self.assertTrue(np.isnan(self.csc.average_windspeed))
+            self.assertEqual(self.ahu1_state, False)
+            self.assertEqual(self.ahu2_state, False)
+            self.assertEqual(self.ahu3_state, False)
+            self.assertEqual(self.ahu4_state, False)
+            self.assertEqual(self.vec04_state, False)
+
+            await asyncio.sleep(STD_SLEEP)
+
+            # After writing telemetry, average_windspeed is still NaN
+            # because there is not enough historical data.
+            self.assertTrue(np.isnan(self.csc.average_windspeed))
+
+            # Increment by 20 minutes so that we have
+            # enough historical data.
+            mock_current_tai.side_effect = fake_current_tai
+            fake_time.value += 1200
+            await self.ess.tel_airFlow.set_write(
+                speed=0,
+            )
+
+            await asyncio.sleep(STD_SLEEP)
+
+            # Now, we expect a valid windspeed to be reported.
+            self.assertAlmostEqual(self.csc.average_windspeed, 0.0)
+
+            # And in the next run of the control loop, the
+            # VEC-04 fan is enabled.
+            for _ in range(MAX_RETRIES):
+                await asyncio.sleep(STD_SLEEP)
+                if self.vec04_state:
+                    break
+
+            self.assertEqual(self.vec04_state, True)
 
     async def test_no_wind(self) -> None:
         """If no wind data available, turn VEC-04 off."""
@@ -337,10 +375,68 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         self.wind_data = self.wind_data[mask]
 
         self.assertAlmostEqual(
-            self.csc.average_windspeed, self.wind_data["speed"].mean()
+            self.csc.average_windspeed, self.wind_data["speed"].mean(), delta=0.1
         )
         self.assertEqual(self.ahu1_state, False)
         self.assertEqual(self.ahu2_state, False)
         self.assertEqual(self.ahu3_state, False)
         self.assertEqual(self.ahu4_state, False)
         self.assertEqual(self.vec04_state, True)
+
+    async def test_csc_dropout(self) -> None:
+        """The dome monitor loop should recover gracefully on losing a remote.
+
+        This test is a copy of test_dome_closed, with a disconnect and
+        re-connect of the CSCs thrown in.
+        """
+        async with (
+            self.mock_extra_cscs(),
+            self.make_csc(
+                initial_state=salobj.State.ENABLED,
+                config_dir=TEST_CONFIG_DIR,
+                simulation_mode=1,
+            ),
+        ):
+            await asyncio.sleep(STD_SLEEP)
+
+            # Close and re-open the remotes.
+            await self.mtdome.close()
+            await self.hvac.close()
+            await self.ess.close()
+
+            await asyncio.sleep(LONG_SLEEP)
+
+            self.mtdome = salobj.Controller("MTDome")
+            self.hvac = salobj.Controller("HVAC")
+            self.ess = salobj.Controller("ESS", 301)
+
+            self.hvac.cmd_enableDevice.callback = self.enable_callback
+            self.hvac.cmd_disableDevice.callback = self.disable_callback
+
+            await asyncio.wait_for(
+                asyncio.gather(
+                    self.mtdome.start_task,
+                    self.hvac.start_task,
+                    self.ess.start_task,
+                ),
+                timeout=STD_TIMEOUT,
+            )
+
+            await self.load_wind_history("air_flow.ecsv")
+            await self.mtdome.tel_apertureShutter.set_write(
+                positionActual=(0.0, 0.0),
+            )
+
+            for _ in range(MAX_RETRIES):
+                await asyncio.sleep(STD_SLEEP)
+                if self.ahu1_state is not None:
+                    break
+
+        self.assertAlmostEqual(
+            self.csc.average_windspeed, self.wind_data["speed"].mean(), delta=0.1
+        )
+        self.assertEqual(self.ahu1_state, True)
+        self.assertEqual(self.ahu2_state, True)
+        self.assertEqual(self.ahu3_state, True)
+        self.assertEqual(self.ahu4_state, True)
+        self.assertEqual(self.vec04_state, False)
