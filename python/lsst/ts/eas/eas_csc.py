@@ -23,10 +23,9 @@ __all__ = ["EasCsc", "run_eas"]
 
 import asyncio
 import typing
+from collections import deque
 from types import SimpleNamespace
 
-import numpy as np
-import pandas as pd
 from lsst.ts import salobj, utils
 from lsst.ts.xml.enums.HVAC import DeviceId
 
@@ -93,12 +92,7 @@ class EasCsc(salobj.ConfigurableCsc):
             0  # Last time VEC-04 was changed (UNIX TAI seconds).
         )
         self.health_monitor_task = utils.make_done_future()
-        self.wind_history = pd.DataFrame(
-            {
-                "speed": pd.Series(dtype=float),
-                "private_sndStamp": pd.Series(dtype=float),
-            }
-        )
+        self.wind_history: deque = deque()
 
     async def handle_summary_state(self) -> None:
         """Override of the handle_summary_state function to
@@ -108,12 +102,13 @@ class EasCsc(salobj.ConfigurableCsc):
 
         if self.disabled_or_enabled:
             if self.health_monitor_task.done():
-                self.health_monitor_task = asyncio.create_task(self.health_monitor())
+                self.health_monitor_task = asyncio.create_task(self.monitor_health())
 
         else:
-            await self.health_monitor_shutdown()
+            await self.shutdown_health_monitor()
 
-    async def health_monitor_shutdown(self) -> None:
+    async def shutdown_health_monitor(self) -> None:
+        """Cancels the health monitor task and waits for completion."""
         self.health_monitor_task.cancel()
         try:
             await self.health_monitor_task
@@ -122,13 +117,13 @@ class EasCsc(salobj.ConfigurableCsc):
 
     async def close_tasks(self) -> None:
         """Stop active tasks."""
-        await self.health_monitor_shutdown()
+        await self.shutdown_health_monitor()
         await super().close_tasks()
 
     async def configure(self, config: SimpleNamespace) -> None:
         self.config = config
 
-    async def health_monitor(self) -> None:
+    async def monitor_health(self) -> None:
         """Manages the `monitor_dome_shutter` control loop.
 
         Manages the `monitor_dome_shutter` control loop with backoff and
@@ -136,11 +131,11 @@ class EasCsc(salobj.ConfigurableCsc):
         disconnects of the remotes, as well as any other form of
         recoverable failure.
         """
-        self.log.debug("health_monitor")
+        self.log.debug("monitor_health")
         failure_count = 0
         last_attempt_time = utils.current_tai()
 
-        while True:
+        while self.disabled_or_enabled:
             now = utils.current_tai()
 
             # Reset failure count if it's been too long since last attempt
@@ -182,15 +177,7 @@ class EasCsc(salobj.ConfigurableCsc):
         self.log.debug(
             f"air_flow_callback: {air_flow.private_sndStamp=} {air_flow.speed=}"
         )
-        new_row = pd.DataFrame(
-            [
-                {
-                    "speed": air_flow.speed,
-                    "private_sndStamp": air_flow.private_sndStamp,
-                }
-            ]
-        )
-        self.wind_history = pd.concat([self.wind_history, new_row], ignore_index=True)
+        self.wind_history.append((air_flow.speed, air_flow.private_sndStamp))
 
     @property
     def average_windspeed(self) -> float:
@@ -211,22 +198,26 @@ class EasCsc(salobj.ConfigurableCsc):
         if self.config is None:
             raise RuntimeError("Not yet configured")
 
-        if len(self.wind_history) < 1:
-            return np.nan
+        if not self.wind_history:
+            return float("nan")
 
-        # Remove old wind history
         current_time = utils.current_tai()
         time_horizon = current_time - self.config.wind_average_window
-        oldest_sample_age = current_time - self.wind_history["private_sndStamp"].min()
 
-        if oldest_sample_age < self.config.wind_minimum_window:
-            return np.nan
+        # Remove old entries first
+        while self.wind_history and self.wind_history[0][1] < time_horizon:
+            self.wind_history.popleft()
 
-        self.wind_history = self.wind_history[
-            self.wind_history["private_sndStamp"] >= time_horizon
-        ]
+        # If not enough data remains, return NaN
+        if (
+            not self.wind_history
+            or current_time - self.wind_history[0][1] < self.config.wind_minimum_window
+        ):
+            return float("nan")
 
-        return self.wind_history["speed"].mean()
+        # Compute average directly
+        speeds = [s for s, _ in self.wind_history]
+        return sum(speeds) / len(speeds)
 
     async def monitor_dome_shutter(self) -> None:
         """Monitors the dome status and windspeed to control the HVAC.

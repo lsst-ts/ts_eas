@@ -47,6 +47,36 @@ logging.basicConfig(
 
 
 class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.fake_time = SimpleNamespace(offset=0.0)
+        self._real_current_tai = utils.current_tai
+
+        def fake_current_tai() -> float:
+            return self._real_current_tai() + self.fake_time.offset
+
+        self.current_tai_patcher = mock.patch(
+            "lsst.ts.utils.current_tai", side_effect=fake_current_tai
+        )
+        self.mock_current_tai = self.current_tai_patcher.start()
+        self.addCleanup(self.current_tai_patcher.stop)
+
+    def offset_clock(self, offset: float) -> None:
+        """Applies an offset to current_tai clock mock.
+
+        The offset must increase monotonically with each call.
+
+        Parameters
+        ----------
+        offset : float
+            The offset to apply to `current_tai` (seconds).
+        """
+        self.assertGreaterEqual(
+            offset,
+            self.fake_time.offset,
+            msg="Clock offset must increase monotonically.",
+        )
+        self.fake_time.offset = offset
+
     @contextlib.asynccontextmanager
     async def mock_extra_cscs(self) -> typing.AsyncGenerator[None, None]:
         self.ahu1_state: bool | None = None
@@ -138,17 +168,12 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         self.wind_data = Table.read(
             TEST_WIND_DATA_DIR / wind_data_file, format="ascii.ecsv"
         )
-        self.wind_data["private_sndStamp"] += (
-            utils.current_tai() - self.wind_data["private_sndStamp"].max()
-        )
+        self.wind_data["private_sndStamp"] -= self.wind_data["private_sndStamp"].min()
         for row in self.wind_data:
-            with mock.patch(
-                "lsst.ts.salobj.topics.write_topic.utils.current_tai",
-                return_value=row["private_sndStamp"],
-            ):
-                await self.ess.tel_airFlow.set_write(
-                    speed=row["speed"],
-                )
+            self.offset_clock(row["private_sndStamp"])
+            await self.ess.tel_airFlow.set_write(
+                speed=row["speed"],
+            )
 
     async def test_version(self) -> None:
         async with (
@@ -254,14 +279,8 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.ahu4_state, False)
         self.assertEqual(self.vec04_state, False)
 
-    @mock.patch("lsst.ts.utils.current_tai", side_effect=utils.current_tai)
-    async def test_fresh_wind(self, mock_current_tai: mock.MagicMock) -> None:
+    async def test_fresh_wind(self) -> None:
         """Respond correctly to wind data from the ESS CSC."""
-        fake_time = SimpleNamespace(value=utils.current_tai())
-
-        def fake_current_tai() -> float:
-            return fake_time.value
-
         async with (
             self.mock_extra_cscs(),
             self.make_csc(
@@ -301,8 +320,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
 
             # Increment by 20 minutes so that we have
             # enough historical data.
-            mock_current_tai.side_effect = fake_current_tai
-            fake_time.value += 1200
+            self.offset_clock(1200)
             await self.ess.tel_airFlow.set_write(
                 speed=0,
             )
@@ -364,6 +382,8 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             # Give the EAS CSC time to establish an MTDome remote
             await asyncio.sleep(STD_SLEEP)
 
+            # This ecsv file contains 30 minutes of high winds (>100)
+            # followed by 30 minutes of low winds.
             await self.load_wind_history("stale_wind_data.ecsv")
             await self.mtdome.tel_apertureShutter.set_write(
                 positionActual=(1.0, 1.0),
