@@ -23,22 +23,21 @@ __all__ = ["EasCsc", "run_eas"]
 
 import asyncio
 import typing
-from collections import deque
 from types import SimpleNamespace
 
 from lsst.ts import salobj, utils
-from lsst.ts.xml.enums.HVAC import DeviceId
 
 from . import __version__
 from .config_schema import CONFIG_SCHEMA
+from .hvac_model import HvacModel
 
-HVAC_SLEEP_TIME = 60.0  # How often to check the HVAC state (seconds)
-
-# Constants for the monitor_dome_shutter health monitor:
+# Constants for the health monitor:
 MAX_FAILURES = 15  # Maximum number of failures allowed before the CSC will fault.
-FAILURE_TIMEOUT = 600  # Failure count will reset after monitor_dome_shutter has run for this time (seconds).
-INITIAL_BACKOFF = 1  # monitor_dome_shutter initial retry delay (seconds)
-MAX_BACKOFF = 60  # monitor_dome_shutter maximum retry delay (seconds)
+FAILURE_TIMEOUT = (
+    600  # Failure count will reset after monitor has run for this time (seconds).
+)
+INITIAL_BACKOFF = 1  # monitor initial retry delay (seconds)
+MAX_BACKOFF = 60  # monitor maximum retry delay (seconds)
 
 STD_TIMEOUT = 10  # seconds
 
@@ -88,11 +87,8 @@ class EasCsc(salobj.ConfigurableCsc):
             override=override,
         )
 
-        self.last_vec04_time: float = (
-            0  # Last time VEC-04 was changed (UNIX TAI seconds).
-        )
         self.health_monitor_task = utils.make_done_future()
-        self.wind_history: deque = deque()
+        self.hvac_model: HvacModel | None = None
 
     async def handle_summary_state(self) -> None:
         """Override of the handle_summary_state function to
@@ -122,6 +118,14 @@ class EasCsc(salobj.ConfigurableCsc):
 
     async def configure(self, config: SimpleNamespace) -> None:
         self.config = config
+        self.hvac_model = HvacModel(
+            domain=self.domain,
+            log=self.log,
+            wind_threshold=self.config.wind_threshold,
+            wind_average_window=self.config.wind_average_window,
+            wind_minimum_window=self.config.wind_minimum_window,
+            vec04_hold_time=self.config.vec04_hold_time,
+        )
 
     async def monitor_health(self) -> None:
         """Manages the `monitor_dome_shutter` control loop.
@@ -131,6 +135,8 @@ class EasCsc(salobj.ConfigurableCsc):
         disconnects of the remotes, as well as any other form of
         recoverable failure.
         """
+        assert self.hvac_model is not None, "HVAC Model not initialized."
+
         self.log.debug("monitor_health")
         failure_count = 0
         last_attempt_time = utils.current_tai()
@@ -148,7 +154,7 @@ class EasCsc(salobj.ConfigurableCsc):
             last_attempt_time = now
 
             try:
-                await self.monitor_dome_shutter()
+                await self.hvac_model.monitor_dome_shutter()
             except Exception as ex:
                 self.log.exception("monitor_dome_shutter threw exception")
 
@@ -162,22 +168,6 @@ class EasCsc(salobj.ConfigurableCsc):
                 backoff = min(INITIAL_BACKOFF * 2 ** (failure_count - 1), MAX_BACKOFF)
                 self.log.info(f"Backing off for {backoff:.1f} seconds")
                 await asyncio.sleep(backoff)
-
-    async def air_flow_callback(self, air_flow: salobj.BaseMsgType) -> None:
-        """Callback for ESS.tel_airFlow.
-
-        This function appends new airflow data to the existing table.
-
-        Parameters
-        ----------
-        air_flow : salobj.BaseMsgType
-           A newly received air_flow telemetry item.
-
-        """
-        self.log.debug(
-            f"air_flow_callback: {air_flow.private_sndStamp=} {air_flow.speed=}"
-        )
-        self.wind_history.append((air_flow.speed, air_flow.private_sndStamp))
 
     @property
     def average_windspeed(self) -> float:
@@ -195,122 +185,11 @@ class EasCsc(salobj.ConfigurableCsc):
             `config.wind_minimum_window` seconds old, then
             NaN is returned. Units are m/s.
         """
-        if self.config is None:
-            raise RuntimeError("Not yet configured")
-
-        if not self.wind_history:
-            return float("nan")
-
-        current_time = utils.current_tai()
-        time_horizon = current_time - self.config.wind_average_window
-
-        # Remove old entries first
-        while self.wind_history and self.wind_history[0][1] < time_horizon:
-            self.wind_history.popleft()
-
-        # If not enough data remains, return NaN
-        if (
-            not self.wind_history
-            or current_time - self.wind_history[0][1] < self.config.wind_minimum_window
-        ):
-            return float("nan")
-
-        # Compute average directly
-        speeds = [s for s, _ in self.wind_history]
-        return sum(speeds) / len(speeds)
-
-    async def monitor_dome_shutter(self) -> None:
-        """Monitors the dome status and windspeed to control the HVAC.
-
-        This monitor does the following:
-         * If the dome is open, it turns on the four AHUs.
-         * If the dome is closed, it turns off the AHUs.
-         * If the dome is open and the wind is calm, it turns on VEC-04.
-        """
-        if self.config is None:
-            raise RuntimeError("Not yet configured")
-
-        self.log.debug("monitor_dome_shutter")
-
-        cached_shutter_closed = None
-        cached_wind_threshold = None
-
-        async with salobj.Remote(
-            domain=self.domain, name="MTDome"
-        ) as dome_remote, salobj.Remote(
-            domain=self.domain, name="HVAC"
-        ) as hvac_remote, salobj.Remote(
-            domain=self.domain, name="ESS", index=301
-        ) as weather_remote:
-            weather_remote.tel_airFlow.callback = self.air_flow_callback
-
-            while True:
-                # Check the aperture state
-                try:
-                    aperture_shutter = await dome_remote.tel_apertureShutter.aget(
-                        timeout=STD_TIMEOUT
-                    )
-                except TimeoutError:
-                    self.log.error(
-                        "Timeout error while trying to read apertureShutter telemetry."
-                    )
-                    continue
-                shutter_closed = (
-                    aperture_shutter.positionActual[0] < 0.1
-                    and aperture_shutter.positionActual[1] < 0.1
-                )
-
-                if not shutter_closed and (
-                    utils.current_tai() - self.last_vec04_time
-                    > self.config.vec04_hold_time
-                ):
-                    # Check windspeed threshold
-                    wind_threshold = self.average_windspeed < self.config.wind_threshold
-                    self.log.debug(f"VEC-04 operation demanded: {wind_threshold}")
-                    if wind_threshold != cached_wind_threshold:
-                        cached_wind_threshold = wind_threshold
-                        self.last_vec04_time = utils.current_tai()
-                        if wind_threshold:
-                            self.log.info("Turning on VEC-04 fan!")
-                            await hvac_remote.cmd_enableDevice.set_start(
-                                device_id=DeviceId.lowerDamperFan03P04
-                            )
-                        else:
-                            self.log.info("Turning off VEC-04 fan!")
-                            await hvac_remote.cmd_disableDevice.set_start(
-                                device_id=DeviceId.lowerDamperFan03P04
-                            )
-
-                if shutter_closed != cached_shutter_closed:
-                    cached_shutter_closed = shutter_closed
-                    ahus = (
-                        DeviceId.lowerAHU01P05,
-                        DeviceId.lowerAHU02P05,
-                        DeviceId.lowerAHU03P05,
-                        DeviceId.lowerAHU04P05,
-                    )
-                    if shutter_closed:
-                        # Enable the four AHUs
-                        self.log.info("Enabling HVAC AHUs!")
-                        for device in ahus:
-                            await hvac_remote.cmd_enableDevice.set_start(
-                                device_id=device
-                            )
-
-                        # Disable the VEC-04 fan
-                        self.log.info("Turning off VEC-04 fan!")
-                        await hvac_remote.cmd_disableDevice.set_start(
-                            device_id=DeviceId.lowerDamperFan03P04
-                        )
-                        self.last_vec04_time = utils.current_tai()
-                    else:
-                        self.log.info("Disabling HVAC AHUs!")
-                        for device in ahus:
-                            await hvac_remote.cmd_disableDevice.set_start(
-                                device_id=device
-                            )
-
-                await asyncio.sleep(HVAC_SLEEP_TIME)
+        return (
+            self.hvac_model.average_windspeed
+            if self.hvac_model is not None
+            else float("nan")
+        )
 
     @staticmethod
     def get_config_pkg() -> str:

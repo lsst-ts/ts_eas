@@ -34,7 +34,7 @@ from lsst.ts import eas, salobj, utils
 from lsst.ts.xml.enums.HVAC import DeviceId
 
 STD_TIMEOUT = 60
-STD_SLEEP = 6
+STD_SLEEP = 10
 LONG_SLEEP = 30
 MAX_RETRIES = 100
 
