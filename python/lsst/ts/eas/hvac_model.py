@@ -23,10 +23,11 @@ __all__ = ["HvacModel"]
 
 import asyncio
 import logging
-from collections import deque
 
 from lsst.ts import salobj, utils
 from lsst.ts.xml.enums.HVAC import DeviceId
+
+from .weather_model import WeatherModel
 
 HVAC_SLEEP_TIME = 60.0  # How often to check the HVAC state (seconds)
 
@@ -44,10 +45,6 @@ class HvacModel:
         A logger for log messages.
     wind_threshold : float
         Windspeed limit for the VEC-04 fan. (m/s)
-    wind_average_window : float
-        Time over which to average windspeed for threshold determination. (s)
-    wind_minimum_window : float
-        Minimum amount of time to collect wind data before acting on it. (s)
     vec04_hold_time : float
         Minimum time to wait before changing the state of the VEC-04 fan. This
         value is ignored if the dome is opened or closed. (s)
@@ -58,9 +55,8 @@ class HvacModel:
         *,
         domain: salobj.Domain,
         log: logging.Logger,
+        weather_model: WeatherModel,
         wind_threshold: float = 5,
-        wind_average_window: float = 30 * 60,
-        wind_minimum_window: float = 10 * 60,
         vec04_hold_time: float = 5 * 60,
     ) -> None:
         self.domain = domain
@@ -69,75 +65,13 @@ class HvacModel:
         self.last_vec04_time: float = (
             0  # Last time VEC-04 was changed (UNIX TAI seconds).
         )
-        # A deque containing tuples of timestamp, windspeed
-        self.wind_history: deque = deque()
 
         # Configuration parameters:
+        self.weather_model = weather_model
         self.wind_threshold = wind_threshold
-        self.wind_average_window = wind_average_window
-        self.wind_minimum_window = wind_minimum_window
         self.vec04_hold_time = vec04_hold_time
 
-    async def air_flow_callback(self, air_flow: salobj.BaseMsgType) -> None:
-        """Callback for ESS.tel_airFlow.
-
-        This function appends new airflow data to the existing table.
-
-        Parameters
-        ----------
-        air_flow : salobj.BaseMsgType
-           A newly received air_flow telemetry item.
-
-        """
-        self.log.debug(
-            f"air_flow_callback: {air_flow.private_sndStamp=} {air_flow.speed=}"
-        )
-        now = air_flow.private_sndStamp
-        self.wind_history.append((air_flow.speed, now))
-
-        # Prune old data
-        time_horizon = now - self.wind_average_window
-        while self.wind_history and self.wind_history[0][1] < time_horizon:
-            self.wind_history.popleft()
-
-    @property
-    def average_windspeed(self) -> float:
-        """Average windspeed in m/s.
-
-        The measurement returned by this function uses ESS CSC telemetry
-        (collected while the monitor loop runs).
-
-        Returns
-        -------
-        float
-            The average of all wind speed samples collected
-            in the past `self.wind_average_window` seconds.
-            If the oldest sample is newer than
-            `config.wind_minimum_window` seconds old, then
-            NaN is returned. Units are m/s.
-        """
-        if not self.wind_history:
-            return float("nan")
-
-        current_time = utils.current_tai()
-        time_horizon = current_time - self.wind_average_window
-
-        # Remove old entries first
-        while self.wind_history and self.wind_history[0][1] < time_horizon:
-            self.wind_history.popleft()
-
-        # If not enough data remains, return NaN
-        if (
-            not self.wind_history
-            or current_time - self.wind_history[0][1] < self.wind_minimum_window
-        ):
-            return float("nan")
-
-        # Compute average directly
-        speeds = [s for s, _ in self.wind_history]
-        return sum(speeds) / len(speeds)
-
-    async def monitor_dome_shutter(self) -> None:
+    async def monitor(self) -> None:
         """Monitors the dome status and windspeed to control the HVAC.
 
         This monitor does the following:
@@ -145,20 +79,14 @@ class HvacModel:
          * If the dome is closed, it turns off the AHUs.
          * If the dome is open and the wind is calm, it turns on VEC-04.
         """
-        self.log.debug("monitor_dome_shutter")
+        self.log.debug("HvacModel.monitor")
 
         cached_shutter_closed = None
         cached_wind_threshold = None
 
         async with salobj.Remote(
             domain=self.domain, name="MTDome"
-        ) as dome_remote, salobj.Remote(
-            domain=self.domain, name="HVAC"
-        ) as hvac_remote, salobj.Remote(
-            domain=self.domain, name="ESS", index=301
-        ) as weather_remote:
-            weather_remote.tel_airFlow.callback = self.air_flow_callback
-
+        ) as dome_remote, salobj.Remote(domain=self.domain, name="HVAC") as hvac_remote:
             while True:
                 # Check the aperture state
                 try:
@@ -179,7 +107,7 @@ class HvacModel:
                     utils.current_tai() - self.last_vec04_time > self.vec04_hold_time
                 ):
                     # Check windspeed threshold
-                    average_windspeed = self.average_windspeed
+                    average_windspeed = self.weather_model.average_windspeed
                     wind_threshold = average_windspeed < self.wind_threshold
                     self.log.debug(
                         f"VEC-04 operation demanded: {average_windspeed} -> {wind_threshold}"
