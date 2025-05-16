@@ -1,3 +1,19 @@
+v0.8.0 (2025-05-16)
+===================
+
+New Features
+------------
+
+- Added control loop for the HVAC based on dome and wind state. (`DM-50351 <https://rubinobs.atlassian.net//browse/DM-50351>`_)
+- Added towncrier. (`DM-50624 <https://rubinobs.atlassian.net//browse/DM-50624>`_)
+
+
+API Removal or Deprecation
+--------------------------
+
+- Removed M1M3TS control loop. (`DM-50624 <https://rubinobs.atlassian.net//browse/DM-50624>`_)
+
+
 .. py:currentmodule:: lsst.ts.eas
 
 .. _lsst.ts.eas.version_history:
