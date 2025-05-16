@@ -110,7 +110,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
 
     async def enable_callback(self, message: salobj.topics.BaseTopic.DataType) -> None:
         """Callback for HVAC.cmd_enableDevice."""
-        self.log.info("enable_callback {message.device_id=}")
+        self.log.info(f"enable_callback {message.device_id=}")
         match message.device_id:
             case DeviceId.lowerAHU01P05:
                 self.ahu1_state = True

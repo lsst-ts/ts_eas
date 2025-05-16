@@ -30,6 +30,7 @@ from lsst.ts import salobj, utils
 from . import __version__
 from .config_schema import CONFIG_SCHEMA
 from .hvac_model import HvacModel
+from .weather_model import WeatherModel
 
 # Constants for the health monitor:
 MAX_FAILURES = 15  # Maximum number of failures allowed before the CSC will fault.
@@ -88,6 +89,7 @@ class EasCsc(salobj.ConfigurableCsc):
         )
 
         self.health_monitor_task = utils.make_done_future()
+        self.subtasks: list[asyncio.Task[None]] = []
         self.hvac_model: HvacModel | None = None
 
     async def handle_summary_state(self) -> None:
@@ -105,11 +107,17 @@ class EasCsc(salobj.ConfigurableCsc):
 
     async def shutdown_health_monitor(self) -> None:
         """Cancels the health monitor task and waits for completion."""
-        self.health_monitor_task.cancel()
-        try:
-            await self.health_monitor_task
-        except asyncio.CancelledError:
-            pass
+        tasks_to_cancel = self.subtasks
+        self.subtasks = []
+        tasks_to_cancel.append(self.health_monitor_task)
+        for task in tasks_to_cancel:
+            task.cancel()
+
+        for task in tasks_to_cancel:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
     async def close_tasks(self) -> None:
         """Stop active tasks."""
@@ -118,12 +126,17 @@ class EasCsc(salobj.ConfigurableCsc):
 
     async def configure(self, config: SimpleNamespace) -> None:
         self.config = config
+        self.weather_model = WeatherModel(
+            domain=self.domain,
+            log=self.log,
+            wind_average_window=self.config.wind_average_window,
+            wind_minimum_window=self.config.wind_minimum_window,
+        )
         self.hvac_model = HvacModel(
             domain=self.domain,
             log=self.log,
+            weather_model=self.weather_model,
             wind_threshold=self.config.wind_threshold,
-            wind_average_window=self.config.wind_average_window,
-            wind_minimum_window=self.config.wind_minimum_window,
             vec04_hold_time=self.config.vec04_hold_time,
         )
 
@@ -153,21 +166,45 @@ class EasCsc(salobj.ConfigurableCsc):
 
             last_attempt_time = now
 
-            try:
-                await self.hvac_model.monitor_dome_shutter()
-            except Exception as ex:
-                self.log.exception("monitor_dome_shutter threw exception")
+            self.subtasks = [
+                asyncio.create_task(coro())
+                for coro in (
+                    self.weather_model.monitor,
+                    self.hvac_model.monitor,
+                )
+            ]
+            done, pending = await asyncio.wait(
+                self.subtasks, return_when=asyncio.FIRST_COMPLETED
+            )
+            self.subtasks = []
 
-                failure_count += 1
-                if failure_count >= MAX_FAILURES:
-                    self.log.error("Too many failures in succession. CSC will fault.")
-                    await self.fault(code=DOME_MONITOR_FAILED, report=str(ex))
-                    return
+            self.log.debug("At least one monitor task ended.")
 
-                # Exponential backoff with cap
-                backoff = min(INITIAL_BACKOFF * 2 ** (failure_count - 1), MAX_BACKOFF)
-                self.log.info(f"Backing off for {backoff:.1f} seconds")
-                await asyncio.sleep(backoff)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+
+            for task in done:
+                try:
+                    task.result()
+
+                except Exception as ex:
+                    self.log.exception("A monitor threw exception")
+
+                    failure_count += 1
+                    if failure_count >= MAX_FAILURES:
+                        self.log.error(
+                            "Too many failures in succession. CSC will fault."
+                        )
+                        await self.fault(code=DOME_MONITOR_FAILED, report=str(ex))
+                        return
+
+                    # Exponential backoff with cap
+                    backoff = min(
+                        INITIAL_BACKOFF * 2 ** (failure_count - 1), MAX_BACKOFF
+                    )
+                    self.log.info(f"Backing off for {backoff:.1f} seconds")
+                    await asyncio.sleep(backoff)
 
     @property
     def average_windspeed(self) -> float:
@@ -186,8 +223,8 @@ class EasCsc(salobj.ConfigurableCsc):
             NaN is returned. Units are m/s.
         """
         return (
-            self.hvac_model.average_windspeed
-            if self.hvac_model is not None
+            self.weather_model.average_windspeed
+            if self.weather_model is not None
             else float("nan")
         )
 
