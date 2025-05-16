@@ -31,3 +31,4 @@ ospl-info.log
 
 .idea/
 .pre-commit-config.yaml
+towncrier.toml

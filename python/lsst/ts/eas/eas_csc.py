@@ -22,22 +22,27 @@
 __all__ = ["EasCsc", "run_eas"]
 
 import asyncio
-import traceback
 import typing
-from math import isnan
 from types import SimpleNamespace
 
 from lsst.ts import salobj, utils
 
 from . import __version__
 from .config_schema import CONFIG_SCHEMA
+from .hvac_model import HvacModel
 
-SAL_TIMEOUT = 5.0  # SAL telemetry/command timeout
-SUMMARY_STATE_TIME = 5.0  # Wait time for a summary state change
-FAN_SLEEP_TIME = 30.0  # Time to wait after changing the fans
-VALVE_SLEEP_TIME = 60.0  # Time to wait after changing the valve
+# Constants for the health monitor:
+MAX_FAILURES = 15  # Maximum number of failures allowed before the CSC will fault.
+FAILURE_TIMEOUT = (
+    600  # Failure count will reset after monitor has run for this time (seconds).
+)
+INITIAL_BACKOFF = 1  # monitor initial retry delay (seconds)
+MAX_BACKOFF = 60  # monitor maximum retry delay (seconds)
 
-THERMAL_LOOP_ERROR = 100
+STD_TIMEOUT = 10  # seconds
+
+# Error codes
+DOME_MONITOR_FAILED = 101
 
 
 def run_eas() -> None:
@@ -81,232 +86,110 @@ class EasCsc(salobj.ConfigurableCsc):
             simulation_mode=simulation_mode,
             override=override,
         )
-        self.eas = None
-        self.m1m3ts = salobj.Remote(self.domain, "MTM1M3TS")
-        self.ess = salobj.Remote(self.domain, "ESS", index=112)
 
-        # Variables for the m1m3ts loop
-        self.m1m3_thermal_task = utils.make_done_future()
-        self.enabled_event = (
-            asyncio.Event()
-        )  # An event that is set when the CSC is enabled.
-
-        self.heater_demand: list[int] = [0] * 96
-        self.fan_demand: list[int] = [30] * 96
-        self.temperature_target_offset = -1.0
-
-        self.old_valve_position: float = float("nan")
-
-        self.log.info("__init__")
-
-    async def connect(self) -> None:
-        """Connect the EAS CSC or start the mock client, if in
-        simulation mode.
-        """
-        self.log.info("Connecting")
-        self.log.info(self.config)
-        self.log.info(f"self.simulation_mode = {self.simulation_mode}")
-        if self.config is None:
-            raise RuntimeError("Not yet configured")
-        if self.connected:
-            raise RuntimeError("Already connected")
-        if self.simulation_mode == 1:
-            # TODO Add code for simulation case, see DM-26440
-            pass
-        else:
-            # TODO Add code for non-simulation case
-            pass
-
-        if self.eas:
-            self.eas.connect()
-
-    async def disconnect(self) -> None:
-        """Disconnect the EAS CSC, if connected."""
-        self.log.info("Disconnecting")
-
-        if self.eas:
-            self.eas.disconnect()
+        self.health_monitor_task = utils.make_done_future()
+        self.hvac_model: HvacModel | None = None
 
     async def handle_summary_state(self) -> None:
-        """Override of the handle_summary_state function to connect or
-        disconnect to the EAS CSC (or the mock client) when needed.
+        """Override of the handle_summary_state function to
+        set up the control loop.
         """
-        self.log.info(f"handle_summary_state {salobj.State(self.summary_state).name}")
-
-        if self.summary_state == salobj.State.ENABLED:
-            self.enabled_event.set()
-        else:
-            self.enabled_event.clear()
+        self.log.debug(f"handle_summary_state {salobj.State(self.summary_state).name}")
 
         if self.disabled_or_enabled:
-            if self.m1m3_thermal_task.done():
-                self.m1m3_thermal_task = asyncio.create_task(self.run_control())
+            if self.health_monitor_task.done():
+                self.health_monitor_task = asyncio.create_task(self.monitor_health())
 
-            if not self.connected:
-                await self.connect()
         else:
-            if not self.m1m3_thermal_task.done():
-                self.m1m3_thermal_task.cancel()
-                try:
-                    await self.m1m3_thermal_task
-                except asyncio.CancelledError:
-                    pass
+            await self.shutdown_health_monitor()
 
-            await self.disconnect()
+    async def shutdown_health_monitor(self) -> None:
+        """Cancels the health monitor task and waits for completion."""
+        self.health_monitor_task.cancel()
+        try:
+            await self.health_monitor_task
+        except asyncio.CancelledError:
+            pass
+
+    async def close_tasks(self) -> None:
+        """Stop active tasks."""
+        await self.shutdown_health_monitor()
+        await super().close_tasks()
 
     async def configure(self, config: SimpleNamespace) -> None:
         self.config = config
+        self.hvac_model = HvacModel(
+            domain=self.domain,
+            log=self.log,
+            wind_threshold=self.config.wind_threshold,
+            wind_average_window=self.config.wind_average_window,
+            wind_minimum_window=self.config.wind_minimum_window,
+            vec04_hold_time=self.config.vec04_hold_time,
+        )
+
+    async def monitor_health(self) -> None:
+        """Manages the `monitor_dome_shutter` control loop.
+
+        Manages the `monitor_dome_shutter` control loop with backoff and
+        time-based failure reset, which is (hopefully) robust against
+        disconnects of the remotes, as well as any other form of
+        recoverable failure.
+        """
+        assert self.hvac_model is not None, "HVAC Model not initialized."
+
+        self.log.debug("monitor_health")
+        failure_count = 0
+        last_attempt_time = utils.current_tai()
+
+        while self.disabled_or_enabled:
+            now = utils.current_tai()
+
+            # Reset failure count if it's been too long since last attempt
+            if now - last_attempt_time > FAILURE_TIMEOUT:
+                self.log.info(
+                    f"Resetting monitor failure count: {now - last_attempt_time:.1f}s since last attempt"
+                )
+                failure_count = 0
+
+            last_attempt_time = now
+
+            try:
+                await self.hvac_model.monitor_dome_shutter()
+            except Exception as ex:
+                self.log.exception("monitor_dome_shutter threw exception")
+
+                failure_count += 1
+                if failure_count >= MAX_FAILURES:
+                    self.log.error("Too many failures in succession. CSC will fault.")
+                    await self.fault(code=DOME_MONITOR_FAILED, report=str(ex))
+                    return
+
+                # Exponential backoff with cap
+                backoff = min(INITIAL_BACKOFF * 2 ** (failure_count - 1), MAX_BACKOFF)
+                self.log.info(f"Backing off for {backoff:.1f} seconds")
+                await asyncio.sleep(backoff)
 
     @property
-    def connected(self) -> bool:
-        # TODO Add code to determine if the CSC is connected or not.
-        return True
+    def average_windspeed(self) -> float:
+        """Average windspeed in m/s.
 
-    async def run_loop(self) -> None:
-        """The core loop that regulates the M1M3 temperature."""
+        The measurement returned by this function uses ESS CSC telemetry
+        (collected while the monitor loop runs).
 
-        await self.enabled_event.wait()
-
-        assert not isnan(self.old_valve_position)
-
-        glycol = await self.m1m3ts.tel_glycolLoopTemperature.next(
-            flush=True, timeout=SAL_TIMEOUT
+        Returns
+        -------
+        float
+            The average of all wind speed samples collected
+            in the past `self.config.wind_average_window` seconds.
+            If the oldest sample is newer than
+            `config.wind_minimum_window` seconds old, then
+            NaN is returned. Units are m/s.
+        """
+        return (
+            self.hvac_model.average_windspeed
+            if self.hvac_model is not None
+            else float("nan")
         )
-        mixing = await self.m1m3ts.tel_mixingValve.next(flush=True, timeout=SAL_TIMEOUT)
-        fcu = await self.m1m3ts.tel_thermalData.next(flush=True, timeout=SAL_TIMEOUT)
-        current_temp = (
-            glycol.insideCellTemperature1
-            + glycol.insideCellTemperature2
-            + glycol.insideCellTemperature3
-        ) / 3
-        current_valve_position = mixing.valvePosition
-
-        fcu = await self.m1m3ts.tel_thermalData.next(flush=True, timeout=SAL_TIMEOUT)
-        fan_speed = fcu.fanRPM
-        fcu_temp = fcu.absoluteTemperature
-
-        air_temp = await self.ess.tel_temperature.next(flush=True, timeout=SAL_TIMEOUT)
-        target_temp = air_temp.temperatureItem[0] + self.temperature_target_offset
-
-        self.log.info(
-            f"""
-            target cell temp (above air temp): {target_temp}
-            current cell temp: {current_temp}
-            current valve position: {current_valve_position}
-            current fan speed: {fan_speed[50]}
-            current FCU temp: {fcu_temp[50]}
-            """
-        )
-
-        # if the FCUs are off, try to turn them on
-        if fan_speed[50] > 60000:
-            self.log.info(
-                f"fans off, turning them on and waiting {FAN_SLEEP_TIME} seconds..."
-            )
-            await salobj.set_summary_state(
-                self.m1m3ts,
-                salobj.State.STANDBY,
-                timeout=SAL_TIMEOUT,
-            )
-            await asyncio.sleep(SUMMARY_STATE_TIME)
-            await salobj.set_summary_state(
-                self.m1m3ts,
-                salobj.State.ENABLED,
-                timeout=SAL_TIMEOUT,
-            )
-            await asyncio.sleep(SUMMARY_STATE_TIME)
-            await self.m1m3ts.cmd_setEngineeringMode.set_start(
-                enableEngineeringMode=True,
-                timeout=SAL_TIMEOUT,
-            )
-            await self.m1m3ts.cmd_heaterFanDemand.set_start(
-                heaterPWM=self.heater_demand,
-                fanRPM=self.fan_demand,
-                timeout=SAL_TIMEOUT,
-            )
-            await asyncio.sleep(FAN_SLEEP_TIME)
-        elif fan_speed[50] < 50:
-            self.log.info(
-                "fans rpms too low, turning them back up and waiting {FAN_SLEEP_TIME} seconds..."
-            )
-            await salobj.set_summary_state(self.m1m3ts, salobj.State.STANDBY)
-            await asyncio.sleep(SUMMARY_STATE_TIME)
-            await salobj.set_summary_state(self.m1m3ts, salobj.State.ENABLED)
-            await asyncio.sleep(SUMMARY_STATE_TIME)
-            await self.m1m3ts.cmd_setEngineeringMode.set_start(
-                enableEngineeringMode=True,
-                timeout=SAL_TIMEOUT,
-            )
-            await self.m1m3ts.cmd_heaterFanDemand.set_start(
-                heaterPWM=self.heater_demand,
-                fanRPM=self.fan_demand,
-                timeout=SAL_TIMEOUT,
-            )
-            await asyncio.sleep(FAN_SLEEP_TIME)
-
-        if current_temp - target_temp >= 0.05:
-            new_valve_position = min(10.0, self.old_valve_position + 5.0)
-            self.log.info(f"temp high, adjusting mixing valve to: {new_valve_position}")
-            await self.m1m3ts.cmd_setMixingValve.set_start(
-                mixingValveTarget=new_valve_position,
-                timeout=SAL_TIMEOUT,
-            )
-            self.old_valve_position = new_valve_position
-            self.log.debug(f"waiting {VALVE_SLEEP_TIME} seconds...")
-            await asyncio.sleep(VALVE_SLEEP_TIME)
-        elif current_temp - target_temp <= -0.05:
-            new_valve_position = max(0.0, self.old_valve_position - 5.0)
-            self.log.info(f"temp low, adjusting mixing valve to: {new_valve_position}")
-            await self.m1m3ts.cmd_setMixingValve.set_start(
-                mixingValveTarget=new_valve_position, timeout=5
-            )
-            self.old_valve_position = new_valve_position
-            self.log.debug(f"waiting {VALVE_SLEEP_TIME} seconds...")
-            await asyncio.sleep(VALVE_SLEEP_TIME)
-        else:
-            self.log.debug(
-                f"""
-                doing nothing, valve position: {current_valve_position}
-                waiting {VALVE_SLEEP_TIME} seconds for update...
-                """
-            )
-            await asyncio.sleep(VALVE_SLEEP_TIME)
-
-    async def run_control(self) -> None:
-        """Runs the control loop for the fans and the heaters."""
-
-        if self.simulation_mode != 0:
-            return
-
-        try:
-            mixing = await self.m1m3ts.tel_mixingValve.next(
-                flush=True, timeout=SAL_TIMEOUT
-            )
-        except Exception:
-            await self.fault(
-                code=THERMAL_LOOP_ERROR,
-                report="Failed to get mixing valve telemetry from M1M3TS.",
-                traceback=traceback.format_exc(),
-            )
-
-        current_valve_position = mixing.valvePosition
-        self.old_valve_position = current_valve_position
-
-        while True:
-            try:
-                await self.run_loop()
-
-            except asyncio.CancelledError:
-                self.log.info("M1M3 thermal control loop cancelled.")
-                raise
-            except Exception:
-                self.log.exception("Error running the thermal loop.")
-                await self.fault(
-                    code=THERMAL_LOOP_ERROR,
-                    report="Error running thermal loop.",
-                    traceback=traceback.format_exc(),
-                )
-                break
 
     @staticmethod
     def get_config_pkg() -> str:
