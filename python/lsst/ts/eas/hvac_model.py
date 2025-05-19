@@ -92,7 +92,13 @@ class HvacModel:
         self.log.debug(
             f"air_flow_callback: {air_flow.private_sndStamp=} {air_flow.speed=}"
         )
-        self.wind_history.append((air_flow.speed, air_flow.private_sndStamp))
+        now = air_flow.private_sndStamp
+        self.wind_history.append((air_flow.speed, now))
+
+        # Prune old data
+        time_horizon = now - self.wind_average_window
+        while self.wind_history and self.wind_history[0][1] < time_horizon:
+            self.wind_history.popleft()
 
     @property
     def average_windspeed(self) -> float:
