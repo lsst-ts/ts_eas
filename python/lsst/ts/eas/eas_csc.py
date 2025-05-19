@@ -29,6 +29,7 @@ from lsst.ts import salobj, utils
 
 from . import __version__
 from .config_schema import CONFIG_SCHEMA
+from .diurnal_timer import DiurnalTimer
 from .hvac_model import HvacModel
 from .weather_model import WeatherModel
 
@@ -90,6 +91,7 @@ class EasCsc(salobj.ConfigurableCsc):
 
         self.health_monitor_task = utils.make_done_future()
         self.subtasks: list[asyncio.Task[None]] = []
+        self.diurnal_timer: DiurnalTimer | None = None
         self.hvac_model: HvacModel | None = None
 
     async def handle_summary_state(self) -> None:
@@ -122,22 +124,29 @@ class EasCsc(salobj.ConfigurableCsc):
     async def close_tasks(self) -> None:
         """Stop active tasks."""
         await self.shutdown_health_monitor()
+        if self.diurnal_timer is not None:
+            await self.diurnal_timer.stop()
         await super().close_tasks()
 
     async def configure(self, config: SimpleNamespace) -> None:
         self.config = config
+        self.diurnal_timer = DiurnalTimer(sun_altitude=self.config.twilight_definition)
         self.weather_model = WeatherModel(
             domain=self.domain,
             log=self.log,
+            diurnal_timer=self.diurnal_timer,
+            ess_index=self.config.weather_ess_index,
             wind_average_window=self.config.wind_average_window,
             wind_minimum_window=self.config.wind_minimum_window,
         )
         self.hvac_model = HvacModel(
             domain=self.domain,
             log=self.log,
+            diurnal_timer=self.diurnal_timer,
             weather_model=self.weather_model,
             wind_threshold=self.config.wind_threshold,
             vec04_hold_time=self.config.vec04_hold_time,
+            features_to_disable=self.config.features_to_disable,
         )
 
     async def monitor_health(self) -> None:
@@ -149,12 +158,14 @@ class EasCsc(salobj.ConfigurableCsc):
         recoverable failure.
         """
         assert self.hvac_model is not None, "HVAC Model not initialized."
+        assert self.diurnal_timer is not None, "Timer not initialized."
 
         self.log.debug("monitor_health")
         failure_count = 0
         last_attempt_time = utils.current_tai()
 
         while self.disabled_or_enabled:
+            self.diurnal_timer.start()
             now = utils.current_tai()
 
             # Reset failure count if it's been too long since last attempt

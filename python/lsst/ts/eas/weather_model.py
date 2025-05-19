@@ -21,11 +21,15 @@
 
 __all__ = ["WeatherModel"]
 
-import asyncio
 import logging
 from collections import deque
 
 from lsst.ts import salobj, utils
+
+from .diurnal_timer import DiurnalTimer
+
+N_TWILIGHT_SAMPLES = 10  # Number of samples to collect for twilight temperature.
+SAL_TIMEOUT = 60  # SAL timeout time. (seconds)
 
 
 class WeatherModel:
@@ -48,17 +52,23 @@ class WeatherModel:
         *,
         domain: salobj.Domain,
         log: logging.Logger,
+        diurnal_timer: DiurnalTimer,
+        ess_index: int = 301,
         wind_average_window: float = 30 * 60,
         wind_minimum_window: float = 10 * 60,
     ) -> None:
         self.domain = domain
         self.log = log
+        self.diurnal_timer = diurnal_timer
 
         self.wind_average_window = wind_average_window
         self.wind_minimum_window = wind_minimum_window
 
         # A deque containing tuples of timestamp, windspeed
         self.wind_history: deque = deque()
+
+        # The last observed temperature at the end of twilight
+        self.last_twilight_temperature: float | None = None
 
     async def air_flow_callback(self, air_flow: salobj.BaseMsgType) -> None:
         """Callback for ESS.tel_airFlow.
@@ -123,9 +133,8 @@ class WeatherModel:
         """Monitors the dome status and windspeed to control the HVAC.
 
         This monitor does the following:
-         * If the dome is open, it turns on the four AHUs.
-         * If the dome is closed, it turns off the AHUs.
-         * If the dome is open and the wind is calm, it turns on VEC-04.
+         * Sets a callback for ESS.airFlow to collect average windspeed.
+         * Waits for evening twilight and then gets a temperature measurement.
         """
         self.log.debug("WeatherModel.monitor")
 
@@ -134,6 +143,22 @@ class WeatherModel:
         ) as weather_remote:
             weather_remote.tel_airFlow.callback = self.air_flow_callback
 
-            while True:
-                # TODO: add measurement of temperature at end of twilight
-                await asyncio.sleep(3600)
+            while self.diurnal_timer.is_running:
+                async with self.diurnal_timer.twilight_condition:
+                    await self.diurnal_timer.twilight_condition.wait()
+                    if self.diurnal_timer.is_running:
+                        # Collect ten temperature samples from ESS.
+                        data = [
+                            await weather_remote.tel_temperature.next(
+                                flush=True, timeout=SAL_TIMEOUT
+                            )
+                            for _ in range(N_TWILIGHT_SAMPLES)
+                        ]
+                        temperature_list = [
+                            x for d in data for x in d.temperatureItem[: d.numChannels]
+                        ]
+
+                        # Store the average for future use.
+                        self.last_twilight_temperature = sum(temperature_list) / len(
+                            temperature_list
+                        )

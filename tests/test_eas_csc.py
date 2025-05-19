@@ -236,7 +236,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
 
             await self.load_wind_history("air_flow.ecsv")
             await self.mtdome.tel_apertureShutter.set_write(
-                positionActual=(1.0, 1.0),
+                positionActual=(100.0, 100.0),
             )
             # Give the telemetry time to propagate into the EAS CSC
             await asyncio.sleep(STD_SLEEP)
@@ -265,7 +265,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
 
             await self.load_wind_history("high_wind.ecsv")
             await self.mtdome.tel_apertureShutter.set_write(
-                positionActual=(1.0, 1.0),
+                positionActual=(100.0, 100.0),
             )
             # Give the telemetry time to propagate into the EAS CSC
             await asyncio.sleep(STD_SLEEP)
@@ -293,7 +293,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(STD_SLEEP)
 
             await self.mtdome.tel_apertureShutter.set_write(
-                positionActual=(1.0, 1.0),
+                positionActual=(100.0, 100.0),
             )
             await self.ess.tel_airFlow.set_write(
                 speed=0,
@@ -353,7 +353,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(STD_SLEEP)
 
             await self.mtdome.tel_apertureShutter.set_write(
-                positionActual=(1.0, 1.0),
+                positionActual=(100.0, 100.0),
             )
             await asyncio.sleep(STD_SLEEP)
 
@@ -386,7 +386,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             # followed by 30 minutes of low winds.
             await self.load_wind_history("stale_wind_data.ecsv")
             await self.mtdome.tel_apertureShutter.set_write(
-                positionActual=(1.0, 1.0),
+                positionActual=(100.0, 100.0),
             )
             # Give the telemetry time to propagate into the EAS CSC
             await asyncio.sleep(STD_SLEEP)
