@@ -1,3 +1,12 @@
+v0.8.1 (2025-05-20)
+===================
+
+Bug Fixes
+---------
+
+- Fixed memory leak. (`DM-51001 <https://rubinobs.atlassian.net//browse/DM-51001>`_)
+
+
 v0.8.0 (2025-05-16)
 ===================
 
