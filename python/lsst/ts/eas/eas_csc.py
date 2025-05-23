@@ -31,6 +31,7 @@ from . import __version__
 from .config_schema import CONFIG_SCHEMA
 from .diurnal_timer import DiurnalTimer
 from .hvac_model import HvacModel
+from .m1m3ts_model import M1M3TSModel
 from .weather_model import WeatherModel
 
 # Constants for the health monitor:
@@ -93,6 +94,7 @@ class EasCsc(salobj.ConfigurableCsc):
         self.subtasks: list[asyncio.Task[None]] = []
         self.diurnal_timer: DiurnalTimer | None = None
         self.hvac_model: HvacModel | None = None
+        self.m1m3ts_model: M1M3TSModel | None = None
 
     async def handle_summary_state(self) -> None:
         """Override of the handle_summary_state function to
@@ -148,6 +150,15 @@ class EasCsc(salobj.ConfigurableCsc):
             vec04_hold_time=self.config.vec04_hold_time,
             features_to_disable=self.config.features_to_disable,
         )
+        self.m1m3ts_model = M1M3TSModel(
+            domain=self.domain,
+            log=self.log,
+            diurnal_timer=self.diurnal_timer,
+            weather_model=self.weather_model,
+            glycol_setpoint_delta=self.config.glycol_setpoint_delta,
+            heater_setpoint_delta=self.config.heater_setpoint_delta,
+            features_to_disable=self.config.features_to_disable,
+        )
 
     async def monitor_health(self) -> None:
         """Manages the `monitor_dome_shutter` control loop.
@@ -158,30 +169,20 @@ class EasCsc(salobj.ConfigurableCsc):
         recoverable failure.
         """
         assert self.hvac_model is not None, "HVAC Model not initialized."
+        assert self.m1m3ts_model is not None, "M1M3TS Model not initialized."
         assert self.diurnal_timer is not None, "Timer not initialized."
 
         self.log.debug("monitor_health")
-        failure_count = 0
-        last_attempt_time = utils.current_tai()
 
         while self.disabled_or_enabled:
             self.diurnal_timer.start()
-            now = utils.current_tai()
-
-            # Reset failure count if it's been too long since last attempt
-            if now - last_attempt_time > FAILURE_TIMEOUT:
-                self.log.info(
-                    f"Resetting monitor failure count: {now - last_attempt_time:.1f}s since last attempt"
-                )
-                failure_count = 0
-
-            last_attempt_time = now
 
             self.subtasks = [
                 asyncio.create_task(coro())
                 for coro in (
                     self.weather_model.monitor,
                     self.hvac_model.monitor,
+                    self.m1m3ts_model.monitor,
                 )
             ]
             done, pending = await asyncio.wait(
@@ -201,21 +202,8 @@ class EasCsc(salobj.ConfigurableCsc):
 
                 except Exception as ex:
                     self.log.exception("A monitor threw exception")
-
-                    failure_count += 1
-                    if failure_count >= MAX_FAILURES:
-                        self.log.error(
-                            "Too many failures in succession. CSC will fault."
-                        )
-                        await self.fault(code=DOME_MONITOR_FAILED, report=str(ex))
-                        return
-
-                    # Exponential backoff with cap
-                    backoff = min(
-                        INITIAL_BACKOFF * 2 ** (failure_count - 1), MAX_BACKOFF
-                    )
-                    self.log.info(f"Backing off for {backoff:.1f} seconds")
-                    await asyncio.sleep(backoff)
+                    await self.fault(code=DOME_MONITOR_FAILED, report=str(ex))
+                    return
 
     @property
     def average_windspeed(self) -> float:

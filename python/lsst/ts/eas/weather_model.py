@@ -24,12 +24,14 @@ __all__ = ["WeatherModel"]
 import logging
 from collections import deque
 
+import backoff
 from lsst.ts import salobj, utils
 
 from .diurnal_timer import DiurnalTimer
 
 N_TWILIGHT_SAMPLES = 10  # Number of samples to collect for twilight temperature.
 SAL_TIMEOUT = 60  # SAL timeout time. (seconds)
+BACKOFF_BASE = 60  # Base of exponential backoff (seconds)
 
 
 class WeatherModel:
@@ -147,18 +149,33 @@ class WeatherModel:
                 async with self.diurnal_timer.twilight_condition:
                     await self.diurnal_timer.twilight_condition.wait()
                     if self.diurnal_timer.is_running:
-                        # Collect ten temperature samples from ESS.
-                        data = [
-                            await weather_remote.tel_temperature.next(
-                                flush=True, timeout=SAL_TIMEOUT
+                        try:
+                            self.last_twilight_temperature = (
+                                await self.measure_twilight_temperature(weather_remote)
                             )
-                            for _ in range(N_TWILIGHT_SAMPLES)
-                        ]
-                        temperature_list = [
-                            x for d in data for x in d.temperatureItem[: d.numChannels]
-                        ]
+                        except Exception:
+                            self.log.exception("Failed to read temperature from ESS")
+                            self.last_twilight_temperature = None
+                            raise
 
-                        # Store the average for future use.
-                        self.last_twilight_temperature = sum(temperature_list) / len(
-                            temperature_list
-                        )
+    @backoff.on_exception(
+        backoff.expo,
+        Exception,
+        max_tries=5,
+        jitter=backoff.full_jitter,
+        base=60,  # Start at 60 seconds
+    )
+    async def measure_twilight_temperature(
+        self, weather_remote: salobj.Remote
+    ) -> float:
+        # Collect ten temperature samples from ESS.
+        data = [
+            await weather_remote.tel_temperature.next(flush=True, timeout=SAL_TIMEOUT)
+            for _ in range(N_TWILIGHT_SAMPLES)
+        ]
+        temperature_list = [x for d in data for x in d.temperatureItem[: d.numChannels]]
+
+        # Store the average for future use.
+        last_twilight_temperature = sum(temperature_list) / len(temperature_list)
+        self.log.info(f"Collected twilight temperature: {last_twilight_temperature}")
+        return last_twilight_temperature

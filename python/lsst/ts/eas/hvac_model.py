@@ -205,9 +205,6 @@ class HvacModel:
         hvac_remote : salobj.Remote
             A SALobj remote representing the HVAC.
         """
-        if "room_setpoint" in self.features_to_disable:
-            return
-
         while self.diurnal_timer.is_running:
             async with self.diurnal_timer.noon_condition:
                 await self.diurnal_timer.noon_condition.wait()
@@ -215,16 +212,17 @@ class HvacModel:
                     self.diurnal_timer.is_running
                     and self.weather_model.last_twilight_temperature is not None
                 ):
-                    # Time to set the room setpoint based on last twilight
-                    for device_id in (
-                        DeviceId.lowerAHU01P05,
-                        DeviceId.lowerAHU02P05,
-                        DeviceId.lowerAHU03P05,
-                        DeviceId.lowerAHU04P05,
-                    ):
-                        await hvac_remote.cmd_configAhu.set_start(
-                            device_id=device_id,
-                            maxFanSetpoint=float("nan"),
-                            minFanSetpoint=float("nan"),
-                            roomSetpoint=self.weather_model.last_twilight_temperature,
-                        )
+                    if "room_setpoint" not in self.features_to_disable:
+                        # Time to set the room setpoint based on last twilight
+                        for device_id in (
+                            DeviceId.lowerAHU01P05,
+                            DeviceId.lowerAHU02P05,
+                            DeviceId.lowerAHU03P05,
+                            DeviceId.lowerAHU04P05,
+                        ):
+                            await hvac_remote.cmd_configAhu.set_start(
+                                device_id=device_id,
+                                maxFanSetpoint=float("nan"),
+                                minFanSetpoint=float("nan"),
+                                roomSetpoint=self.weather_model.last_twilight_temperature,
+                            )
