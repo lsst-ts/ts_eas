@@ -72,8 +72,6 @@ class TestDiurnalTimer(unittest.IsolatedAsyncioTestCase):
         return Time(self.fake_now)
 
     async def fake_sleep(self, seconds: float) -> None:
-        print(f"fake_sleep({seconds})")
-
         # Schedule the next wakeup
         async with self._sleep_lock:
             # Set the time to wake up:

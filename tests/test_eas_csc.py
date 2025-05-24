@@ -88,14 +88,20 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         self.mtdome = salobj.Controller("MTDome")
         self.hvac = salobj.Controller("HVAC")
         self.ess = salobj.Controller("ESS", 301)
+        self.ess112: salobj.Controller | None = salobj.Controller("ESS", 112)
 
         await asyncio.wait_for(
             asyncio.gather(
                 self.mtdome.start_task,
                 self.hvac.start_task,
                 self.ess.start_task,
+                self.ess112.start_task,
             ),
             timeout=STD_TIMEOUT,
+        )
+
+        emit_ess112_temperature_task = asyncio.create_task(
+            self.emit_ess112_temperature()
         )
 
         self.hvac.cmd_enableDevice.callback = self.enable_callback
@@ -104,9 +110,33 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         try:
             yield
         finally:
+            self.log.warning("Extra CSCs shutting down")
+            ess112 = self.ess112
+            self.ess112 = None
+            emit_ess112_temperature_task.cancel()
+            try:
+                await emit_ess112_temperature_task
+            except asyncio.CancelledError:
+                pass
+
             await self.mtdome.close()
             await self.hvac.close()
             await self.ess.close()
+            await ess112.close()
+
+    async def emit_ess112_temperature(self) -> None:
+        while True:
+            await asyncio.sleep(3)
+            if self.ess112 is not None:
+                if not self.ess112.isopen:
+                    breakpoint()
+                await self.ess112.tel_temperature.set_write(
+                    sensorName="",
+                    timestamp=0,
+                    numChannels=1,
+                    temperatureItem=[0] * 16,
+                    location="",
+                )
 
     async def enable_callback(self, message: salobj.topics.BaseTopic.DataType) -> None:
         """Callback for HVAC.cmd_enableDevice."""
@@ -424,11 +454,20 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             await self.hvac.close()
             await self.ess.close()
 
+            # Close ESS:112, being careful to stop telemetry first.
+            assert self.ess112 is not None
+            ess112 = self.ess112
+            self.ess112 = None
+            await ess112.close()
+
+            self.log.info(f"sleep({LONG_SLEEP})")
             await asyncio.sleep(LONG_SLEEP)
+            self.log.info(f"sleep({LONG_SLEEP}) done")
 
             self.mtdome = salobj.Controller("MTDome")
             self.hvac = salobj.Controller("HVAC")
             self.ess = salobj.Controller("ESS", 301)
+            self.ess112 = salobj.Controller("ESS", 112)
 
             self.hvac.cmd_enableDevice.callback = self.enable_callback
             self.hvac.cmd_disableDevice.callback = self.disable_callback
@@ -438,6 +477,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                     self.mtdome.start_task,
                     self.hvac.start_task,
                     self.ess.start_task,
+                    self.ess112.start_task,
                 ),
                 timeout=STD_TIMEOUT,
             )
