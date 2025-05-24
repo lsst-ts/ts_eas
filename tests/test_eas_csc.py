@@ -34,8 +34,8 @@ from lsst.ts import eas, salobj, utils
 from lsst.ts.xml.enums.HVAC import DeviceId
 
 STD_TIMEOUT = 60
-STD_SLEEP = 10
-LONG_SLEEP = 30
+STD_SLEEP = 5
+LONG_SLEEP = 15
 MAX_RETRIES = 100
 
 TEST_CONFIG_DIR = pathlib.Path(__file__).parents[1].joinpath("tests", "config")
@@ -88,14 +88,20 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         self.mtdome = salobj.Controller("MTDome")
         self.hvac = salobj.Controller("HVAC")
         self.ess = salobj.Controller("ESS", 301)
+        self.ess112: salobj.Controller | None = salobj.Controller("ESS", 112)
 
         await asyncio.wait_for(
             asyncio.gather(
                 self.mtdome.start_task,
                 self.hvac.start_task,
                 self.ess.start_task,
+                self.ess112.start_task,
             ),
             timeout=STD_TIMEOUT,
+        )
+
+        emit_ess112_temperature_task = asyncio.create_task(
+            self.emit_ess112_temperature()
         )
 
         self.hvac.cmd_enableDevice.callback = self.enable_callback
@@ -104,9 +110,31 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         try:
             yield
         finally:
+            self.log.warning("Extra CSCs shutting down")
+            ess112 = self.ess112
+            self.ess112 = None
+            emit_ess112_temperature_task.cancel()
+            try:
+                await emit_ess112_temperature_task
+            except asyncio.CancelledError:
+                pass
+
             await self.mtdome.close()
             await self.hvac.close()
             await self.ess.close()
+            await ess112.close()
+
+    async def emit_ess112_temperature(self) -> None:
+        while True:
+            await asyncio.sleep(3)
+            if self.ess112 is not None:
+                await self.ess112.tel_temperature.set_write(
+                    sensorName="",
+                    timestamp=0,
+                    numChannels=1,
+                    temperatureItem=[0] * 16,
+                    location="",
+                )
 
     async def enable_callback(self, message: salobj.topics.BaseTopic.DataType) -> None:
         """Callback for HVAC.cmd_enableDevice."""
@@ -211,6 +239,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             )
             # Give the telemetry time to propagate into the EAS CSC
             await asyncio.sleep(STD_SLEEP)
+            await self.csc.close_tasks()
 
         self.assertAlmostEqual(
             self.csc.average_windspeed, self.wind_data["speed"].mean(), delta=0.1
@@ -240,6 +269,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             )
             # Give the telemetry time to propagate into the EAS CSC
             await asyncio.sleep(STD_SLEEP)
+            await self.csc.close_tasks()
 
         self.assertAlmostEqual(
             self.csc.average_windspeed, self.wind_data["speed"].mean(), delta=0.1
@@ -269,6 +299,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             )
             # Give the telemetry time to propagate into the EAS CSC
             await asyncio.sleep(STD_SLEEP)
+            await self.csc.close_tasks()
 
         self.assertAlmostEqual(
             self.csc.average_windspeed, self.wind_data["speed"].mean(), delta=0.1
@@ -338,6 +369,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                     break
 
             self.assertEqual(self.vec04_state, True)
+            await self.csc.close_tasks()
 
     async def test_no_wind(self) -> None:
         """If no wind data available, turn VEC-04 off."""
@@ -356,6 +388,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 positionActual=(100.0, 100.0),
             )
             await asyncio.sleep(STD_SLEEP)
+            await self.csc.close_tasks()
 
         self.assertTrue(np.isnan(self.csc.average_windspeed))
         self.assertEqual(self.ahu1_state, False)
@@ -390,6 +423,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             )
             # Give the telemetry time to propagate into the EAS CSC
             await asyncio.sleep(STD_SLEEP)
+            await self.csc.close_tasks()
 
         mask = self.wind_data["speed"] < 100
         self.wind_data = self.wind_data[mask]
@@ -424,11 +458,20 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             await self.hvac.close()
             await self.ess.close()
 
+            # Close ESS:112, being careful to stop telemetry first.
+            assert self.ess112 is not None
+            ess112 = self.ess112
+            self.ess112 = None
+            await ess112.close()
+
+            self.log.info(f"sleep({LONG_SLEEP})")
             await asyncio.sleep(LONG_SLEEP)
+            self.log.info(f"sleep({LONG_SLEEP}) done")
 
             self.mtdome = salobj.Controller("MTDome")
             self.hvac = salobj.Controller("HVAC")
             self.ess = salobj.Controller("ESS", 301)
+            ess112 = salobj.Controller("ESS", 112)
 
             self.hvac.cmd_enableDevice.callback = self.enable_callback
             self.hvac.cmd_disableDevice.callback = self.disable_callback
@@ -438,9 +481,11 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                     self.mtdome.start_task,
                     self.hvac.start_task,
                     self.ess.start_task,
+                    ess112.start_task,
                 ),
                 timeout=STD_TIMEOUT,
             )
+            self.ess112 = ess112
 
             await self.load_wind_history("air_flow.ecsv")
             await self.mtdome.tel_apertureShutter.set_write(
@@ -451,6 +496,8 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(STD_SLEEP)
                 if self.ahu1_state is not None:
                     break
+
+            await self.csc.close_tasks()
 
         self.assertAlmostEqual(
             self.csc.average_windspeed, self.wind_data["speed"].mean(), delta=0.1

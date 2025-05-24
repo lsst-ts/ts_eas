@@ -95,8 +95,14 @@ class HvacModel:
         self.log.debug("HvacModel.monitor")
 
         async with salobj.Remote(
-            domain=self.domain, name="MTDome"
-        ) as dome_remote, salobj.Remote(domain=self.domain, name="HVAC") as hvac_remote:
+            domain=self.domain,
+            name="MTDome",
+            include=("apertureShutter",),
+        ) as dome_remote, salobj.Remote(
+            domain=self.domain,
+            name="HVAC",
+            include=("enableDevice", "disableDevice", "configAhu"),
+        ) as hvac_remote:
             hvac_future = asyncio.gather(
                 self.control_ahus_and_vec04(
                     dome_remote=dome_remote, hvac_remote=hvac_remote
