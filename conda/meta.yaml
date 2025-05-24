@@ -19,6 +19,9 @@ test:
     - ts-salobj {{ salobj_version }}
     - ts-dds
     - backoff
+    - astropy
+    - numpy
+    - scipy
   source_files:
     - python
     - bin
@@ -44,3 +47,6 @@ requirements:
     - ts-xml {{ xml_version }}
     - ts-salobj {{ salobj_version }}
     - backoff
+    - astropy
+    - numpy
+    - scipy
