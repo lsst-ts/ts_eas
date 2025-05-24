@@ -17,7 +17,6 @@ test:
     - ts-conda-build =0.4
     - ts-xml {{ xml_version }}
     - ts-salobj {{ salobj_version }}
-    - ts-dds
     - backoff
     - astropy
     - numpy
@@ -28,7 +27,7 @@ test:
     - tests
     - pyproject.toml
   commands:
-    - pytest
+    - pytest -vv --log-cli-level=INFO
 
 requirements:
   host:

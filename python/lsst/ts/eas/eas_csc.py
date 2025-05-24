@@ -153,8 +153,6 @@ class EasCsc(salobj.ConfigurableCsc):
         self.m1m3ts_model = M1M3TSModel(
             domain=self.domain,
             log=self.log,
-            diurnal_timer=self.diurnal_timer,
-            weather_model=self.weather_model,
             glycol_setpoint_delta=self.config.glycol_setpoint_delta,
             heater_setpoint_delta=self.config.heater_setpoint_delta,
             features_to_disable=self.config.features_to_disable,

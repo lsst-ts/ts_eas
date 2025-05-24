@@ -141,7 +141,10 @@ class WeatherModel:
         self.log.debug("WeatherModel.monitor")
 
         async with salobj.Remote(
-            domain=self.domain, name="ESS", index=301
+            domain=self.domain,
+            name="ESS",
+            index=301,
+            include=("airFlow", "temperature"),
         ) as weather_remote:
             weather_remote.tel_airFlow.callback = self.air_flow_callback
 

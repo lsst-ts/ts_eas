@@ -25,7 +25,6 @@ import logging
 import os
 import typing
 import unittest
-from types import SimpleNamespace
 
 from lsst.ts import eas, salobj
 
@@ -50,7 +49,7 @@ class M1M3TSMock(salobj.BaseCsc):
         self.glycol_setpoint: float | None = None
         self.heater_setpoint: float | None = None
 
-    async def do_applySetpoints(self, data: salobj.BaseMsgType) -> None:
+    async def do_applySetpoint(self, data: salobj.BaseMsgType) -> None:
         self.glycol_setpoint = data.glycolSetpoint
         self.heater_setpoint = data.heatersSetpoint
 
@@ -60,6 +59,40 @@ class TestM1M3(unittest.IsolatedAsyncioTestCase):
         salobj.testutils.set_test_topic_subname(randomize=False)
         os.environ["LSST_SITE"] = "test"
         super().run(result)  # type: ignore
+
+    @contextlib.asynccontextmanager
+    async def mock_extra_cscs(
+        self, ess112_temperature: float | None
+    ) -> typing.AsyncGenerator[None, None]:
+        self.ess112 = salobj.Controller("ESS", 112)
+        await self.ess112.start_task
+
+        if ess112_temperature is not None:
+            emit_ess112_temperature_task = asyncio.create_task(
+                self.emit_ess112_temperature(ess112_temperature)
+            )
+
+        try:
+            yield
+        finally:
+            if ess112_temperature is not None:
+                emit_ess112_temperature_task.cancel()
+                try:
+                    await emit_ess112_temperature_task
+                except asyncio.CancelledError:
+                    pass
+            await self.ess112.close()
+
+    async def emit_ess112_temperature(self, ess112_temperature: float) -> None:
+        while True:
+            await asyncio.sleep(3)
+            await self.ess112.tel_temperature.set_write(
+                sensorName="",
+                timestamp=0,
+                numChannels=1,
+                temperatureItem=[ess112_temperature] * 16,
+                location="",
+            )
 
     @contextlib.asynccontextmanager
     async def mock_m1m3ts(self) -> typing.AsyncGenerator[None, None]:
@@ -75,29 +108,23 @@ class TestM1M3(unittest.IsolatedAsyncioTestCase):
                 pass
 
     async def run_with_parameters(
-        self, twilight_temperature: float, **model_args: typing.Any
+        self, ess112_temperature: float | None, **model_args: typing.Any
     ) -> tuple[float | None, float | None]:
         diurnal_timer = eas.diurnal_timer.DiurnalTimer()
         diurnal_timer.is_running = True
 
-        weather_model = SimpleNamespace(last_twilight_temperature=twilight_temperature)
-        async with M1M3TSMock() as mock_m1m3ts, salobj.Domain() as domain:
+        async with self.mock_extra_cscs(
+            ess112_temperature
+        ), M1M3TSMock() as mock_m1m3ts, salobj.Domain() as domain:
             self.m1m3ts_model = eas.m1m3ts_model.M1M3TSModel(
                 domain=domain,
                 log=mock_m1m3ts.log,
-                diurnal_timer=diurnal_timer,
-                weather_model=weather_model,
                 glycol_setpoint_delta=model_args["glycol_setpoint_delta"],
                 heater_setpoint_delta=model_args["heater_setpoint_delta"],
                 features_to_disable=model_args["features_to_disable"],
             )
             monitor_task = asyncio.create_task(self.m1m3ts_model.monitor())
-            await asyncio.sleep(1)
-
-            # Fake a noon condition...
-            async with diurnal_timer.noon_condition:
-                diurnal_timer.noon_condition.notify_all()
-            await asyncio.sleep(1)
+            await asyncio.sleep(70)
 
             monitor_task.cancel()
             try:
@@ -107,14 +134,14 @@ class TestM1M3(unittest.IsolatedAsyncioTestCase):
 
             return mock_m1m3ts.glycol_setpoint, mock_m1m3ts.heater_setpoint
 
-    async def test_noon(self) -> None:
-        """M1M3TS.applySetpoints should be called at noon."""
-        last_twilight_temperature = 10
+    async def test_m1m3ts_applysetpoints(self) -> None:
+        """M1M3TS.applySetpoint should be called at noon."""
+        ess112_temperature = 10
         glycol_setpoint_delta = -2
         heater_setpoint_delta = -1
 
         glycol_setpoint, heater_setpoint = await self.run_with_parameters(
-            last_twilight_temperature,
+            ess112_temperature,
             glycol_setpoint_delta=glycol_setpoint_delta,
             heater_setpoint_delta=heater_setpoint_delta,
             features_to_disable=[],
@@ -123,25 +150,25 @@ class TestM1M3(unittest.IsolatedAsyncioTestCase):
         assert glycol_setpoint is not None
         self.assertAlmostEqual(
             glycol_setpoint,
-            last_twilight_temperature + glycol_setpoint_delta,
+            ess112_temperature + glycol_setpoint_delta,
             places=4,
         )
 
         assert heater_setpoint is not None
         self.assertAlmostEqual(
             heater_setpoint,
-            last_twilight_temperature + heater_setpoint_delta,
+            ess112_temperature + heater_setpoint_delta,
             places=4,
         )
 
     async def test_disabled(self) -> None:
-        """The applySetpoints should not be called when m1m3ts is disabled."""
-        last_twilight_temperature = 10
+        """The applySetpoint should not be called when m1m3ts is disabled."""
+        ess112_temperature = 10
         glycol_setpoint_delta = -2
         heater_setpoint_delta = -1
 
         glycol_setpoint, heater_setpoint = await self.run_with_parameters(
-            last_twilight_temperature,
+            ess112_temperature,
             glycol_setpoint_delta=glycol_setpoint_delta,
             heater_setpoint_delta=heater_setpoint_delta,
             features_to_disable=["m1m3ts"],
@@ -149,3 +176,20 @@ class TestM1M3(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(glycol_setpoint is None)
         self.assertTrue(heater_setpoint is None)
+
+    async def test_no_ess112(self) -> None:
+        """m1m3ts_model.monitor() should raise if ESS112 does not send data."""
+        ess112_temperature = None
+        glycol_setpoint_delta = -2
+        heater_setpoint_delta = -1
+
+        with self.assertRaises(RuntimeError):
+            glycol_setpoint, heater_setpoint = await self.run_with_parameters(
+                ess112_temperature,
+                glycol_setpoint_delta=glycol_setpoint_delta,
+                heater_setpoint_delta=heater_setpoint_delta,
+                features_to_disable=[""],
+            )
+
+            self.assertTrue(glycol_setpoint is None)
+            self.assertTrue(heater_setpoint is None)
