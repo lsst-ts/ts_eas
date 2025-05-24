@@ -98,7 +98,10 @@ class M1M3TSModel:
                 while utils.current_tai() - start_time < M1M3_TEMPERATURE_CADENCE:
                     try:
                         sample = await ess_remote.tel_temperature.aget(timeout=10)
+                        await asyncio.sleep(0)  # Make sure we get CancelledError
                         temperatures.append(sample.temperatureItem[0])
+                    except asyncio.CancelledError:
+                        raise
                     except Exception as e:
                         self.log.warning(f"Failed to get ESS:112 temperature: {e!r}")
 

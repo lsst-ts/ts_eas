@@ -34,8 +34,8 @@ from lsst.ts import eas, salobj, utils
 from lsst.ts.xml.enums.HVAC import DeviceId
 
 STD_TIMEOUT = 60
-STD_SLEEP = 10
-LONG_SLEEP = 30
+STD_SLEEP = 5
+LONG_SLEEP = 15
 MAX_RETRIES = 100
 
 TEST_CONFIG_DIR = pathlib.Path(__file__).parents[1].joinpath("tests", "config")
@@ -128,8 +128,6 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         while True:
             await asyncio.sleep(3)
             if self.ess112 is not None:
-                if not self.ess112.isopen:
-                    breakpoint()
                 await self.ess112.tel_temperature.set_write(
                     sensorName="",
                     timestamp=0,
