@@ -45,9 +45,14 @@ class M1M3TSMock(salobj.BaseCsc):
             index=None,
             initial_state=salobj.State.ENABLED,
             allow_missing_callbacks=True,
+            extra_commands={"applySetpoint", "applySetpoints"},
         )
         self.glycol_setpoint: float | None = None
         self.heater_setpoint: float | None = None
+
+    async def do_applySetpoints(self, data: salobj.BaseMsgType) -> None:
+        self.glycol_setpoint = data.glycolSetpoint
+        self.heater_setpoint = data.heatersSetpoint
 
     async def do_applySetpoint(self, data: salobj.BaseMsgType) -> None:
         self.glycol_setpoint = data.glycolSetpoint

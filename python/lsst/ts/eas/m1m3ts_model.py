@@ -79,7 +79,6 @@ class M1M3TSModel:
         async with salobj.Remote(
             domain=self.domain,
             name="MTM1M3TS",
-            include=("applySetpoint",),
         ) as m1m3ts_remote:
             if "m1m3ts" not in self.features_to_disable:
                 await self.follow_ess112(m1m3ts_remote=m1m3ts_remote)
@@ -129,7 +128,13 @@ class M1M3TSModel:
                 self.log.debug(
                     f"Setting MTM1MTS: {glycol_setpoint=} {heaters_setpoint=}"
                 )
-                await m1m3ts_remote.cmd_applySetpoint.set_start(
-                    glycolSetpoint=glycol_setpoint,
-                    heatersSetpoint=heaters_setpoint,
-                )
+                if hasattr(m1m3ts_remote, "cmd_applySetpoints"):
+                    await m1m3ts_remote.cmd_applySetpoints.set_start(
+                        glycolSetpoint=glycol_setpoint,
+                        heatersSetpoint=heaters_setpoint,
+                    )
+                else:
+                    await m1m3ts_remote.cmd_applySetpoint.set_start(
+                        glycolSetpoint=glycol_setpoint,
+                        heatersSetpoint=heaters_setpoint,
+                    )
