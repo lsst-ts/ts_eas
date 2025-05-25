@@ -85,7 +85,11 @@ class M1M3TSModel:
                 await self.follow_ess112(m1m3ts_remote=m1m3ts_remote)
             else:
                 while True:
-                    await asyncio.sleep(86400)
+                    try:
+                        await asyncio.sleep(300)
+                    except asyncio.CancelledError:
+                        self.log.info("monitor cancelled")
+                        raise
 
     async def follow_ess112(self, m1m3ts_remote: salobj.Remote) -> None:
         self.log.debug("follow_ess112")

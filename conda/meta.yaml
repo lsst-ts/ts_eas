@@ -27,7 +27,7 @@ test:
     - tests
     - pyproject.toml
   commands:
-    - pytest
+    - pytest -vv --log-cli-level=INFO
 
 requirements:
   host:
