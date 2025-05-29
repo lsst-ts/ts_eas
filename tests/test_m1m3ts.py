@@ -69,13 +69,31 @@ class TestM1M3(unittest.IsolatedAsyncioTestCase):
     async def mock_extra_cscs(
         self, ess112_temperature: float | None
     ) -> typing.AsyncGenerator[None, None]:
+        self.domain = salobj.Domain()
+        self.log = logging.getLogger()
         self.ess112 = salobj.Controller("ESS", 112)
+        self.dome = salobj.Controller("MTDome")
         await self.ess112.start_task
+        await self.dome.start_task
+
+        self.dome_model = eas.dome_model.DomeModel(
+            domain=self.domain,
+        )
+        self.weather_model = eas.weather_model.WeatherModel(
+            domain=self.domain,
+            log=self.log,
+            diurnal_timer=self.diurnal_timer,
+            dome_model=self.dome_model,
+        )
 
         if ess112_temperature is not None:
             emit_ess112_temperature_task = asyncio.create_task(
                 self.emit_ess112_temperature(ess112_temperature)
             )
+
+        await self.dome.tel_apertureShutter.set_write(
+            positionActual=(100.0, 100.0),
+        )
 
         try:
             yield
@@ -87,6 +105,7 @@ class TestM1M3(unittest.IsolatedAsyncioTestCase):
                 except asyncio.CancelledError:
                     pass
             await self.ess112.close()
+            await self.domain.close()
 
     async def emit_ess112_temperature(self, ess112_temperature: float) -> None:
         while True:
@@ -115,17 +134,25 @@ class TestM1M3(unittest.IsolatedAsyncioTestCase):
     async def run_with_parameters(
         self, ess112_temperature: float | None, **model_args: typing.Any
     ) -> tuple[float | None, float | None]:
-        diurnal_timer = eas.diurnal_timer.DiurnalTimer()
-        diurnal_timer.is_running = True
+        self.diurnal_timer = eas.diurnal_timer.DiurnalTimer()
+        self.diurnal_timer.is_running = True
 
         async with self.mock_extra_cscs(
             ess112_temperature
-        ), M1M3TSMock() as mock_m1m3ts, salobj.Domain() as domain:
+        ), M1M3TSMock() as mock_m1m3ts:
             self.m1m3ts_model = eas.m1m3ts_model.M1M3TSModel(
-                domain=domain,
+                domain=self.domain,
                 log=mock_m1m3ts.log,
+                diurnal_timer=self.diurnal_timer,
+                dome_model=self.dome_model,
+                weather_model=self.weather_model,
+                indoor_ess_index=112,
                 glycol_setpoint_delta=model_args["glycol_setpoint_delta"],
                 heater_setpoint_delta=model_args["heater_setpoint_delta"],
+                m1m3_setpoint_cadence=10,
+                setpoint_deadband_heating=0,
+                setpoint_deadband_cooling=0,
+                maximum_heating_rate=100,
                 features_to_disable=model_args["features_to_disable"],
             )
             monitor_task = asyncio.create_task(self.m1m3ts_model.monitor())
