@@ -30,6 +30,7 @@ from lsst.ts import salobj, utils
 from . import __version__
 from .config_schema import CONFIG_SCHEMA
 from .diurnal_timer import DiurnalTimer
+from .dome_model import DomeModel
 from .hvac_model import HvacModel
 from .m1m3ts_model import M1M3TSModel
 from .weather_model import WeatherModel
@@ -133,10 +134,12 @@ class EasCsc(salobj.ConfigurableCsc):
     async def configure(self, config: SimpleNamespace) -> None:
         self.config = config
         self.diurnal_timer = DiurnalTimer(sun_altitude=self.config.twilight_definition)
+        self.dome_model = DomeModel(domain=self.domain)
         self.weather_model = WeatherModel(
             domain=self.domain,
             log=self.log,
             diurnal_timer=self.diurnal_timer,
+            dome_model=self.dome_model,
             ess_index=self.config.weather_ess_index,
             wind_average_window=self.config.wind_average_window,
             wind_minimum_window=self.config.wind_minimum_window,
@@ -145,6 +148,7 @@ class EasCsc(salobj.ConfigurableCsc):
             domain=self.domain,
             log=self.log,
             diurnal_timer=self.diurnal_timer,
+            dome_model=self.dome_model,
             weather_model=self.weather_model,
             wind_threshold=self.config.wind_threshold,
             vec04_hold_time=self.config.vec04_hold_time,
@@ -153,8 +157,16 @@ class EasCsc(salobj.ConfigurableCsc):
         self.m1m3ts_model = M1M3TSModel(
             domain=self.domain,
             log=self.log,
+            diurnal_timer=self.diurnal_timer,
+            dome_model=self.dome_model,
+            weather_model=self.weather_model,
+            indoor_ess_index=self.config.indoor_ess_index,
             glycol_setpoint_delta=self.config.glycol_setpoint_delta,
             heater_setpoint_delta=self.config.heater_setpoint_delta,
+            m1m3_setpoint_cadence=self.config.m1m3_setpoint_cadence,
+            setpoint_deadband_heating=self.config.setpoint_deadband_heating,
+            setpoint_deadband_cooling=self.config.setpoint_deadband_cooling,
+            maximum_heating_rate=self.config.maximum_heating_rate,
             features_to_disable=self.config.features_to_disable,
         )
 
@@ -178,6 +190,7 @@ class EasCsc(salobj.ConfigurableCsc):
             self.subtasks = [
                 asyncio.create_task(coro())
                 for coro in (
+                    self.dome_model.monitor,
                     self.weather_model.monitor,
                     self.hvac_model.monitor,
                     self.m1m3ts_model.monitor,

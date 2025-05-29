@@ -28,6 +28,7 @@ import backoff
 from lsst.ts import salobj, utils
 
 from .diurnal_timer import DiurnalTimer
+from .dome_model import DomeModel
 
 N_TWILIGHT_SAMPLES = 10  # Number of samples to collect for twilight temperature.
 SAL_TIMEOUT = 60  # SAL timeout time. (seconds)
@@ -55,6 +56,7 @@ class WeatherModel:
         domain: salobj.Domain,
         log: logging.Logger,
         diurnal_timer: DiurnalTimer,
+        dome_model: DomeModel,
         ess_index: int = 301,
         wind_average_window: float = 30 * 60,
         wind_minimum_window: float = 10 * 60,
@@ -62,6 +64,7 @@ class WeatherModel:
         self.domain = domain
         self.log = log
         self.diurnal_timer = diurnal_timer
+        self.dome_model = dome_model
 
         self.wind_average_window = wind_average_window
         self.wind_minimum_window = wind_minimum_window
@@ -72,6 +75,8 @@ class WeatherModel:
         # The last observed temperature at the end of twilight
         self.last_twilight_temperature: float | None = None
 
+        # The last observed temperature
+
     async def air_flow_callback(self, air_flow: salobj.BaseMsgType) -> None:
         """Callback for ESS.tel_airFlow.
 
@@ -81,7 +86,6 @@ class WeatherModel:
         ----------
         air_flow : salobj.BaseMsgType
            A newly received air_flow telemetry item.
-
         """
         self.log.debug(
             f"air_flow_callback: {air_flow.private_sndStamp=} {air_flow.speed=}"
@@ -153,9 +157,16 @@ class WeatherModel:
                     await self.diurnal_timer.twilight_condition.wait()
                     if self.diurnal_timer.is_running:
                         try:
-                            self.last_twilight_temperature = (
-                                await self.measure_twilight_temperature(weather_remote)
-                            )
+                            dome_is_closed = self.dome_model.dome_is_closed
+                            if (
+                                dome_is_closed is False
+                            ):  # dome_is_closed must not be None
+                                self.last_twilight_temperature = (
+                                    await self.measure_twilight_temperature(
+                                        weather_remote
+                                    )
+                                )
+
                         except Exception:
                             self.log.exception("Failed to read temperature from ESS")
                             self.last_twilight_temperature = None

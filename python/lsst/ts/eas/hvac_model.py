@@ -19,7 +19,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-__all__ = ["HvacModel"]
+__all__ = ["HvacModel", "HVAC_SLEEP_TIME"]
 
 import asyncio
 import logging
@@ -28,6 +28,7 @@ from lsst.ts import salobj, utils
 from lsst.ts.xml.enums.HVAC import DeviceId
 
 from .diurnal_timer import DiurnalTimer
+from .dome_model import DomeModel
 from .weather_model import WeatherModel
 
 HVAC_SLEEP_TIME = 60.0  # How often to check the HVAC state (seconds)
@@ -45,6 +46,8 @@ class HvacModel:
         A logger for log messages.
     diurnal_timer : DiurnalTimer
         A timer that signals at noon and at the end of evening twilight.
+    dome_model : DomeModel
+        A model representing the dome state.
     wind_threshold : float
         Windspeed limit for the VEC-04 fan. (m/s)
     vec04_hold_time : float
@@ -65,6 +68,7 @@ class HvacModel:
         domain: salobj.Domain,
         log: logging.Logger,
         diurnal_timer: DiurnalTimer,
+        dome_model: DomeModel,
         weather_model: WeatherModel,
         wind_threshold: float = 5,
         vec04_hold_time: float = 5 * 60,
@@ -79,6 +83,7 @@ class HvacModel:
         )
 
         # Configuration parameters:
+        self.dome_model = dome_model
         self.weather_model = weather_model
         self.wind_threshold = wind_threshold
         self.vec04_hold_time = vec04_hold_time
@@ -94,19 +99,16 @@ class HvacModel:
         """
         self.log.debug("HvacModel.monitor")
 
+        # Give the dome model an opportunity to collect some telemetry...
+        await asyncio.sleep(STD_TIMEOUT)
+
         async with salobj.Remote(
-            domain=self.domain,
-            name="MTDome",
-            include=("apertureShutter",),
-        ) as dome_remote, salobj.Remote(
             domain=self.domain,
             name="HVAC",
             include=("enableDevice", "disableDevice", "configAhu"),
         ) as hvac_remote:
             hvac_future = asyncio.gather(
-                self.control_ahus_and_vec04(
-                    dome_remote=dome_remote, hvac_remote=hvac_remote
-                ),
+                self.control_ahus_and_vec04(hvac_remote=hvac_remote),
                 self.wait_for_noon(hvac_remote=hvac_remote),
             )
 
@@ -117,27 +119,16 @@ class HvacModel:
                 await asyncio.gather(hvac_future, return_exceptions=True)
                 raise
 
-    async def control_ahus_and_vec04(
-        self, *, dome_remote: salobj.Remote, hvac_remote: salobj.Remote
-    ) -> None:
+    async def control_ahus_and_vec04(self, *, hvac_remote: salobj.Remote) -> None:
         cached_shutter_closed = None
         cached_wind_threshold = None
 
         while True:
             # Check the aperture state
-            try:
-                aperture_shutter = await dome_remote.tel_apertureShutter.aget(
-                    timeout=STD_TIMEOUT
-                )
-            except TimeoutError:
-                self.log.error(
-                    "Timeout error while trying to read apertureShutter telemetry."
-                )
+            shutter_closed = self.dome_model.dome_is_closed
+            if shutter_closed is None:
+                await asyncio.sleep(0.1)
                 continue
-            shutter_closed = (
-                aperture_shutter.positionActual[0] < 10
-                and aperture_shutter.positionActual[1] < 10
-            )
 
             if (
                 "vec04" not in self.features_to_disable

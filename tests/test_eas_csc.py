@@ -90,6 +90,8 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         self.ess = salobj.Controller("ESS", 301)
         self.ess112: salobj.Controller | None = salobj.Controller("ESS", 112)
 
+        eas.hvac_model.HVAC_SLEEP_TIME = 3
+
         await asyncio.wait_for(
             asyncio.gather(
                 self.mtdome.start_task,
@@ -321,6 +323,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             ),
         ):
             # Give the EAS CSC time to establish an MTDome remote
+
             await asyncio.sleep(STD_SLEEP)
 
             await self.mtdome.tel_apertureShutter.set_write(
@@ -330,7 +333,10 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 speed=0,
             )
 
-            await asyncio.sleep(STD_SLEEP)
+            for _ in range(MAX_RETRIES):
+                await asyncio.sleep(STD_SLEEP)
+                if self.vec04_state is not None:
+                    break
 
             # The dome is closed. AHUs are shut off.
             # Wind is reported as low, but VEC-04
@@ -354,6 +360,11 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             self.offset_clock(1200)
             await self.ess.tel_airFlow.set_write(
                 speed=0,
+            )
+
+            # Also have to refresh the apertureShutter telemetry
+            await self.mtdome.tel_apertureShutter.set_write(
+                positionActual=(100.0, 100.0),
             )
 
             await asyncio.sleep(STD_SLEEP)
@@ -381,13 +392,15 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 simulation_mode=1,
             ),
         ):
-            # Give the telemetry time to propagate into the EAS CSC
             await asyncio.sleep(STD_SLEEP)
 
             await self.mtdome.tel_apertureShutter.set_write(
                 positionActual=(100.0, 100.0),
             )
-            await asyncio.sleep(STD_SLEEP)
+            for _ in range(MAX_RETRIES):
+                await asyncio.sleep(STD_SLEEP)
+                if self.vec04_state is not None:
+                    break
             await self.csc.close_tasks()
 
         self.assertTrue(np.isnan(self.csc.average_windspeed))

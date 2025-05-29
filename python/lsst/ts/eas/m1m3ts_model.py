@@ -23,13 +23,16 @@ __all__ = ["M1M3TSModel"]
 
 import asyncio
 import logging
+import math
 
 from lsst.ts import salobj, utils
 
+from .diurnal_timer import DiurnalTimer
+from .dome_model import DomeModel
+from .weather_model import WeatherModel
+
 STD_TIMEOUT = 10  # seconds
-M1M3_TEMPERATURE_CADENCE = (
-    60  # Time over which to collect M1M3 temperature measurements (sec)
-)
+DORMANT_TIME = 300  # Time to wait while sleeping, seconds
 
 
 class M1M3TSModel:
@@ -41,6 +44,14 @@ class M1M3TSModel:
         A SAL domain object for obtaining remotes.
     log : logging.Logger
         A logger for log messages.
+    diurnal_timer : DiurnalTimer
+        A timer that signals every day at noon and at the end of evening
+        twilight.
+    dome_model : DomeModel
+        A model for the MTDome remote, indicating whether it is closed.
+    weather_model : WeatherModel
+        A model for the outdoor weather station, which records the last
+        twilight temperature observed while the dome was opened.
     glycol_setpoint_delta : float
         The difference between the twilight ambient temperature and the
         setpoint to apply for the glycol, e.g., -2 if the glycol should
@@ -49,6 +60,21 @@ class M1M3TSModel:
         The difference between the twilight ambient temperature and the
         setpoint to apply for the FCU heaters, e.g., -1 if the FCU heaters
         should be one degree cooler than ambient.
+    m1m3_setpoint_cadence : float
+        The cadence at which applySetpoints commands should be sent to
+        MTM1M3TS (seconds).
+    setpoint_deadband_heating : float
+        Deadband for M1M3TS heating. If the the new setpoint exceeds the
+        previous setpoint by less than this amount, no new command is sent.
+        (°C)
+    setpoint_deadband_cooling : float
+        Deadband for M1M3TS cooling. If the new setpoint is lower than the
+        previous setpoint by less than this amount, no new command is sent.
+        (°C)
+    maximum_heating_rate : float
+        Maximum allowed rate of increase in the M1M3TS setpoint temperature.
+        Limits how quickly the setpoint can rise, in degrees Celsius per hour.
+        (°C/hr)
     features_to_disable : list[str]
         A list of features that should be disabled. The following strings can
         be used:
@@ -61,48 +87,105 @@ class M1M3TSModel:
         *,
         domain: salobj.Domain,
         log: logging.Logger,
+        diurnal_timer: DiurnalTimer,
+        dome_model: DomeModel,
+        weather_model: WeatherModel,
+        indoor_ess_index: float,
         glycol_setpoint_delta: float,
         heater_setpoint_delta: float,
+        m1m3_setpoint_cadence: float,
+        setpoint_deadband_heating: float,
+        setpoint_deadband_cooling: float,
+        maximum_heating_rate: float,
         features_to_disable: list[str] = [],
     ) -> None:
         self.domain = domain
         self.log = log
 
+        self.diurnal_timer = diurnal_timer
+        self.dome_model = dome_model
+        self.weather_model = weather_model
+
         # Configuration parameters:
+        self.indoor_ess_index = indoor_ess_index
         self.glycol_setpoint_delta = glycol_setpoint_delta
         self.heater_setpoint_delta = heater_setpoint_delta
+        self.m1m3_setpoint_cadence = m1m3_setpoint_cadence
+        self.setpoint_deadband_heating = setpoint_deadband_heating
+        self.setpoint_deadband_cooling = setpoint_deadband_cooling
+        self.maximum_heating_rate = maximum_heating_rate
         self.features_to_disable = features_to_disable
 
+        # Last setpoint, for deadband purposes
+        self.last_m1m3ts_setpoint: float | None = None
+
     async def monitor(self) -> None:
-        self.log.debug("HvacModel.monitor")
+        self.log.debug("M1M3TSModel.monitor")
 
         async with salobj.Remote(
             domain=self.domain,
             name="MTM1M3TS",
         ) as m1m3ts_remote:
             if "m1m3ts" not in self.features_to_disable:
-                await self.follow_ess112(m1m3ts_remote=m1m3ts_remote)
+                m1m3ts_future = asyncio.gather(
+                    self.follow_ess_indoor(m1m3ts_remote=m1m3ts_remote),
+                    self.wait_for_noon(m1m3ts_remote=m1m3ts_remote),
+                )
+
+                self.log.debug("M1M3TSModel.monitor closing...")
+                try:
+                    await m1m3ts_future
+                except asyncio.CancelledError:
+                    m1m3ts_future.cancel()
+                    await asyncio.gather(m1m3ts_future, return_exceptions=True)
+                    raise
+
             else:
+                # If m1m3ts is disabled, just sleep.
                 while True:
                     try:
-                        await asyncio.sleep(300)
+                        await asyncio.sleep(DORMANT_TIME)
                     except asyncio.CancelledError:
                         self.log.info("monitor cancelled")
                         raise
 
-    async def follow_ess112(self, m1m3ts_remote: salobj.Remote) -> None:
-        self.log.debug("follow_ess112")
+    async def apply_setpoints(
+        self, *, m1m3ts_remote: salobj.Remote, setpoint: float
+    ) -> None:
+        glycol_setpoint = setpoint + self.glycol_setpoint_delta
+        heaters_setpoint = setpoint + self.heater_setpoint_delta
+        self.log.debug(f"Setting MTM1MTS: {glycol_setpoint=} {heaters_setpoint=}")
+        if hasattr(m1m3ts_remote, "cmd_applySetpoints"):
+            await m1m3ts_remote.cmd_applySetpoints.set_start(
+                glycolSetpoint=glycol_setpoint,
+                heatersSetpoint=heaters_setpoint,
+            )
+        else:
+            await m1m3ts_remote.cmd_applySetpoint.set_start(
+                glycolSetpoint=glycol_setpoint,
+                heatersSetpoint=heaters_setpoint,
+            )
+
+    async def follow_ess_indoor(self, *, m1m3ts_remote: salobj.Remote) -> None:
+        self.log.debug("follow_ess_indoor")
 
         async with salobj.Remote(
-            domain=self.domain, name="ESS", index=112, include=("temperature",)
+            domain=self.domain,
+            name="ESS",
+            index=self.indoor_ess_index,
+            include=("temperature",),
         ) as ess_remote:
             while True:
+                if self.dome_model.dome_is_closed:
+                    await asyncio.sleep(DORMANT_TIME)
+                    continue
+
                 temperatures = []
                 start_time = utils.current_tai()
 
-                # Collect average ESS:112 temperature for
-                # M1M3_TEMPERATURE_CADENCE seconds.
-                while utils.current_tai() - start_time < M1M3_TEMPERATURE_CADENCE:
+                # Collect average indoor ESS temperature for
+                # m1m3_setpoint_cadence seconds.
+                while utils.current_tai() - start_time < self.m1m3_setpoint_cadence:
                     try:
                         sample = await ess_remote.tel_temperature.aget(timeout=10)
                         await asyncio.sleep(0)  # Make sure we get CancelledError
@@ -110,7 +193,9 @@ class M1M3TSModel:
                     except asyncio.CancelledError:
                         raise
                     except Exception as e:
-                        self.log.warning(f"Failed to get ESS:112 temperature: {e!r}")
+                        self.log.warning(
+                            f"Failed to get ESS:{self.indoor_ess_index} temperature: {e!r}"
+                        )
 
                 if not temperatures:
                     self.log.error(
@@ -120,21 +205,73 @@ class M1M3TSModel:
 
                 average_temperature = sum(temperatures) / len(temperatures)
                 self.log.debug(
-                    f"Collected {len(temperatures)} ESS:112 samples with {average_temperature=}."
+                    f"Collected {len(temperatures)} ESS:{self.indoor_ess_index}"
+                    f" samples with {average_temperature=}."
                 )
 
-                glycol_setpoint = average_temperature + self.glycol_setpoint_delta
-                heaters_setpoint = average_temperature + self.heater_setpoint_delta
-                self.log.debug(
-                    f"Setting MTM1MTS: {glycol_setpoint=} {heaters_setpoint=}"
-                )
-                if hasattr(m1m3ts_remote, "cmd_applySetpoints"):
-                    await m1m3ts_remote.cmd_applySetpoints.set_start(
-                        glycolSetpoint=glycol_setpoint,
-                        heatersSetpoint=heaters_setpoint,
+                if average_temperature is None or math.isnan(average_temperature):
+                    continue
+
+                if self.last_m1m3ts_setpoint is None:
+                    # No previous setpoint = apply it regardless
+                    await self.apply_setpoints(
+                        m1m3ts_remote=m1m3ts_remote, setpoint=average_temperature
                     )
+                    self.last_m1m3ts_setpoint = average_temperature
+                elif average_temperature > self.last_m1m3ts_setpoint:
+                    # Warm the mirror if the setpoint is past the deadband
+                    new_setpoint = average_temperature
+                    if (
+                        new_setpoint - self.last_m1m3ts_setpoint
+                        > self.setpoint_deadband_heating
+                    ):
+                        # Apply the setpoint, limited by maximum_heating_rate
+                        maximum_heating_rate = (
+                            self.maximum_heating_rate
+                            * self.m1m3_setpoint_cadence
+                            / 3600.0
+                        )
+                        new_setpoint = min(new_setpoint, maximum_heating_rate)
+                        await self.apply_setpoints(
+                            m1m3ts_remote=m1m3ts_remote, setpoint=new_setpoint
+                        )
                 else:
-                    await m1m3ts_remote.cmd_applySetpoint.set_start(
-                        glycolSetpoint=glycol_setpoint,
-                        heatersSetpoint=heaters_setpoint,
+                    # Cool the mirror if the setpoint is past the deadband
+                    new_setpoint = average_temperature
+                    if (
+                        self.last_m1m3ts_setpoint - new_setpoint
+                        > self.setpoint_deadband_heating
+                    ):
+                        # Apply the setpoint, no maximum cooling rate.
+                        await self.apply_setpoints(
+                            m1m3ts_remote=m1m3ts_remote, setpoint=new_setpoint
+                        )
+
+    async def wait_for_noon(self, *, m1m3ts_remote: salobj.Remote) -> None:
+        """Waits for noon and then sets the room temperature.
+
+        Waits for the timer to signal noon, and then obtains the
+        temperature that was reported last night at the end
+        of twilight, and then applies that temperature as the
+        M1M3TS for the afternoon.
+
+        Parameters
+        ----------
+        m1m3ts_remote : salobj.Remote
+            A SALobj remote representing the MTM1M3TS controller.
+        """
+        while self.diurnal_timer.is_running:
+            async with self.diurnal_timer.noon_condition:
+                await self.diurnal_timer.noon_condition.wait()
+                if (
+                    self.diurnal_timer.is_running
+                    and self.weather_model.last_twilight_temperature is not None
+                ):
+                    self.log.info(
+                        "Noon M1M3TS is set based on twilight temperature: "
+                        f"{self.weather_model.last_twilight_temperature}"
+                    )
+                    await self.apply_setpoints(
+                        m1m3ts_remote=m1m3ts_remote,
+                        setpoint=self.weather_model.last_twilight_temperature,
                     )
