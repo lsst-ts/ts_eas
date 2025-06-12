@@ -78,6 +78,11 @@ CONFIG_SCHEMA = yaml.safe_load(
         description: SAL index for the CSC providing indoor temperature measurements.
         type: integer
         minimum: 0
+      ess_timeout:
+        description: >
+          The amount of time (seconds) of no ESS measurements after which
+          the CSC should fault.
+        type: number
       glycol_setpoint_delta:
         description: >
           Offset between desired ambient setpoint and M1M3TS glycol setpoint (°C)
@@ -111,6 +116,8 @@ CONFIG_SCHEMA = yaml.safe_load(
       - features_to_disable
       - twilight_definition
       - weather_ess_index
+      - indoor_ess_index
+      - ess_timeout
       - glycol_setpoint_delta
       - heater_setpoint_delta
       - setpoint_deadband_heating

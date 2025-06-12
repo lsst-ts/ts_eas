@@ -50,6 +50,7 @@ class DomeModel:
         domain: salobj.Domain,
     ) -> None:
         self.domain = domain
+        self.monitor_start_event = asyncio.Event()
 
         # Most recent tel_apertureShutter
         self.aperture_shutter_telemetry: salobj.BaseMsgType | None = None
@@ -87,6 +88,7 @@ class DomeModel:
             include=("apertureShutter",),
         ) as dome_remote:
             dome_remote.tel_apertureShutter.callback = self.aperture_shutter_callback
+            self.monitor_start_event.set()
 
             while True:
                 await asyncio.sleep(DORMANT_TIME)

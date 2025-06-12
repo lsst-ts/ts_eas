@@ -53,6 +53,11 @@ class M1M3TSModel:
     weather_model : WeatherModel
         A model for the outdoor weather station, which records the last
         twilight temperature observed while the dome was opened.
+    ess_indoor_index : int
+        The SAL index for the indoor ESS meter.
+    ess_timeout : float
+        The amount of time (seconds) of no ESS measurements after which
+        the CSC should fault.
     glycol_setpoint_delta : float
         The difference between the twilight ambient temperature and the
         setpoint to apply for the glycol, e.g., -2 if the glycol should
@@ -91,7 +96,8 @@ class M1M3TSModel:
         diurnal_timer: DiurnalTimer,
         dome_model: DomeModel,
         weather_model: WeatherModel,
-        indoor_ess_index: float,
+        indoor_ess_index: int,
+        ess_timeout: float,
         glycol_setpoint_delta: float,
         heater_setpoint_delta: float,
         m1m3_setpoint_cadence: float,
@@ -103,12 +109,15 @@ class M1M3TSModel:
         self.domain = domain
         self.log = log
 
+        self.monitor_start_event = asyncio.Event()
+
         self.diurnal_timer = diurnal_timer
         self.dome_model = dome_model
         self.weather_model = weather_model
 
         # Configuration parameters:
         self.indoor_ess_index = indoor_ess_index
+        self.ess_timeout = ess_timeout
         self.glycol_setpoint_delta = glycol_setpoint_delta
         self.heater_setpoint_delta = heater_setpoint_delta
         self.m1m3_setpoint_cadence = m1m3_setpoint_cadence
@@ -128,18 +137,31 @@ class M1M3TSModel:
             name="MTM1M3TS",
         ) as m1m3ts_remote:
             if "m1m3ts" not in self.features_to_disable:
+                ready_futures: list[asyncio.Future] = [
+                    asyncio.Future() for _ in range(2)
+                ]
                 m1m3ts_future = asyncio.gather(
-                    self.follow_ess_indoor(m1m3ts_remote=m1m3ts_remote),
-                    self.wait_for_noon(m1m3ts_remote=m1m3ts_remote),
+                    self.follow_ess_indoor(
+                        m1m3ts_remote=m1m3ts_remote, future=ready_futures[0]
+                    ),
+                    self.wait_for_noon(
+                        m1m3ts_remote=m1m3ts_remote, future=ready_futures[1]
+                    ),
                 )
+                await asyncio.gather(*ready_futures)
+                self.log.debug("M1M3TSModel.monitor started")
+                self.monitor_start_event.set()
 
-                self.log.debug("M1M3TSModel.monitor closing...")
                 try:
                     await m1m3ts_future
                 except asyncio.CancelledError:
                     m1m3ts_future.cancel()
                     await asyncio.gather(m1m3ts_future, return_exceptions=True)
                     raise
+                finally:
+                    self.monitor_start_event.clear()
+
+                self.log.debug("M1M3TSModel.monitor closing...")
 
             else:
                 # If m1m3ts is disabled, just sleep.
@@ -147,7 +169,7 @@ class M1M3TSModel:
                     try:
                         await asyncio.sleep(DORMANT_TIME)
                     except asyncio.CancelledError:
-                        self.log.info("monitor cancelled")
+                        self.log.debug("monitor cancelled")
                         raise
 
     async def apply_setpoints(
@@ -195,13 +217,19 @@ class M1M3TSModel:
             caller.
         """
         temperatures: list[float] = []
-        end_time = time.monotonic() + self.m1m3_setpoint_cadence
+        current_time = time.monotonic()
+        end_time = current_time + self.m1m3_setpoint_cadence
+        timeout_time = current_time + self.ess_timeout
         warned_nan = False
         warned_timeout = False
 
         # Collect average indoor ESS temperature for
         # m1m3_setpoint_cadence seconds.
-        while time.monotonic() < end_time:
+        while (current_time := time.monotonic()) < end_time:
+            if current_time > timeout_time:
+                self.log.error("No temperature samples were collected. CSC will fault.")
+                raise RuntimeError("No temperature samples were collected.")
+
             try:
                 sample = await ess_remote.tel_temperature.aget(timeout=10)
                 await asyncio.sleep(0)  # Make sure we get CancelledError
@@ -217,7 +245,8 @@ class M1M3TSModel:
                         )
                         warned_nan = True
 
-                temperatures.append(new_temperature)
+                else:
+                    temperatures.append(new_temperature)
 
             except asyncio.TimeoutError:
                 end_time = time.monotonic() + self.m1m3_setpoint_cadence
@@ -229,7 +258,9 @@ class M1M3TSModel:
 
         return temperatures
 
-    async def follow_ess_indoor(self, *, m1m3ts_remote: salobj.Remote) -> None:
+    async def follow_ess_indoor(
+        self, *, m1m3ts_remote: salobj.Remote, future: asyncio.Future
+    ) -> None:
         self.log.debug("follow_ess_indoor")
 
         async with salobj.Remote(
@@ -238,10 +269,15 @@ class M1M3TSModel:
             index=self.indoor_ess_index,
             include=("temperature",),
         ) as ess_remote:
+            if not future.done():
+                future.set_result(None)
+
             while True:
-                event = asyncio.Event()
-                self.dome_model.on_open.append(event)
-                await event.wait()
+                if "require_dome_open" not in self.features_to_disable:
+                    if self.dome_model.is_closed:
+                        event = asyncio.Event()
+                        self.dome_model.on_open.append(event)
+                        await event.wait()
 
                 temperatures = await self.collect_temperature_samples(ess_remote)
 
@@ -292,7 +328,9 @@ class M1M3TSModel:
                             m1m3ts_remote=m1m3ts_remote, setpoint=new_setpoint
                         )
 
-    async def wait_for_noon(self, *, m1m3ts_remote: salobj.Remote) -> None:
+    async def wait_for_noon(
+        self, *, m1m3ts_remote: salobj.Remote, future: asyncio.Future
+    ) -> None:
         """Waits for noon and then sets the room temperature.
 
         Waits for the timer to signal noon, and then obtains the
@@ -307,6 +345,9 @@ class M1M3TSModel:
         """
         while self.diurnal_timer.is_running:
             async with self.diurnal_timer.noon_condition:
+                if not future.done():
+                    future.set_result(None)
+
                 await self.diurnal_timer.noon_condition.wait()
                 if (
                     self.diurnal_timer.is_running

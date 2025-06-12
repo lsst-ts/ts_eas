@@ -80,6 +80,7 @@ class TestM1M3(unittest.IsolatedAsyncioTestCase):
         self.dome_model = eas.dome_model.DomeModel(
             domain=self.domain,
         )
+        dome_monitor_task = asyncio.create_task(self.dome_model.monitor())
         self.weather_model = eas.weather_model.WeatherModel(
             domain=self.domain,
             log=self.log,
@@ -87,6 +88,11 @@ class TestM1M3(unittest.IsolatedAsyncioTestCase):
             dome_model=self.dome_model,
         )
         self.weather_model.last_twilight_temperature = self.last_twilight_temperature
+
+        await asyncio.wait_for(
+            self.dome_model.monitor_start_event.wait(),
+            timeout=STD_TIMEOUT,
+        )
 
         if ess112_temperature is not None:
             emit_ess112_temperature_task = asyncio.create_task(
@@ -100,6 +106,12 @@ class TestM1M3(unittest.IsolatedAsyncioTestCase):
         try:
             yield
         finally:
+            dome_monitor_task.cancel()
+            try:
+                await dome_monitor_task
+            except asyncio.CancelledError:
+                pass
+
             if ess112_temperature is not None:
                 emit_ess112_temperature_task.cancel()
                 try:
@@ -152,6 +164,7 @@ class TestM1M3(unittest.IsolatedAsyncioTestCase):
                 dome_model=self.dome_model,
                 weather_model=self.weather_model,
                 indoor_ess_index=112,
+                ess_timeout=20,
                 glycol_setpoint_delta=model_args["glycol_setpoint_delta"],
                 heater_setpoint_delta=model_args["heater_setpoint_delta"],
                 m1m3_setpoint_cadence=10,
@@ -243,3 +256,7 @@ class TestM1M3(unittest.IsolatedAsyncioTestCase):
 
             self.assertTrue(glycol_setpoint is None)
             self.assertTrue(heater_setpoint is None)
+
+            # Should not matter how long this sleep is because it should
+            # be interrupted by the RuntimeError.
+            await asyncio.sleep(60)

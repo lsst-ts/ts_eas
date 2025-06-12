@@ -21,6 +21,7 @@
 
 __all__ = ["WeatherModel"]
 
+import asyncio
 import logging
 from collections import deque
 
@@ -65,6 +66,8 @@ class WeatherModel:
         self.log = log
         self.diurnal_timer = diurnal_timer
         self.dome_model = dome_model
+
+        self.monitor_start_event = asyncio.Event()
 
         self.wind_average_window = wind_average_window
         self.wind_minimum_window = wind_minimum_window
@@ -154,6 +157,8 @@ class WeatherModel:
 
             while self.diurnal_timer.is_running:
                 async with self.diurnal_timer.twilight_condition:
+                    self.monitor_start_event.set()
+
                     await self.diurnal_timer.twilight_condition.wait()
                     if self.diurnal_timer.is_running:
                         try:
@@ -169,7 +174,10 @@ class WeatherModel:
                         except Exception:
                             self.log.exception("Failed to read temperature from ESS")
                             self.last_twilight_temperature = None
+                            self.monitor_start_event.clear()
                             raise
+
+        self.monitor_start_event.clear()
 
     @backoff.on_exception(
         backoff.expo,

@@ -36,7 +36,6 @@ from .m1m3ts_model import M1M3TSModel
 from .weather_model import WeatherModel
 
 # Constants for the health monitor:
-MAX_FAILURES = 15  # Maximum number of failures allowed before the CSC will fault.
 FAILURE_TIMEOUT = (
     600  # Failure count will reset after monitor has run for this time (seconds).
 )
@@ -90,6 +89,8 @@ class EasCsc(salobj.ConfigurableCsc):
             simulation_mode=simulation_mode,
             override=override,
         )
+
+        self.monitor_start_event = asyncio.Event()
 
         self.health_monitor_task = utils.make_done_future()
         self.subtasks: list[asyncio.Task[None]] = []
@@ -161,6 +162,7 @@ class EasCsc(salobj.ConfigurableCsc):
             dome_model=self.dome_model,
             weather_model=self.weather_model,
             indoor_ess_index=self.config.indoor_ess_index,
+            ess_timeout=self.config.ess_timeout,
             glycol_setpoint_delta=self.config.glycol_setpoint_delta,
             heater_setpoint_delta=self.config.heater_setpoint_delta,
             m1m3_setpoint_cadence=self.config.m1m3_setpoint_cadence,
@@ -196,10 +198,22 @@ class EasCsc(salobj.ConfigurableCsc):
                     self.m1m3ts_model.monitor,
                 )
             ]
+
+            # Wait for start and then signal
+            await asyncio.gather(
+                self.dome_model.monitor_start_event.wait(),
+                self.weather_model.monitor_start_event.wait(),
+                self.hvac_model.monitor_start_event.wait(),
+                self.m1m3ts_model.monitor_start_event.wait(),
+            )
+            self.log.debug("Monitors started.")
+            self.monitor_start_event.set()
+
             done, pending = await asyncio.wait(
                 self.subtasks, return_when=asyncio.FIRST_COMPLETED
             )
             self.subtasks = []
+            self.monitor_start_event.clear()
 
             self.log.debug("At least one monitor task ended.")
 
@@ -214,6 +228,7 @@ class EasCsc(salobj.ConfigurableCsc):
                 except Exception as ex:
                     self.log.exception("A monitor threw exception")
                     await self.fault(code=DOME_MONITOR_FAILED, report=str(ex))
+                    self.monitor_start_event.clear()
                     return
 
     @property

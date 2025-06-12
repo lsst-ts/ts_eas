@@ -32,7 +32,7 @@ from .dome_model import DomeModel
 from .weather_model import WeatherModel
 
 HVAC_SLEEP_TIME = 60.0  # How often to check the HVAC state (seconds)
-STD_TIMEOUT = 10  # seconds
+STD_TIMEOUT = 5  # seconds
 
 
 class HvacModel:
@@ -78,6 +78,8 @@ class HvacModel:
         self.log = log
         self.diurnal_timer = diurnal_timer
 
+        self.monitor_start_event = asyncio.Event()
+
         self.last_vec04_time: float = (
             0  # Last time VEC-04 was changed (UNIX TAI seconds).
         )
@@ -111,6 +113,7 @@ class HvacModel:
                 self.control_ahus_and_vec04(hvac_remote=hvac_remote),
                 self.wait_for_noon(hvac_remote=hvac_remote),
             )
+            self.monitor_start_event.clear()
 
             try:
                 await hvac_future
@@ -204,6 +207,8 @@ class HvacModel:
         """
         while self.diurnal_timer.is_running:
             async with self.diurnal_timer.noon_condition:
+                self.monitor_start_event.set()
+
                 await self.diurnal_timer.noon_condition.wait()
                 if (
                     self.diurnal_timer.is_running
