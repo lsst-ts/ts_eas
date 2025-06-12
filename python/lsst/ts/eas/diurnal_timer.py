@@ -27,11 +27,19 @@ from zoneinfo import ZoneInfo
 import astropy.units as u
 from astropy.coordinates import AltAz, EarthLocation, get_sun
 from astropy.time import Time
+from astropy.utils import iers
+from astropy.utils.iers import conf as iers_conf
 from scipy.optimize import brentq
 
 __all__ = ["DiurnalTimer"]
 
-OBSERVATORY_LOCATION = EarthLocation.of_site("Cerro Pachon")
+iers_conf.auto_download = False
+iers_conf.iers_degraded_accuracy = "ignore"
+iers.IERS_Auto.iers_table = iers.IERS_B.open()
+
+OBSERVATORY_LOCATION = EarthLocation(
+    lat=-30.24074167 * u.deg, lon=-70.7366833 * u.deg, height=2750 * u.m
+)
 OBSERVATORY_TIME_ZONE = ZoneInfo("America/Santiago")
 
 
@@ -152,7 +160,7 @@ class DiurnalTimer:
             )
 
         if not (-90 <= sun_altitude <= 0):
-            raise RuntimeError("sun_altitude not in range -90 to 90")
+            raise RuntimeError("sun_altitude not in range -90 to 0")
 
         self.sun_altitude = sun_altitude
 
@@ -182,8 +190,7 @@ class DiurnalTimer:
         """
         while self.is_running:
             # Search for time of twilight in the next 25 hours. Not necessarily
-            # valid in the polar regions, but fine for
-            # Rubin.
+            # valid in the polar regions, but fine for Rubin.
             twilight_time = get_crossing_time(self.sun_altitude)
             wait_seconds = (twilight_time - Time.now()).sec
             await asyncio.sleep(wait_seconds)

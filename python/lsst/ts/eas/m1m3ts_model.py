@@ -24,8 +24,9 @@ __all__ = ["M1M3TSModel"]
 import asyncio
 import logging
 import math
+import time
 
-from lsst.ts import salobj, utils
+from lsst.ts import salobj
 
 from .diurnal_timer import DiurnalTimer
 from .dome_model import DomeModel
@@ -166,6 +167,68 @@ class M1M3TSModel:
                 heatersSetpoint=heaters_setpoint,
             )
 
+    async def collect_temperature_samples(
+        self, ess_remote: salobj.Remote
+    ) -> list[float]:
+        """Gather temperature samples over the configured cadence period.
+
+        If a single `asyncio.TimeoutError` occurs, the contiguous-time clock is
+        restarted (``end_time = now + cadence``).  Any other exception is
+        propagated so that the caller can decide how to handle it.
+
+        Parameters
+        ----------
+        ess_remote : salobj.Remote
+            A remote endpoint for the ESS to collect from.
+
+        Returns
+        -------
+        list[float]
+            Raw temperature readings (no averaging is done here).
+
+        Raises
+        ------
+        asyncio.CancelledError
+            Propagated immediately so outer tasks can shut down cleanly.
+        Exception
+            Anything other than ``asyncio.TimeoutError`` bubbles up to the
+            caller.
+        """
+        temperatures: list[float] = []
+        end_time = time.monotonic() + self.m1m3_setpoint_cadence
+        warned_nan = False
+        warned_timeout = False
+
+        # Collect average indoor ESS temperature for
+        # m1m3_setpoint_cadence seconds.
+        while time.monotonic() < end_time:
+            try:
+                sample = await ess_remote.tel_temperature.aget(timeout=10)
+                await asyncio.sleep(0)  # Make sure we get CancelledError
+
+                new_temperature = sample.temperatureItem[0]
+
+                # Check for NaN, warn, and reset the timer if needed.
+                if math.isnan(new_temperature):
+                    end_time = time.monotonic() + self.m1m3_setpoint_cadence
+                    if not warned_nan:
+                        self.log.warning(
+                            f"Received temperature NaN from ESS:{self.indoor_ess_index}"
+                        )
+                        warned_nan = True
+
+                temperatures.append(new_temperature)
+
+            except asyncio.TimeoutError:
+                end_time = time.monotonic() + self.m1m3_setpoint_cadence
+                if not warned_timeout:
+                    self.log.warning(
+                        f"Timed out while getting ESS:{self.indoor_ess_index} temperature"
+                    )
+                    warned_timeout = True
+
+        return temperatures
+
     async def follow_ess_indoor(self, *, m1m3ts_remote: salobj.Remote) -> None:
         self.log.debug("follow_ess_indoor")
 
@@ -176,26 +239,11 @@ class M1M3TSModel:
             include=("temperature",),
         ) as ess_remote:
             while True:
-                if self.dome_model.dome_is_closed:
-                    await asyncio.sleep(DORMANT_TIME)
-                    continue
+                event = asyncio.Event()
+                self.dome_model.on_open.append(event)
+                await event.wait()
 
-                temperatures = []
-                start_time = utils.current_tai()
-
-                # Collect average indoor ESS temperature for
-                # m1m3_setpoint_cadence seconds.
-                while utils.current_tai() - start_time < self.m1m3_setpoint_cadence:
-                    try:
-                        sample = await ess_remote.tel_temperature.aget(timeout=10)
-                        await asyncio.sleep(0)  # Make sure we get CancelledError
-                        temperatures.append(sample.temperatureItem[0])
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as e:
-                        self.log.warning(
-                            f"Failed to get ESS:{self.indoor_ess_index} temperature: {e!r}"
-                        )
+                temperatures = await self.collect_temperature_samples(ess_remote)
 
                 if not temperatures:
                     self.log.error(
@@ -208,9 +256,6 @@ class M1M3TSModel:
                     f"Collected {len(temperatures)} ESS:{self.indoor_ess_index}"
                     f" samples with {average_temperature=}."
                 )
-
-                if average_temperature is None or math.isnan(average_temperature):
-                    continue
 
                 if self.last_m1m3ts_setpoint is None:
                     # No previous setpoint = apply it regardless

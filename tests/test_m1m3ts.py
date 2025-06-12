@@ -63,6 +63,7 @@ class TestM1M3(unittest.IsolatedAsyncioTestCase):
     def run(self, result: typing.Any = None) -> None:
         salobj.testutils.set_test_topic_subname(randomize=False)
         os.environ["LSST_SITE"] = "test"
+        self.last_twilight_temperature: float | None = None
         super().run(result)  # type: ignore
 
     @contextlib.asynccontextmanager
@@ -85,6 +86,7 @@ class TestM1M3(unittest.IsolatedAsyncioTestCase):
             diurnal_timer=self.diurnal_timer,
             dome_model=self.dome_model,
         )
+        self.weather_model.last_twilight_temperature = self.last_twilight_temperature
 
         if ess112_temperature is not None:
             emit_ess112_temperature_task = asyncio.create_task(
@@ -132,7 +134,10 @@ class TestM1M3(unittest.IsolatedAsyncioTestCase):
                 pass
 
     async def run_with_parameters(
-        self, ess112_temperature: float | None, **model_args: typing.Any
+        self,
+        ess112_temperature: float | None,
+        signal_noon: bool = False,
+        **model_args: typing.Any
     ) -> tuple[float | None, float | None]:
         self.diurnal_timer = eas.diurnal_timer.DiurnalTimer()
         self.diurnal_timer.is_running = True
@@ -156,7 +161,14 @@ class TestM1M3(unittest.IsolatedAsyncioTestCase):
                 features_to_disable=model_args["features_to_disable"],
             )
             monitor_task = asyncio.create_task(self.m1m3ts_model.monitor())
-            await asyncio.sleep(70)
+
+            await asyncio.sleep(30)
+
+            if signal_noon:
+                async with self.diurnal_timer.noon_condition:
+                    self.diurnal_timer.noon_condition.notify_all()
+
+            await asyncio.sleep(40)
 
             monitor_task.cancel()
             try:
@@ -168,6 +180,7 @@ class TestM1M3(unittest.IsolatedAsyncioTestCase):
 
     async def test_m1m3ts_applysetpoints(self) -> None:
         """M1M3TS.applySetpoint should be called at noon."""
+        self.last_twilight_temperature = 20
         ess112_temperature = 10
         glycol_setpoint_delta = -2
         heater_setpoint_delta = -1
@@ -176,20 +189,25 @@ class TestM1M3(unittest.IsolatedAsyncioTestCase):
             ess112_temperature,
             glycol_setpoint_delta=glycol_setpoint_delta,
             heater_setpoint_delta=heater_setpoint_delta,
+            signal_noon=True,
             features_to_disable=[],
         )
 
-        assert glycol_setpoint is not None
+        assert (
+            self.last_twilight_temperature is not None and glycol_setpoint is not None
+        )
         self.assertAlmostEqual(
             glycol_setpoint,
-            ess112_temperature + glycol_setpoint_delta,
+            self.last_twilight_temperature + glycol_setpoint_delta,
             places=4,
         )
 
-        assert heater_setpoint is not None
+        assert (
+            self.last_twilight_temperature is not None and heater_setpoint is not None
+        )
         self.assertAlmostEqual(
             heater_setpoint,
-            ess112_temperature + heater_setpoint_delta,
+            self.last_twilight_temperature + heater_setpoint_delta,
             places=4,
         )
 

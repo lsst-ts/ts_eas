@@ -22,6 +22,7 @@
 __all__ = ["DomeModel"]
 
 import asyncio
+from collections import deque
 
 from lsst.ts import salobj, utils
 
@@ -52,6 +53,8 @@ class DomeModel:
 
         # Most recent tel_apertureShutter
         self.aperture_shutter_telemetry: salobj.BaseMsgType | None = None
+        self.on_open: deque[asyncio.Event] = deque()
+        self.was_closed: bool | None = False
 
     async def aperture_shutter_callback(
         self, aperture_shutter_telemetry: salobj.BaseMsgType
@@ -63,10 +66,19 @@ class DomeModel:
 
         Parameters
         ----------
-        aperture_shutter: salobj.BaseMsgType
+        aperture_shutter_telemetry: salobj.BaseMsgType
             A newly received apertureShutter telemetry item.
         """
         self.aperture_shutter_telemetry = aperture_shutter_telemetry
+        is_closed = self.is_closed
+
+        if self.was_closed is not False and is_closed is False:
+            events_to_signal = list(self.on_open)
+            self.on_open.clear()
+            for event in events_to_signal:
+                event.set()
+
+        self.was_closed = is_closed
 
     async def monitor(self) -> None:
         async with salobj.Remote(
@@ -80,7 +92,7 @@ class DomeModel:
                 await asyncio.sleep(DORMANT_TIME)
 
     @property
-    def dome_is_closed(self) -> bool | None:
+    def is_closed(self) -> bool | None:
         """Returns true if the dome is currently closed.
 
         If the current state of the dome is unknown, None is returned.

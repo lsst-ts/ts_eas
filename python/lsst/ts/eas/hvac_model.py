@@ -125,7 +125,7 @@ class HvacModel:
 
         while True:
             # Check the aperture state
-            shutter_closed = self.dome_model.dome_is_closed
+            shutter_closed = self.dome_model.is_closed
             if shutter_closed is None:
                 await asyncio.sleep(0.1)
                 continue

@@ -157,10 +157,9 @@ class WeatherModel:
                     await self.diurnal_timer.twilight_condition.wait()
                     if self.diurnal_timer.is_running:
                         try:
-                            dome_is_closed = self.dome_model.dome_is_closed
                             if (
-                                dome_is_closed is False
-                            ):  # dome_is_closed must not be None
+                                self.dome_model.is_closed is False
+                            ):  # is_closed must not be None
                                 self.last_twilight_temperature = (
                                     await self.measure_twilight_temperature(
                                         weather_remote
