@@ -1,3 +1,17 @@
+v0.8.2 (2025-06-13)
+===================
+
+New Features
+------------
+
+- * Added noon and twilight timers.
+  * Added control of the AHU setpoint at noon.
+  * Added M1M3TS control. (`DM-50705 <https://rubinobs.atlassian.net//browse/DM-50705>`_)
+- * Sets up M1M3TS to track ESS:112 when the dome is open.
+  * Deadbands and heating limits added for MTM1M3TS.
+  * Several parameters added to configuration. (`DM-51013 <https://rubinobs.atlassian.net//browse/DM-51013>`_)
+
+
 v0.8.1 (2025-05-20)
 ===================
 
