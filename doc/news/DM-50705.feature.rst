@@ -1,3 +1,0 @@
-* Added noon and twilight timers.
-* Added control of the AHU setpoint at noon.
-* Added M1M3TS control.
