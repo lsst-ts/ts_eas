@@ -228,6 +228,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             await self.ess.tel_airFlow.set_write(
                 speed=row["speed"],
             )
+            await asyncio.sleep(0.1)
 
     async def test_version(self) -> None:
         async with (
