@@ -15,16 +15,19 @@ build:
 test:
   requires:
     - ts-conda-build =0.4
-    - ts-xml {{ xml_version }}
+    - ts-xml =23.2
     - ts-salobj {{ salobj_version }}
-    - ts-dds
+    - backoff
+    - astropy
+    - numpy
+    - scipy
   source_files:
     - python
     - bin
     - tests
     - pyproject.toml
   commands:
-    - pytest
+    - pytest -vv --log-cli-level=INFO
 
 requirements:
   host:
@@ -40,5 +43,9 @@ requirements:
     - python {{ python }}
     - setuptools
     - setuptools_scm
-    - ts-xml {{ xml_version }}
+    - ts-xml =23.2
     - ts-salobj {{ salobj_version }}
+    - backoff
+    - astropy
+    - numpy
+    - scipy
