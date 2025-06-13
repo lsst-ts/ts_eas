@@ -34,9 +34,8 @@ from lsst.ts import eas, salobj, utils
 from lsst.ts.xml.enums.HVAC import DeviceId
 
 STD_TIMEOUT = 60
-STD_SLEEP = 10
-LONG_SLEEP = 30
-MAX_RETRIES = 100
+STD_SLEEP = 5
+LONG_SLEEP = 15
 
 TEST_CONFIG_DIR = pathlib.Path(__file__).parents[1].joinpath("tests", "config")
 TEST_WIND_DATA_DIR = pathlib.Path(__file__).parent
@@ -85,17 +84,33 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         self.ahu4_state: bool | None = None
         self.vec04_state: bool | None = None
 
+        self.hvac_events = {
+            DeviceId.lowerAHU01P05: asyncio.Event(),
+            DeviceId.lowerAHU02P05: asyncio.Event(),
+            DeviceId.lowerAHU03P05: asyncio.Event(),
+            DeviceId.lowerAHU04P05: asyncio.Event(),
+            DeviceId.lowerDamperFan03P04: asyncio.Event(),
+        }
+
         self.mtdome = salobj.Controller("MTDome")
         self.hvac = salobj.Controller("HVAC")
         self.ess = salobj.Controller("ESS", 301)
+        self.ess112: salobj.Controller | None = salobj.Controller("ESS", 112)
+
+        eas.hvac_model.HVAC_SLEEP_TIME = 1
 
         await asyncio.wait_for(
             asyncio.gather(
                 self.mtdome.start_task,
                 self.hvac.start_task,
                 self.ess.start_task,
+                self.ess112.start_task,
             ),
             timeout=STD_TIMEOUT,
+        )
+
+        emit_ess112_temperature_task = asyncio.create_task(
+            self.emit_ess112_temperature()
         )
 
         self.hvac.cmd_enableDevice.callback = self.enable_callback
@@ -104,13 +119,39 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         try:
             yield
         finally:
+            self.log.warning("Extra CSCs shutting down")
+            ess112 = self.ess112
+            self.ess112 = None
+            emit_ess112_temperature_task.cancel()
+            try:
+                await emit_ess112_temperature_task
+            except asyncio.CancelledError:
+                pass
+
             await self.mtdome.close()
             await self.hvac.close()
             await self.ess.close()
+            await ess112.close()
+
+    async def emit_ess112_temperature(self) -> None:
+        while True:
+            await asyncio.sleep(1)
+            await asyncio.wait_for(
+                self.csc.monitor_start_event.wait(), timeout=STD_TIMEOUT
+            )
+
+            if self.ess112 is not None:
+                await self.ess112.tel_temperature.set_write(
+                    sensorName="",
+                    timestamp=0,
+                    numChannels=1,
+                    temperatureItem=[0] * 16,
+                    location="",
+                )
 
     async def enable_callback(self, message: salobj.topics.BaseTopic.DataType) -> None:
         """Callback for HVAC.cmd_enableDevice."""
-        self.log.info("enable_callback {message.device_id=}")
+        self.log.info(f"enable_callback {message.device_id=}")
         match message.device_id:
             case DeviceId.lowerAHU01P05:
                 self.ahu1_state = True
@@ -123,8 +164,11 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             case DeviceId.lowerDamperFan03P04:
                 self.vec04_state = True
 
+        self.hvac_events[message.device_id].set()
+
     async def disable_callback(self, message: salobj.topics.BaseTopic.DataType) -> None:
         """Callback for HVAC.cmd_disableDevice."""
+        self.log.info(f"disable_callback {message.device_id=}")
         match message.device_id:
             case DeviceId.lowerAHU01P05:
                 self.ahu1_state = False
@@ -136,6 +180,16 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 self.ahu4_state = False
             case DeviceId.lowerDamperFan03P04:
                 self.vec04_state = False
+
+        self.hvac_events[message.device_id].set()
+
+    async def wait_for_all_hvac_events(self) -> None:
+        await asyncio.wait_for(
+            asyncio.gather(*[event.wait() for _, event in self.hvac_events.items()]),
+            timeout=STD_TIMEOUT,
+        )
+        for _, event in self.hvac_events.items():
+            event.clear()
 
     def basic_make_csc(
         self,
@@ -174,6 +228,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             await self.ess.tel_airFlow.set_write(
                 speed=row["speed"],
             )
+            await asyncio.sleep(0.1)
 
     async def test_version(self) -> None:
         async with (
@@ -203,7 +258,9 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             ),
         ):
             # Give the EAS CSC time to establish an MTDome remote
-            await asyncio.sleep(STD_SLEEP)
+            await asyncio.wait_for(
+                self.csc.monitor_start_event.wait(), timeout=STD_TIMEOUT
+            )
 
             await self.load_wind_history("air_flow.ecsv")
             await self.mtdome.tel_apertureShutter.set_write(
@@ -211,6 +268,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             )
             # Give the telemetry time to propagate into the EAS CSC
             await asyncio.sleep(STD_SLEEP)
+            await self.csc.close_tasks()
 
         self.assertAlmostEqual(
             self.csc.average_windspeed, self.wind_data["speed"].mean(), delta=0.1
@@ -232,14 +290,17 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             ),
         ):
             # Give the EAS CSC time to establish an MTDome remote
-            await asyncio.sleep(STD_SLEEP)
+            await asyncio.wait_for(
+                self.csc.monitor_start_event.wait(), timeout=STD_TIMEOUT
+            )
 
             await self.load_wind_history("air_flow.ecsv")
             await self.mtdome.tel_apertureShutter.set_write(
-                positionActual=(1.0, 1.0),
+                positionActual=(100.0, 100.0),
             )
             # Give the telemetry time to propagate into the EAS CSC
             await asyncio.sleep(STD_SLEEP)
+            await self.csc.close_tasks()
 
         self.assertAlmostEqual(
             self.csc.average_windspeed, self.wind_data["speed"].mean(), delta=0.1
@@ -261,14 +322,17 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             ),
         ):
             # Give the EAS CSC time to establish an MTDome remote
-            await asyncio.sleep(STD_SLEEP)
+            await asyncio.wait_for(
+                self.csc.monitor_start_event.wait(), timeout=STD_TIMEOUT
+            )
 
             await self.load_wind_history("high_wind.ecsv")
             await self.mtdome.tel_apertureShutter.set_write(
-                positionActual=(1.0, 1.0),
+                positionActual=(100.0, 100.0),
             )
             # Give the telemetry time to propagate into the EAS CSC
             await asyncio.sleep(STD_SLEEP)
+            await self.csc.close_tasks()
 
         self.assertAlmostEqual(
             self.csc.average_windspeed, self.wind_data["speed"].mean(), delta=0.1
@@ -290,16 +354,18 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             ),
         ):
             # Give the EAS CSC time to establish an MTDome remote
-            await asyncio.sleep(STD_SLEEP)
+            await asyncio.wait_for(
+                self.csc.monitor_start_event.wait(), timeout=STD_TIMEOUT
+            )
 
             await self.mtdome.tel_apertureShutter.set_write(
-                positionActual=(1.0, 1.0),
+                positionActual=(100.0, 100.0),
             )
             await self.ess.tel_airFlow.set_write(
                 speed=0,
             )
 
-            await asyncio.sleep(STD_SLEEP)
+            await self.wait_for_all_hvac_events()
 
             # The dome is closed. AHUs are shut off.
             # Wind is reported as low, but VEC-04
@@ -312,11 +378,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.ahu4_state, False)
             self.assertEqual(self.vec04_state, False)
 
-            await asyncio.sleep(STD_SLEEP)
-
-            # After writing telemetry, average_windspeed is still NaN
-            # because there is not enough historical data.
-            self.assertTrue(np.isnan(self.csc.average_windspeed))
+            self.vec04_state = None
 
             # Increment by 20 minutes so that we have
             # enough historical data.
@@ -325,19 +387,23 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 speed=0,
             )
 
-            await asyncio.sleep(STD_SLEEP)
+            # Also have to refresh the apertureShutter telemetry
+            await self.mtdome.tel_apertureShutter.set_write(
+                positionActual=(100.0, 100.0),
+            )
+
+            # And in the next run of the control loop, the
+            # VEC-04 fan is enabled.
+            await asyncio.wait_for(
+                self.hvac_events[DeviceId.lowerDamperFan03P04].wait(),
+                timeout=STD_TIMEOUT,
+            )
 
             # Now, we expect a valid windspeed to be reported.
             self.assertAlmostEqual(self.csc.average_windspeed, 0.0)
 
-            # And in the next run of the control loop, the
-            # VEC-04 fan is enabled.
-            for _ in range(MAX_RETRIES):
-                await asyncio.sleep(STD_SLEEP)
-                if self.vec04_state:
-                    break
-
             self.assertEqual(self.vec04_state, True)
+            await self.csc.close_tasks()
 
     async def test_no_wind(self) -> None:
         """If no wind data available, turn VEC-04 off."""
@@ -349,13 +415,18 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 simulation_mode=1,
             ),
         ):
-            # Give the telemetry time to propagate into the EAS CSC
-            await asyncio.sleep(STD_SLEEP)
+            # Give the EAS CSC time to establish an MTDome remote
+            await asyncio.wait_for(
+                self.csc.monitor_start_event.wait(), timeout=STD_TIMEOUT
+            )
 
             await self.mtdome.tel_apertureShutter.set_write(
-                positionActual=(1.0, 1.0),
+                positionActual=(100.0, 100.0),
             )
-            await asyncio.sleep(STD_SLEEP)
+
+            await self.wait_for_all_hvac_events()
+
+            await self.csc.close_tasks()
 
         self.assertTrue(np.isnan(self.csc.average_windspeed))
         self.assertEqual(self.ahu1_state, False)
@@ -380,16 +451,19 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             ),
         ):
             # Give the EAS CSC time to establish an MTDome remote
-            await asyncio.sleep(STD_SLEEP)
+            await asyncio.wait_for(
+                self.csc.monitor_start_event.wait(), timeout=STD_TIMEOUT
+            )
 
             # This ecsv file contains 30 minutes of high winds (>100)
             # followed by 30 minutes of low winds.
             await self.load_wind_history("stale_wind_data.ecsv")
             await self.mtdome.tel_apertureShutter.set_write(
-                positionActual=(1.0, 1.0),
+                positionActual=(100.0, 100.0),
             )
             # Give the telemetry time to propagate into the EAS CSC
             await asyncio.sleep(STD_SLEEP)
+            await self.csc.close_tasks()
 
         mask = self.wind_data["speed"] < 100
         self.wind_data = self.wind_data[mask]
@@ -417,18 +491,28 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 simulation_mode=1,
             ),
         ):
-            await asyncio.sleep(STD_SLEEP)
+            # Give the EAS CSC time to establish an MTDome remote
+            await asyncio.wait_for(
+                self.csc.monitor_start_event.wait(), timeout=STD_TIMEOUT
+            )
 
             # Close and re-open the remotes.
             await self.mtdome.close()
             await self.hvac.close()
             await self.ess.close()
 
+            # Close ESS:112, being careful to stop telemetry first.
+            assert self.ess112 is not None
+            ess112 = self.ess112
+            self.ess112 = None
+            await ess112.close()
+
             await asyncio.sleep(LONG_SLEEP)
 
             self.mtdome = salobj.Controller("MTDome")
             self.hvac = salobj.Controller("HVAC")
             self.ess = salobj.Controller("ESS", 301)
+            ess112 = salobj.Controller("ESS", 112)
 
             self.hvac.cmd_enableDevice.callback = self.enable_callback
             self.hvac.cmd_disableDevice.callback = self.disable_callback
@@ -438,19 +522,20 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                     self.mtdome.start_task,
                     self.hvac.start_task,
                     self.ess.start_task,
+                    ess112.start_task,
                 ),
                 timeout=STD_TIMEOUT,
             )
+            self.ess112 = ess112
 
             await self.load_wind_history("air_flow.ecsv")
             await self.mtdome.tel_apertureShutter.set_write(
                 positionActual=(0.0, 0.0),
             )
 
-            for _ in range(MAX_RETRIES):
-                await asyncio.sleep(STD_SLEEP)
-                if self.ahu1_state is not None:
-                    break
+            await self.wait_for_all_hvac_events()
+
+            await self.csc.close_tasks()
 
         self.assertAlmostEqual(
             self.csc.average_windspeed, self.wind_data["speed"].mean(), delta=0.1

@@ -29,10 +29,13 @@ from lsst.ts import salobj, utils
 
 from . import __version__
 from .config_schema import CONFIG_SCHEMA
+from .diurnal_timer import DiurnalTimer
+from .dome_model import DomeModel
 from .hvac_model import HvacModel
+from .m1m3ts_model import M1M3TSModel
+from .weather_model import WeatherModel
 
 # Constants for the health monitor:
-MAX_FAILURES = 15  # Maximum number of failures allowed before the CSC will fault.
 FAILURE_TIMEOUT = (
     600  # Failure count will reset after monitor has run for this time (seconds).
 )
@@ -87,8 +90,13 @@ class EasCsc(salobj.ConfigurableCsc):
             override=override,
         )
 
+        self.monitor_start_event = asyncio.Event()
+
         self.health_monitor_task = utils.make_done_future()
+        self.subtasks: list[asyncio.Task[None]] = []
+        self.diurnal_timer: DiurnalTimer | None = None
         self.hvac_model: HvacModel | None = None
+        self.m1m3ts_model: M1M3TSModel | None = None
 
     async def handle_summary_state(self) -> None:
         """Override of the handle_summary_state function to
@@ -105,26 +113,63 @@ class EasCsc(salobj.ConfigurableCsc):
 
     async def shutdown_health_monitor(self) -> None:
         """Cancels the health monitor task and waits for completion."""
-        self.health_monitor_task.cancel()
-        try:
-            await self.health_monitor_task
-        except asyncio.CancelledError:
-            pass
+        tasks_to_cancel = self.subtasks
+        self.subtasks = []
+        tasks_to_cancel.append(self.health_monitor_task)
+        for task in tasks_to_cancel:
+            task.cancel()
+
+        for task in tasks_to_cancel:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
     async def close_tasks(self) -> None:
         """Stop active tasks."""
         await self.shutdown_health_monitor()
+        if self.diurnal_timer is not None:
+            await self.diurnal_timer.stop()
         await super().close_tasks()
 
     async def configure(self, config: SimpleNamespace) -> None:
         self.config = config
+        self.diurnal_timer = DiurnalTimer(sun_altitude=self.config.twilight_definition)
+        self.dome_model = DomeModel(domain=self.domain)
+        self.weather_model = WeatherModel(
+            domain=self.domain,
+            log=self.log,
+            diurnal_timer=self.diurnal_timer,
+            dome_model=self.dome_model,
+            ess_index=self.config.weather_ess_index,
+            wind_average_window=self.config.wind_average_window,
+            wind_minimum_window=self.config.wind_minimum_window,
+        )
         self.hvac_model = HvacModel(
             domain=self.domain,
             log=self.log,
+            diurnal_timer=self.diurnal_timer,
+            dome_model=self.dome_model,
+            weather_model=self.weather_model,
             wind_threshold=self.config.wind_threshold,
-            wind_average_window=self.config.wind_average_window,
-            wind_minimum_window=self.config.wind_minimum_window,
             vec04_hold_time=self.config.vec04_hold_time,
+            features_to_disable=self.config.features_to_disable,
+        )
+        self.m1m3ts_model = M1M3TSModel(
+            domain=self.domain,
+            log=self.log,
+            diurnal_timer=self.diurnal_timer,
+            dome_model=self.dome_model,
+            weather_model=self.weather_model,
+            indoor_ess_index=self.config.indoor_ess_index,
+            ess_timeout=self.config.ess_timeout,
+            glycol_setpoint_delta=self.config.glycol_setpoint_delta,
+            heater_setpoint_delta=self.config.heater_setpoint_delta,
+            m1m3_setpoint_cadence=self.config.m1m3_setpoint_cadence,
+            setpoint_deadband_heating=self.config.setpoint_deadband_heating,
+            setpoint_deadband_cooling=self.config.setpoint_deadband_cooling,
+            maximum_heating_rate=self.config.maximum_heating_rate,
+            features_to_disable=self.config.features_to_disable,
         )
 
     async def monitor_health(self) -> None:
@@ -136,38 +181,55 @@ class EasCsc(salobj.ConfigurableCsc):
         recoverable failure.
         """
         assert self.hvac_model is not None, "HVAC Model not initialized."
+        assert self.m1m3ts_model is not None, "M1M3TS Model not initialized."
+        assert self.diurnal_timer is not None, "Timer not initialized."
 
         self.log.debug("monitor_health")
-        failure_count = 0
-        last_attempt_time = utils.current_tai()
 
         while self.disabled_or_enabled:
-            now = utils.current_tai()
+            self.diurnal_timer.start()
 
-            # Reset failure count if it's been too long since last attempt
-            if now - last_attempt_time > FAILURE_TIMEOUT:
-                self.log.info(
-                    f"Resetting monitor failure count: {now - last_attempt_time:.1f}s since last attempt"
+            self.subtasks = [
+                asyncio.create_task(coro())
+                for coro in (
+                    self.dome_model.monitor,
+                    self.weather_model.monitor,
+                    self.hvac_model.monitor,
+                    self.m1m3ts_model.monitor,
                 )
-                failure_count = 0
+            ]
 
-            last_attempt_time = now
+            # Wait for start and then signal
+            await asyncio.gather(
+                self.dome_model.monitor_start_event.wait(),
+                self.weather_model.monitor_start_event.wait(),
+                self.hvac_model.monitor_start_event.wait(),
+                self.m1m3ts_model.monitor_start_event.wait(),
+            )
+            self.log.debug("Monitors started.")
+            self.monitor_start_event.set()
 
-            try:
-                await self.hvac_model.monitor_dome_shutter()
-            except Exception as ex:
-                self.log.exception("monitor_dome_shutter threw exception")
+            done, pending = await asyncio.wait(
+                self.subtasks, return_when=asyncio.FIRST_COMPLETED
+            )
+            self.subtasks = []
+            self.monitor_start_event.clear()
 
-                failure_count += 1
-                if failure_count >= MAX_FAILURES:
-                    self.log.error("Too many failures in succession. CSC will fault.")
+            self.log.debug("At least one monitor task ended.")
+
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+
+            for task in done:
+                try:
+                    task.result()
+
+                except Exception as ex:
+                    self.log.exception("A monitor threw exception")
                     await self.fault(code=DOME_MONITOR_FAILED, report=str(ex))
+                    self.monitor_start_event.clear()
                     return
-
-                # Exponential backoff with cap
-                backoff = min(INITIAL_BACKOFF * 2 ** (failure_count - 1), MAX_BACKOFF)
-                self.log.info(f"Backing off for {backoff:.1f} seconds")
-                await asyncio.sleep(backoff)
 
     @property
     def average_windspeed(self) -> float:
@@ -186,8 +248,8 @@ class EasCsc(salobj.ConfigurableCsc):
             NaN is returned. Units are m/s.
         """
         return (
-            self.hvac_model.average_windspeed
-            if self.hvac_model is not None
+            self.weather_model.average_windspeed
+            if self.weather_model is not None
             else float("nan")
         )
 
