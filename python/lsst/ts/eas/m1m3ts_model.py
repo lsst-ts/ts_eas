@@ -191,7 +191,7 @@ class M1M3TSModel:
 
     async def collect_temperature_samples(
         self, ess_remote: salobj.Remote
-    ) -> list[float]:
+    ) -> float | None:
         """Gather temperature samples over the configured cadence period.
 
         If a single `asyncio.TimeoutError` occurs, the contiguous-time clock is
@@ -205,8 +205,9 @@ class M1M3TSModel:
 
         Returns
         -------
-        list[float]
-            Raw temperature readings (no averaging is done here).
+        float | None
+            Average temperature readings, or None if a valid average
+            could not be collected.
 
         Raises
         ------
@@ -216,7 +217,8 @@ class M1M3TSModel:
             Anything other than ``asyncio.TimeoutError`` bubbles up to the
             caller.
         """
-        temperatures: list[float] = []
+        sum_temperatures = 0
+        count_temperatures = 0
         current_time = time.monotonic()
         end_time = current_time + self.m1m3_setpoint_cadence
         timeout_time = current_time + self.ess_timeout
@@ -231,7 +233,7 @@ class M1M3TSModel:
                 raise RuntimeError("No temperature samples were collected.")
 
             try:
-                sample = await ess_remote.tel_temperature.aget(timeout=10)
+                sample = await ess_remote.tel_temperature.next(timeout=10, flush=True)
                 await asyncio.sleep(0)  # Make sure we get CancelledError
 
                 new_temperature = sample.temperatureItem[0]
@@ -246,7 +248,8 @@ class M1M3TSModel:
                         warned_nan = True
 
                 else:
-                    temperatures.append(new_temperature)
+                    sum_temperatures += new_temperature
+                    count_temperatures += 1
 
             except asyncio.TimeoutError:
                 end_time = time.monotonic() + self.m1m3_setpoint_cadence
@@ -256,7 +259,14 @@ class M1M3TSModel:
                     )
                     warned_timeout = True
 
-        return temperatures
+        average_temperature = (
+            sum_temperatures / count_temperatures if count_temperatures > 0 else None
+        )
+        self.log.debug(
+            f"Collected {count_temperatures} ESS:{self.indoor_ess_index}"
+            f" samples with {average_temperature=}."
+        )
+        return average_temperature
 
     async def follow_ess_indoor(
         self, *, m1m3ts_remote: salobj.Remote, future: asyncio.Future
@@ -279,19 +289,13 @@ class M1M3TSModel:
                         self.dome_model.on_open.append(event)
                         await event.wait()
 
-                temperatures = await self.collect_temperature_samples(ess_remote)
+                average_temperature = await self.collect_temperature_samples(ess_remote)
 
-                if not temperatures:
+                if average_temperature is None:
                     self.log.error(
                         "No temperature samples were collected. CSC will fault."
                     )
                     raise RuntimeError("No temperature samples were collected.")
-
-                average_temperature = sum(temperatures) / len(temperatures)
-                self.log.debug(
-                    f"Collected {len(temperatures)} ESS:{self.indoor_ess_index}"
-                    f" samples with {average_temperature=}."
-                )
 
                 if self.last_m1m3ts_setpoint is None:
                     # No previous setpoint = apply it regardless
