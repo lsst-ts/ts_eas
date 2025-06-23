@@ -140,14 +140,16 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 self.csc.monitor_start_event.wait(), timeout=STD_TIMEOUT
             )
 
+            timestamp = 0
             if self.ess112 is not None:
                 await self.ess112.tel_temperature.set_write(
                     sensorName="",
-                    timestamp=0,
+                    timestamp=timestamp,
                     numChannels=1,
                     temperatureItem=[0] * 16,
                     location="",
                 )
+                timestamp += 1
 
     async def enable_callback(self, message: salobj.topics.BaseTopic.DataType) -> None:
         """Callback for HVAC.cmd_enableDevice."""

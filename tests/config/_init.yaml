@@ -2,12 +2,12 @@ wind_threshold: 5
 wind_average_window: 1800
 wind_minimum_window: 600
 vec04_hold_time: 300
-m1m3_setpoint_cadence: 10
+m1m3_setpoint_cadence: 30
 features_to_disable: []
 twilight_definition: astronomical
 weather_ess_index: 301
 indoor_ess_index: 112
-ess_timeout: 20
+ess_timeout: 40
 glycol_setpoint_delta: -2
 heater_setpoint_delta: -1
 setpoint_deadband_heating: 1
