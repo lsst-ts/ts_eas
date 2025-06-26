@@ -23,6 +23,7 @@ __all__ = ["HvacModel", "HVAC_SLEEP_TIME"]
 
 import asyncio
 import logging
+import math
 
 from lsst.ts import salobj, utils
 from lsst.ts.xml.enums.HVAC import DeviceId
@@ -225,7 +226,7 @@ class HvacModel:
                             await hvac_remote.cmd_configLowerAhu.set_start(
                                 device_id=device_id,
                                 workingSetpoint=self.weather_model.last_twilight_temperature,
-                                maxFanSetpoint=float("nan"),
-                                minFanSetpoint=float("nan"),
-                                antiFreezeTemperature=float("nan"),
+                                maxFanSetpoint=math.nan,
+                                minFanSetpoint=math.nan,
+                                antiFreezeTemperature=math.nan,
                             )
