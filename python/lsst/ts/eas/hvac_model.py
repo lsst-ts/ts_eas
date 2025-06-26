@@ -222,9 +222,10 @@ class HvacModel:
                             DeviceId.lowerAHU03P05,
                             DeviceId.lowerAHU04P05,
                         ):
-                            await hvac_remote.cmd_configAhu.set_start(
+                            await hvac_remote.cmd_configLowerAhu.set_start(
                                 device_id=device_id,
+                                workingSetpoint=self.weather_model.last_twilight_temperature,
                                 maxFanSetpoint=float("nan"),
                                 minFanSetpoint=float("nan"),
-                                roomSetpoint=self.weather_model.last_twilight_temperature,
+                                antiFreezeTemperature=float("nan"),
                             )
