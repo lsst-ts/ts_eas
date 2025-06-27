@@ -23,6 +23,7 @@ __all__ = ["WeatherModel"]
 
 import asyncio
 import logging
+import math
 from collections import deque
 
 import backoff
@@ -118,7 +119,7 @@ class WeatherModel:
             NaN is returned. Units are m/s.
         """
         if not self.wind_history:
-            return float("nan")
+            return math.nan
 
         current_time = utils.current_tai()
         time_horizon = current_time - self.wind_average_window
@@ -132,7 +133,7 @@ class WeatherModel:
             not self.wind_history
             or current_time - self.wind_history[0][1] < self.wind_minimum_window
         ):
-            return float("nan")
+            return math.nan
 
         # Compute average directly
         speeds = [s for s, _ in self.wind_history]
