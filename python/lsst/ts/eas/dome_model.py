@@ -108,6 +108,6 @@ class DomeModel:
             return None
 
         return (
-            self.aperture_shutter_telemetry.positionActual[0] < 10
-            and self.aperture_shutter_telemetry.positionActual[1] < 10
+            self.aperture_shutter_telemetry.positionActual[0] < 50
+            and self.aperture_shutter_telemetry.positionActual[1] < 50
         )

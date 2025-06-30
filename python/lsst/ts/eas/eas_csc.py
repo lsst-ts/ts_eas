@@ -22,6 +22,7 @@
 __all__ = ["EasCsc", "run_eas"]
 
 import asyncio
+import math
 import typing
 from types import SimpleNamespace
 
@@ -250,7 +251,7 @@ class EasCsc(salobj.ConfigurableCsc):
         return (
             self.weather_model.average_windspeed
             if self.weather_model is not None
-            else float("nan")
+            else math.nan
         )
 
     @staticmethod
