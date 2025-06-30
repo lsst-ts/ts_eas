@@ -59,6 +59,23 @@ class M1M3TSMock(salobj.BaseCsc):
         self.heater_setpoint = data.heatersSetpoint
 
 
+class MTMountMock(salobj.BaseCsc):
+    version = "?"
+
+    def __init__(self) -> None:
+        self.valid_simulation_modes = (0,)
+        super().__init__(
+            name="MTMount",
+            index=None,
+            initial_state=salobj.State.ENABLED,
+            allow_missing_callbacks=True,
+        )
+        self.top_end_setpoint: float | None = None
+
+    async def do_setThermal(self, data: salobj.BaseMsgType) -> None:
+        self.top_end_setpoint = data.topEndChillerSetpoint
+
+
 class TestM1M3(unittest.IsolatedAsyncioTestCase):
     def run(self, result: typing.Any = None) -> None:
         salobj.testutils.set_test_topic_subname(randomize=False)
@@ -149,14 +166,16 @@ class TestM1M3(unittest.IsolatedAsyncioTestCase):
         self,
         ess112_temperature: float | None,
         signal_noon: bool = False,
-        **model_args: typing.Any
-    ) -> tuple[float | None, float | None]:
+        **model_args: typing.Any,
+    ) -> tuple[float | None, float | None, float | None]:
         self.diurnal_timer = eas.diurnal_timer.DiurnalTimer()
         self.diurnal_timer.is_running = True
 
-        async with self.mock_extra_cscs(
-            ess112_temperature
-        ), M1M3TSMock() as mock_m1m3ts:
+        async with (
+            self.mock_extra_cscs(ess112_temperature),
+            M1M3TSMock() as mock_m1m3ts,
+            MTMountMock() as mock_mtmount,
+        ):
             self.m1m3ts_model = eas.m1m3ts_model.M1M3TSModel(
                 domain=self.domain,
                 log=mock_m1m3ts.log,
@@ -165,8 +184,10 @@ class TestM1M3(unittest.IsolatedAsyncioTestCase):
                 weather_model=self.weather_model,
                 indoor_ess_index=112,
                 ess_timeout=20,
+                setpoint_lower_limit=model_args["setpoint_lower_limit"],
                 glycol_setpoint_delta=model_args["glycol_setpoint_delta"],
                 heater_setpoint_delta=model_args["heater_setpoint_delta"],
+                top_end_setpoint_delta=model_args["top_end_setpoint_delta"],
                 m1m3_setpoint_cadence=10,
                 setpoint_deadband_heating=0,
                 setpoint_deadband_cooling=0,
@@ -189,7 +210,11 @@ class TestM1M3(unittest.IsolatedAsyncioTestCase):
             except asyncio.CancelledError:
                 pass
 
-            return mock_m1m3ts.glycol_setpoint, mock_m1m3ts.heater_setpoint
+            return (
+                mock_m1m3ts.glycol_setpoint,
+                mock_m1m3ts.heater_setpoint,
+                mock_mtmount.top_end_setpoint,
+            )
 
     async def test_m1m3ts_applysetpoints(self) -> None:
         """M1M3TS.applySetpoint should be called at noon."""
@@ -197,13 +222,19 @@ class TestM1M3(unittest.IsolatedAsyncioTestCase):
         ess112_temperature = 10
         glycol_setpoint_delta = -2
         heater_setpoint_delta = -1
+        top_end_setpoint_delta = -0.5
+        setpoint_lower_limit = 6
 
-        glycol_setpoint, heater_setpoint = await self.run_with_parameters(
-            ess112_temperature,
-            glycol_setpoint_delta=glycol_setpoint_delta,
-            heater_setpoint_delta=heater_setpoint_delta,
-            signal_noon=True,
-            features_to_disable=[],
+        glycol_setpoint, heater_setpoint, top_end_setpoint = (
+            await self.run_with_parameters(
+                ess112_temperature,
+                glycol_setpoint_delta=glycol_setpoint_delta,
+                heater_setpoint_delta=heater_setpoint_delta,
+                top_end_setpoint_delta=top_end_setpoint_delta,
+                setpoint_lower_limit=setpoint_lower_limit,
+                signal_noon=True,
+                features_to_disable=[],
+            )
         )
 
         assert (
@@ -229,33 +260,47 @@ class TestM1M3(unittest.IsolatedAsyncioTestCase):
         ess112_temperature = 10
         glycol_setpoint_delta = -2
         heater_setpoint_delta = -1
+        top_end_setpoint_delta = -1.5
+        setpoint_lower_limit = 6
 
-        glycol_setpoint, heater_setpoint = await self.run_with_parameters(
-            ess112_temperature,
-            glycol_setpoint_delta=glycol_setpoint_delta,
-            heater_setpoint_delta=heater_setpoint_delta,
-            features_to_disable=["m1m3ts"],
+        glycol_setpoint, heater_setpoint, top_end_setpoint = (
+            await self.run_with_parameters(
+                ess112_temperature,
+                glycol_setpoint_delta=glycol_setpoint_delta,
+                setpoint_lower_limit=setpoint_lower_limit,
+                heater_setpoint_delta=heater_setpoint_delta,
+                top_end_setpoint_delta=top_end_setpoint_delta,
+                features_to_disable=["m1m3ts"],
+            )
         )
 
         self.assertTrue(glycol_setpoint is None)
         self.assertTrue(heater_setpoint is None)
+        self.assertTrue(top_end_setpoint is None)
 
     async def test_no_ess112(self) -> None:
         """m1m3ts_model.monitor() should raise if ESS112 does not send data."""
         ess112_temperature = None
         glycol_setpoint_delta = -2
         heater_setpoint_delta = -1
+        top_end_setpoint_delta = -1
+        setpoint_lower_limit = 6
 
         with self.assertRaises(RuntimeError):
-            glycol_setpoint, heater_setpoint = await self.run_with_parameters(
-                ess112_temperature,
-                glycol_setpoint_delta=glycol_setpoint_delta,
-                heater_setpoint_delta=heater_setpoint_delta,
-                features_to_disable=[""],
+            glycol_setpoint, heater_setpoint, top_end_setpoint = (
+                await self.run_with_parameters(
+                    ess112_temperature,
+                    glycol_setpoint_delta=glycol_setpoint_delta,
+                    setpoint_lower_limit=setpoint_lower_limit,
+                    heater_setpoint_delta=heater_setpoint_delta,
+                    top_end_setpoint_delta=top_end_setpoint_delta,
+                    features_to_disable=[""],
+                )
             )
 
             self.assertTrue(glycol_setpoint is None)
             self.assertTrue(heater_setpoint is None)
+            self.assertTrue(top_end_setpoint is None)
 
             # Should not matter how long this sleep is because it should
             # be interrupted by the RuntimeError.

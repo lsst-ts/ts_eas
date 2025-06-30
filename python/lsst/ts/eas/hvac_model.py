@@ -49,6 +49,12 @@ class HvacModel:
         A timer that signals at noon and at the end of evening twilight.
     dome_model : DomeModel
         A model representing the dome state.
+    weather_model : WeatherModel
+        A model representing weather conditions.
+    setpoint_lower_limit : float
+        The minimum allowed setpoint for thermal control. If a lower setpoint
+        than this is indicated from the ESS temperature readings, this setpoint
+        will be used instead.
     wind_threshold : float
         Windspeed limit for the VEC-04 fan. (m/s)
     vec04_hold_time : float
@@ -71,6 +77,7 @@ class HvacModel:
         diurnal_timer: DiurnalTimer,
         dome_model: DomeModel,
         weather_model: WeatherModel,
+        setpoint_lower_limit: float = 6,
         wind_threshold: float = 5,
         vec04_hold_time: float = 5 * 60,
         features_to_disable: list[str] = [],
@@ -88,6 +95,7 @@ class HvacModel:
         # Configuration parameters:
         self.dome_model = dome_model
         self.weather_model = weather_model
+        self.setpoint_lower_limit = setpoint_lower_limit
         self.wind_threshold = wind_threshold
         self.vec04_hold_time = vec04_hold_time
         self.features_to_disable = features_to_disable
@@ -217,6 +225,11 @@ class HvacModel:
                 ):
                     if "room_setpoint" not in self.features_to_disable:
                         # Time to set the room setpoint based on last twilight
+                        setpoint = max(
+                            self.weather_model.last_twilight_temperature,
+                            self.setpoint_lower_limit,
+                        )
+
                         for device_id in (
                             DeviceId.lowerAHU01P05,
                             DeviceId.lowerAHU02P05,
@@ -225,7 +238,7 @@ class HvacModel:
                         ):
                             await hvac_remote.cmd_configLowerAhu.set_start(
                                 device_id=device_id,
-                                workingSetpoint=self.weather_model.last_twilight_temperature,
+                                workingSetpoint=setpoint,
                                 maxFanSetpoint=math.nan,
                                 minFanSetpoint=math.nan,
                                 antiFreezeTemperature=math.nan,

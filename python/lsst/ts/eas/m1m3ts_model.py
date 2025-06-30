@@ -58,6 +58,10 @@ class M1M3TSModel:
     ess_timeout : float
         The amount of time (seconds) of no ESS measurements after which
         the CSC should fault.
+    setpoint_lower_limit : float
+        The minimum allowed setpoint for thermal control. If a lower setpoint
+        than this is indicated from the ESS temperature readings, this setpoint
+        will be used instead.
     glycol_setpoint_delta : float
         The difference between the twilight ambient temperature and the
         setpoint to apply for the glycol, e.g., -2 if the glycol should
@@ -66,6 +70,9 @@ class M1M3TSModel:
         The difference between the twilight ambient temperature and the
         setpoint to apply for the FCU heaters, e.g., -1 if the FCU heaters
         should be one degree cooler than ambient.
+    top_end_setpoint_delta : float
+        The difference between the indoor (ESS:112) temperature and the
+        setpoint to apply for the top end, via MTMount.setThermal.
     m1m3_setpoint_cadence : float
         The cadence at which applySetpoints commands should be sent to
         MTM1M3TS (seconds).
@@ -98,8 +105,10 @@ class M1M3TSModel:
         weather_model: WeatherModel,
         indoor_ess_index: int,
         ess_timeout: float,
+        setpoint_lower_limit: float,
         glycol_setpoint_delta: float,
         heater_setpoint_delta: float,
+        top_end_setpoint_delta: float,
         m1m3_setpoint_cadence: float,
         setpoint_deadband_heating: float,
         setpoint_deadband_cooling: float,
@@ -118,8 +127,10 @@ class M1M3TSModel:
         # Configuration parameters:
         self.indoor_ess_index = indoor_ess_index
         self.ess_timeout = ess_timeout
+        self.setpoint_lower_limit = setpoint_lower_limit
         self.glycol_setpoint_delta = glycol_setpoint_delta
         self.heater_setpoint_delta = heater_setpoint_delta
+        self.top_end_setpoint_delta = top_end_setpoint_delta
         self.m1m3_setpoint_cadence = m1m3_setpoint_cadence
         self.setpoint_deadband_heating = setpoint_deadband_heating
         self.setpoint_deadband_cooling = setpoint_deadband_cooling
@@ -132,20 +143,30 @@ class M1M3TSModel:
     async def monitor(self) -> None:
         self.log.debug("M1M3TSModel.monitor")
 
-        async with salobj.Remote(
-            domain=self.domain,
-            name="MTM1M3TS",
-        ) as m1m3ts_remote:
+        async with (
+            salobj.Remote(
+                domain=self.domain,
+                name="MTM1M3TS",
+            ) as m1m3ts_remote,
+            salobj.Remote(
+                domain=self.domain,
+                name="MTMount",
+            ) as mtmount_remote,
+        ):
             if "m1m3ts" not in self.features_to_disable:
                 ready_futures: list[asyncio.Future] = [
                     asyncio.Future() for _ in range(2)
                 ]
                 m1m3ts_future = asyncio.gather(
                     self.follow_ess_indoor(
-                        m1m3ts_remote=m1m3ts_remote, future=ready_futures[0]
+                        m1m3ts_remote=m1m3ts_remote,
+                        mtmount_remote=mtmount_remote,
+                        future=ready_futures[0],
                     ),
                     self.wait_for_noon(
-                        m1m3ts_remote=m1m3ts_remote, future=ready_futures[1]
+                        m1m3ts_remote=m1m3ts_remote,
+                        mtmount_remote=mtmount_remote,
+                        future=ready_futures[1],
                     ),
                 )
                 await asyncio.gather(*ready_futures)
@@ -175,6 +196,7 @@ class M1M3TSModel:
     async def apply_setpoints(
         self, *, m1m3ts_remote: salobj.Remote, setpoint: float
     ) -> None:
+        setpoint = max(setpoint, self.setpoint_lower_limit)
         glycol_setpoint = setpoint + self.glycol_setpoint_delta
         heaters_setpoint = setpoint + self.heater_setpoint_delta
         self.log.debug(f"Setting MTM1MTS: {glycol_setpoint=} {heaters_setpoint=}")
@@ -188,6 +210,30 @@ class M1M3TSModel:
                 glycolSetpoint=glycol_setpoint,
                 heatersSetpoint=heaters_setpoint,
             )
+
+    async def apply_top_end_setpoint(
+        self, mtmount_remote: salobj.Remote, setpoint: float
+    ) -> None:
+        """Apply the average temperature plus offset as the top end setpoint.
+
+        This is a very simple approach to start with, but more complexity may
+        be added later. That might merit other methods, or a seperate model
+        for the top end, but for now we just use the simplest approach
+        possible.
+
+        Parameters
+        ----------
+        mtmount_remote: salobj.Remote
+            The remote object for MTMount CSC commands.
+
+        setpoint: float
+            The setpoint (without delta applied) for the mirror system.
+        """
+        top_end_setpoint = max(setpoint, self.setpoint_lower_limit)
+        top_end_setpoint = setpoint + self.top_end_setpoint_delta
+        await mtmount_remote.cmd_setThermal.set_start(
+            topEndChillerSetpoint=top_end_setpoint
+        )
 
     async def collect_temperature_samples(
         self, ess_remote: salobj.Remote
@@ -269,7 +315,11 @@ class M1M3TSModel:
         return average_temperature
 
     async def follow_ess_indoor(
-        self, *, m1m3ts_remote: salobj.Remote, future: asyncio.Future
+        self,
+        *,
+        m1m3ts_remote: salobj.Remote,
+        mtmount_remote: salobj.Remote,
+        future: asyncio.Future,
     ) -> None:
         self.log.debug("follow_ess_indoor")
 
@@ -296,6 +346,8 @@ class M1M3TSModel:
                         "No temperature samples were collected. CSC will fault."
                     )
                     raise RuntimeError("No temperature samples were collected.")
+
+                await self.apply_top_end_setpoint(mtmount_remote, average_temperature)
 
                 if self.last_m1m3ts_setpoint is None:
                     # No previous setpoint = apply it regardless
@@ -333,7 +385,11 @@ class M1M3TSModel:
                         )
 
     async def wait_for_noon(
-        self, *, m1m3ts_remote: salobj.Remote, future: asyncio.Future
+        self,
+        *,
+        m1m3ts_remote: salobj.Remote,
+        mtmount_remote: salobj.Remote,
+        future: asyncio.Future,
     ) -> None:
         """Waits for noon and then sets the room temperature.
 
@@ -346,6 +402,8 @@ class M1M3TSModel:
         ----------
         m1m3ts_remote : salobj.Remote
             A SALobj remote representing the MTM1M3TS controller.
+        mtmount_remote : salobj.Remote
+            A SALobj remote representing the MTMount controller.
         """
         while self.diurnal_timer.is_running:
             async with self.diurnal_timer.noon_condition:
@@ -359,9 +417,14 @@ class M1M3TSModel:
                 ):
                     self.log.info(
                         "Noon M1M3TS is set based on twilight temperature: "
-                        f"{self.weather_model.last_twilight_temperature}"
+                        f"{self.weather_model.last_twilight_temperature:.2f} "
+                        f"(with floor at {self.setpoint_lower_limit:.2f})"
                     )
                     await self.apply_setpoints(
                         m1m3ts_remote=m1m3ts_remote,
+                        setpoint=self.weather_model.last_twilight_temperature,
+                    )
+                    await self.apply_top_end_setpoint(
+                        mtmount_remote=mtmount_remote,
                         setpoint=self.weather_model.last_twilight_temperature,
                     )
