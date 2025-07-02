@@ -194,9 +194,14 @@ class M1M3TSModel:
                         raise
 
     async def apply_setpoints(
-        self, *, m1m3ts_remote: salobj.Remote, setpoint: float
+        self,
+        *,
+        m1m3ts_remote: salobj.Remote,
+        setpoint: float,
+        enforce_limit: bool = True,
     ) -> None:
-        setpoint = max(setpoint, self.setpoint_lower_limit)
+        if enforce_limit:
+            setpoint = max(setpoint, self.setpoint_lower_limit)
         glycol_setpoint = setpoint + self.glycol_setpoint_delta
         heaters_setpoint = setpoint + self.heater_setpoint_delta
         self.log.debug(f"Setting MTM1MTS: {glycol_setpoint=} {heaters_setpoint=}")
@@ -212,7 +217,7 @@ class M1M3TSModel:
             )
 
     async def apply_top_end_setpoint(
-        self, mtmount_remote: salobj.Remote, setpoint: float
+        self, mtmount_remote: salobj.Remote, setpoint: float, enforce_limit: bool = True
     ) -> None:
         """Apply the average temperature plus offset as the top end setpoint.
 
@@ -229,7 +234,9 @@ class M1M3TSModel:
         setpoint: float
             The setpoint (without delta applied) for the mirror system.
         """
-        top_end_setpoint = max(setpoint, self.setpoint_lower_limit)
+        top_end_setpoint = setpoint
+        if enforce_limit:
+            top_end_setpoint = max(top_end_setpoint, self.setpoint_lower_limit)
         top_end_setpoint = setpoint + self.top_end_setpoint_delta
         await mtmount_remote.cmd_setThermal.set_start(
             topEndChillerSetpoint=top_end_setpoint
@@ -347,12 +354,16 @@ class M1M3TSModel:
                     )
                     raise RuntimeError("No temperature samples were collected.")
 
-                await self.apply_top_end_setpoint(mtmount_remote, average_temperature)
+                await self.apply_top_end_setpoint(
+                    mtmount_remote, average_temperature, enforce_limit=True
+                )
 
                 if self.last_m1m3ts_setpoint is None:
                     # No previous setpoint = apply it regardless
                     await self.apply_setpoints(
-                        m1m3ts_remote=m1m3ts_remote, setpoint=average_temperature
+                        m1m3ts_remote=m1m3ts_remote,
+                        setpoint=average_temperature,
+                        enforce_limit=True,
                     )
                     self.last_m1m3ts_setpoint = average_temperature
                 elif average_temperature > self.last_m1m3ts_setpoint:
@@ -370,7 +381,9 @@ class M1M3TSModel:
                         )
                         new_setpoint = min(new_setpoint, maximum_heating_rate)
                         await self.apply_setpoints(
-                            m1m3ts_remote=m1m3ts_remote, setpoint=new_setpoint
+                            m1m3ts_remote=m1m3ts_remote,
+                            setpoint=new_setpoint,
+                            enforce_limit=True,
                         )
                 else:
                     # Cool the mirror if the setpoint is past the deadband
@@ -381,7 +394,9 @@ class M1M3TSModel:
                     ):
                         # Apply the setpoint, no maximum cooling rate.
                         await self.apply_setpoints(
-                            m1m3ts_remote=m1m3ts_remote, setpoint=new_setpoint
+                            m1m3ts_remote=m1m3ts_remote,
+                            setpoint=new_setpoint,
+                            enforce_limit=True,
                         )
 
     async def wait_for_noon(
@@ -423,8 +438,10 @@ class M1M3TSModel:
                     await self.apply_setpoints(
                         m1m3ts_remote=m1m3ts_remote,
                         setpoint=self.weather_model.last_twilight_temperature,
+                        enforce_limit=False,
                     )
                     await self.apply_top_end_setpoint(
                         mtmount_remote=mtmount_remote,
                         setpoint=self.weather_model.last_twilight_temperature,
+                        enforce_limit=False,
                     )
