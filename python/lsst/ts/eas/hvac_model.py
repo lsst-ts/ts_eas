@@ -170,10 +170,10 @@ class HvacModel:
             if shutter_closed != cached_shutter_closed:
                 cached_shutter_closed = shutter_closed
                 ahus = (
-                    DeviceId.lowerAHU01P05,
-                    DeviceId.lowerAHU02P05,
-                    DeviceId.lowerAHU03P05,
                     DeviceId.lowerAHU04P05,
+                    DeviceId.lowerAHU03P05,
+                    DeviceId.lowerAHU02P05,
+                    DeviceId.lowerAHU01P05,
                 )
                 if shutter_closed:
                     if "ahu" not in self.features_to_disable:
@@ -183,6 +183,7 @@ class HvacModel:
                             await hvac_remote.cmd_enableDevice.set_start(
                                 device_id=device
                             )
+                            await asyncio.sleep(0.1)
 
                     if "vec04" not in self.features_to_disable:
                         # Disable the VEC-04 fan
@@ -198,6 +199,7 @@ class HvacModel:
                             await hvac_remote.cmd_disableDevice.set_start(
                                 device_id=device
                             )
+                            await asyncio.sleep(0.1)
 
             await asyncio.sleep(HVAC_SLEEP_TIME)
 
