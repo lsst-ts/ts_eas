@@ -26,14 +26,15 @@ import logging
 import math
 import time
 
-from lsst.ts import salobj
+from lsst.ts import salobj, utils
+from lsst.ts.xml.sal_enums import State
 
 from .diurnal_timer import DiurnalTimer
 from .dome_model import DomeModel
 from .weather_model import WeatherModel
 
 STD_TIMEOUT = 10  # seconds
-DORMANT_TIME = 300  # Time to wait while sleeping, seconds
+DORMANT_TIME = 100  # Time to wait while sleeping, seconds
 
 
 class M1M3TSModel:
@@ -140,6 +141,9 @@ class M1M3TSModel:
         # Last setpoint, for deadband purposes
         self.last_m1m3ts_setpoint: float | None = None
 
+        self.top_end_task = utils.make_done_future()
+        self.top_end_task_warned: bool = False
+
     async def monitor(self) -> None:
         self.log.debug("M1M3TSModel.monitor")
 
@@ -180,6 +184,13 @@ class M1M3TSModel:
                     await asyncio.gather(m1m3ts_future, return_exceptions=True)
                     raise
                 finally:
+                    if not self.top_end_task.done():
+                        self.top_end_task.cancel()
+                        try:
+                            await self.top_end_task
+                        except asyncio.CancelledError:
+                            pass  # Expected
+
                     self.monitor_start_event.clear()
 
                 self.log.debug("M1M3TSModel.monitor closing...")
@@ -216,6 +227,45 @@ class M1M3TSModel:
                 heatersSetpoint=heaters_setpoint,
             )
 
+    async def start_top_end_task(
+        self, mtmount_remote: salobj.Remote, setpoint: float, enforce_limit: bool = True
+    ) -> None:
+        """Schedules self.apply_top_end_setpoint for asynchronous execution.
+
+        This method handles canceling an outstanding call if needed and will
+        raise if the previous call failed. If the previous call was still
+        running (presumably because the MTMount CSC was not enabled) then a
+        warning is logged.
+
+        Parameters
+        ----------
+        mtmount_remote: salobj.Remote
+            The remote object for MTMount CSC commands.
+
+        setpoint: float
+            The setpoint (without delta applied) for the mirror system.
+
+        enforce_limit : bool
+            If true, then a setpoint less than setpoint_lower_limit will
+            be replaced with setpoint_lower_limit.
+        """
+        if self.top_end_task.done():
+            self.top_end_task_warned = False
+        else:
+            self.top_end_task.cancel()
+        try:
+            await self.top_end_task
+        except asyncio.CancelledError:
+            if not self.top_end_task_warned:
+                self.log.warning(
+                    "Previous attempt to apply MTMount setpoint was cancelled."
+                )
+                self.top_end_task_warned = True
+
+        self.top_end_task = asyncio.create_task(
+            self.apply_top_end_setpoint(mtmount_remote, setpoint, enforce_limit)
+        )
+
     async def apply_top_end_setpoint(
         self, mtmount_remote: salobj.Remote, setpoint: float, enforce_limit: bool = True
     ) -> None:
@@ -233,7 +283,16 @@ class M1M3TSModel:
 
         setpoint: float
             The setpoint (without delta applied) for the mirror system.
+
+        enforce_limit : bool
+            If true, then a setpoint less than setpoint_lower_limit will
+            be replaced with setpoint_lower_limit.
         """
+        while (
+            await mtmount_remote.evt_summaryState.aget(timeout=STD_TIMEOUT)
+        ).summaryState != State.ENABLED:
+            await asyncio.sleep(DORMANT_TIME)
+
         top_end_setpoint = setpoint
         if enforce_limit:
             top_end_setpoint = max(top_end_setpoint, self.setpoint_lower_limit)
@@ -354,7 +413,7 @@ class M1M3TSModel:
                     )
                     raise RuntimeError("No temperature samples were collected.")
 
-                await self.apply_top_end_setpoint(
+                await self.start_top_end_task(
                     mtmount_remote, average_temperature, enforce_limit=True
                 )
 
@@ -440,7 +499,7 @@ class M1M3TSModel:
                         setpoint=self.weather_model.last_twilight_temperature,
                         enforce_limit=False,
                     )
-                    await self.apply_top_end_setpoint(
+                    await self.start_top_end_task(
                         mtmount_remote=mtmount_remote,
                         setpoint=self.weather_model.last_twilight_temperature,
                         enforce_limit=False,
