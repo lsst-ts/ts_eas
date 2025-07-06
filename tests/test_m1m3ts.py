@@ -151,7 +151,7 @@ class TestM1M3(unittest.IsolatedAsyncioTestCase):
         signal_noon: bool = False,
         **model_args: typing.Any
     ) -> tuple[float | None, float | None]:
-        self.diurnal_timer = eas.diurnal_timer.DiurnalTimer()
+        self.diurnal_timer = eas.diurnal_timer.DiurnalTimer(log=logging.getLogger())
         self.diurnal_timer.is_running = True
 
         async with self.mock_extra_cscs(

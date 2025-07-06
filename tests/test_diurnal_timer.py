@@ -21,6 +21,7 @@
 
 import asyncio
 import heapq
+import logging
 import pathlib
 import unittest
 from datetime import date, datetime, time, timedelta, timezone
@@ -123,7 +124,7 @@ class TestDiurnalTimer(unittest.IsolatedAsyncioTestCase):
             )
 
     async def test_diurnaltimer_notifies_all(self) -> None:
-        timer = DiurnalTimer(sun_altitude="astronomical")
+        timer = DiurnalTimer(log=logging.getLogger(), sun_altitude="astronomical")
 
         async def watch_noon() -> None:
             while not self.noon_watcher_finished:

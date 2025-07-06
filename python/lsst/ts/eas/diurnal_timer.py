@@ -21,6 +21,7 @@
 
 import asyncio
 import datetime
+import logging
 from typing import Any, Optional, Type
 from zoneinfo import ZoneInfo
 
@@ -146,7 +147,7 @@ class DiurnalTimer:
         "astronomical"(-18 degrees).
     """
 
-    def __init__(self, sun_altitude: str | float = -18.0):
+    def __init__(self, log: logging.Logger, sun_altitude: str | float = -18.0):
         if sun_altitude == "civil":
             sun_altitude = -6.0
         elif sun_altitude == "nautical":
@@ -162,6 +163,8 @@ class DiurnalTimer:
         if not (-90 <= sun_altitude <= 0):
             raise RuntimeError("sun_altitude not in range -90 to 0")
 
+        self.log = log
+
         self.sun_altitude = sun_altitude
 
         self.noon_condition = asyncio.Condition()
@@ -175,12 +178,16 @@ class DiurnalTimer:
 
         This method loops, notifying for noon_condition each day.
         """
+        self.log.debug("_run_noon_loop")
         while self.is_running:
             local_noon = get_local_noon_time()
+            self.log.debug(f"{local_noon=}")
             wait_seconds = (local_noon - Time.now()).sec
+            self.log.info(f"Sleep {wait_seconds} seconds for noon.")
             await asyncio.sleep(wait_seconds)
 
             async with self.noon_condition:
+                self.log.info("Noon notification will be sent.")
                 self.noon_condition.notify_all()
 
     async def _run_twilight_loop(self) -> None:

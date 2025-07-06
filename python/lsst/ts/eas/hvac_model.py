@@ -211,12 +211,20 @@ class HvacModel:
                 self.monitor_start_event.set()
 
                 await self.diurnal_timer.noon_condition.wait()
+                self.log.info(
+                    "Noon HVAC action "
+                    f"{self.diurnal_timer.is_running=} "
+                    f"{self.weather_model.last_twilight_temperature=}"
+                )
                 if (
                     self.diurnal_timer.is_running
                     and self.weather_model.last_twilight_temperature is not None
                 ):
                     if "room_setpoint" not in self.features_to_disable:
                         # Time to set the room setpoint based on last twilight
+                        self.log.info(
+                            f"Applying HVAC AHU setpoint: {self.weather_model.last_twilight_temperature}"
+                        )
                         for device_id in (
                             DeviceId.lowerAHU01P05,
                             DeviceId.lowerAHU02P05,

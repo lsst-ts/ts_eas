@@ -135,7 +135,9 @@ class EasCsc(salobj.ConfigurableCsc):
 
     async def configure(self, config: SimpleNamespace) -> None:
         self.config = config
-        self.diurnal_timer = DiurnalTimer(sun_altitude=self.config.twilight_definition)
+        self.diurnal_timer = DiurnalTimer(
+            log=self.log, sun_altitude=self.config.twilight_definition
+        )
         self.dome_model = DomeModel(domain=self.domain)
         self.weather_model = WeatherModel(
             domain=self.domain,
