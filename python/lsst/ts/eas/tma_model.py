@@ -19,7 +19,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-__all__ = ["M1M3TSModel"]
+__all__ = ["TmaModel"]
 
 import asyncio
 import logging
@@ -37,8 +37,8 @@ STD_TIMEOUT = 10  # seconds
 DORMANT_TIME = 100  # Time to wait while sleeping, seconds
 
 
-class M1M3TSModel:
-    """A model for the M1M3TS system automation.
+class TmaModel:
+    """A model for the MTMount and M1M3TS system automation.
 
     Parameters
     ----------
@@ -89,6 +89,7 @@ class M1M3TSModel:
         A list of features that should be disabled. The following strings can
         be used:
          * m1m3ts
+         * top_end
         Any other values are ignored.
     """
 
@@ -139,7 +140,7 @@ class M1M3TSModel:
         self.top_end_task_warned: bool = False
 
     async def monitor(self) -> None:
-        self.log.debug("M1M3TSModel.monitor")
+        self.log.debug("TmaModel.monitor")
 
         async with (
             salobj.Remote(
@@ -151,7 +152,10 @@ class M1M3TSModel:
                 name="MTMount",
             ) as mtmount_remote,
         ):
-            if "m1m3ts" not in self.features_to_disable:
+            if (
+                "m1m3ts" not in self.features_to_disable
+                or "top_end" not in self.features_to_disable
+            ):
                 ready_futures: list[asyncio.Future] = [
                     asyncio.Future() for _ in range(2)
                 ]
@@ -168,7 +172,7 @@ class M1M3TSModel:
                     ),
                 )
                 await asyncio.gather(*ready_futures)
-                self.log.debug("M1M3TSModel.monitor started")
+                self.log.debug("TmaModel.monitor started")
                 self.monitor_start_event.set()
 
                 try:
@@ -187,7 +191,7 @@ class M1M3TSModel:
 
                     self.monitor_start_event.clear()
 
-                self.log.debug("M1M3TSModel.monitor closing...")
+                self.log.debug("TmaModel.monitor closing...")
 
             else:
                 # If m1m3ts is disabled, just sleep.
@@ -236,6 +240,9 @@ class M1M3TSModel:
         setpoint: float
             The setpoint (without delta applied) for the mirror system.
         """
+        if "top_end" in self.features_to_disable:
+            return
+
         if self.top_end_task.done():
             self.top_end_task_warned = False
         else:
@@ -394,6 +401,9 @@ class M1M3TSModel:
                     raise RuntimeError("No temperature samples were collected.")
 
                 await self.start_top_end_task(mtmount_remote, average_temperature)
+
+                if "m1m3ts" in self.features_to_disable:
+                    continue
 
                 if self.last_m1m3ts_setpoint is None:
                     # No previous setpoint = apply it regardless

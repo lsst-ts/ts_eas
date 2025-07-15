@@ -33,7 +33,7 @@ from .config_schema import CONFIG_SCHEMA
 from .diurnal_timer import DiurnalTimer
 from .dome_model import DomeModel
 from .hvac_model import HvacModel
-from .m1m3ts_model import M1M3TSModel
+from .tma_model import TmaModel
 from .weather_model import WeatherModel
 
 # Constants for the health monitor:
@@ -97,7 +97,7 @@ class EasCsc(salobj.ConfigurableCsc):
         self.subtasks: list[asyncio.Task[None]] = []
         self.diurnal_timer: DiurnalTimer | None = None
         self.hvac_model: HvacModel | None = None
-        self.m1m3ts_model: M1M3TSModel | None = None
+        self.tma_model: TmaModel | None = None
 
     async def handle_summary_state(self) -> None:
         """Override of the handle_summary_state function to
@@ -157,7 +157,7 @@ class EasCsc(salobj.ConfigurableCsc):
             vec04_hold_time=self.config.vec04_hold_time,
             features_to_disable=self.config.features_to_disable,
         )
-        self.m1m3ts_model = M1M3TSModel(
+        self.tma_model = TmaModel(
             domain=self.domain,
             log=self.log,
             diurnal_timer=self.diurnal_timer,
@@ -184,7 +184,7 @@ class EasCsc(salobj.ConfigurableCsc):
         recoverable failure.
         """
         assert self.hvac_model is not None, "HVAC Model not initialized."
-        assert self.m1m3ts_model is not None, "M1M3TS Model not initialized."
+        assert self.tma_model is not None, "TMA Model not initialized."
         assert self.diurnal_timer is not None, "Timer not initialized."
 
         self.log.debug("monitor_health")
@@ -198,7 +198,7 @@ class EasCsc(salobj.ConfigurableCsc):
                     self.dome_model.monitor,
                     self.weather_model.monitor,
                     self.hvac_model.monitor,
-                    self.m1m3ts_model.monitor,
+                    self.tma_model.monitor,
                 )
             ]
 
@@ -207,7 +207,7 @@ class EasCsc(salobj.ConfigurableCsc):
                 self.dome_model.monitor_start_event.wait(),
                 self.weather_model.monitor_start_event.wait(),
                 self.hvac_model.monitor_start_event.wait(),
-                self.m1m3ts_model.monitor_start_event.wait(),
+                self.tma_model.monitor_start_event.wait(),
             )
             self.log.debug("Monitors started.")
             self.monitor_start_event.set()
