@@ -59,10 +59,6 @@ class M1M3TSModel:
     ess_timeout : float
         The amount of time (seconds) of no ESS measurements after which
         the CSC should fault.
-    setpoint_lower_limit : float
-        The minimum allowed setpoint for thermal control. If a lower setpoint
-        than this is indicated from the ESS temperature readings, this setpoint
-        will be used instead.
     glycol_setpoint_delta : float
         The difference between the twilight ambient temperature and the
         setpoint to apply for the glycol, e.g., -2 if the glycol should
@@ -106,7 +102,6 @@ class M1M3TSModel:
         weather_model: WeatherModel,
         indoor_ess_index: int,
         ess_timeout: float,
-        setpoint_lower_limit: float,
         glycol_setpoint_delta: float,
         heater_setpoint_delta: float,
         top_end_setpoint_delta: float,
@@ -128,7 +123,6 @@ class M1M3TSModel:
         # Configuration parameters:
         self.indoor_ess_index = indoor_ess_index
         self.ess_timeout = ess_timeout
-        self.setpoint_lower_limit = setpoint_lower_limit
         self.glycol_setpoint_delta = glycol_setpoint_delta
         self.heater_setpoint_delta = heater_setpoint_delta
         self.top_end_setpoint_delta = top_end_setpoint_delta
@@ -209,10 +203,7 @@ class M1M3TSModel:
         *,
         m1m3ts_remote: salobj.Remote,
         setpoint: float,
-        enforce_limit: bool = True,
     ) -> None:
-        if enforce_limit:
-            setpoint = max(setpoint, self.setpoint_lower_limit)
         glycol_setpoint = setpoint + self.glycol_setpoint_delta
         heaters_setpoint = setpoint + self.heater_setpoint_delta
         self.log.debug(f"Setting MTM1MTS: {glycol_setpoint=} {heaters_setpoint=}")
@@ -228,7 +219,7 @@ class M1M3TSModel:
             )
 
     async def start_top_end_task(
-        self, mtmount_remote: salobj.Remote, setpoint: float, enforce_limit: bool = True
+        self, mtmount_remote: salobj.Remote, setpoint: float
     ) -> None:
         """Schedules self.apply_top_end_setpoint for asynchronous execution.
 
@@ -244,10 +235,6 @@ class M1M3TSModel:
 
         setpoint: float
             The setpoint (without delta applied) for the mirror system.
-
-        enforce_limit : bool
-            If true, then a setpoint less than setpoint_lower_limit will
-            be replaced with setpoint_lower_limit.
         """
         if self.top_end_task.done():
             self.top_end_task_warned = False
@@ -263,11 +250,11 @@ class M1M3TSModel:
                 self.top_end_task_warned = True
 
         self.top_end_task = asyncio.create_task(
-            self.apply_top_end_setpoint(mtmount_remote, setpoint, enforce_limit)
+            self.apply_top_end_setpoint(mtmount_remote, setpoint)
         )
 
     async def apply_top_end_setpoint(
-        self, mtmount_remote: salobj.Remote, setpoint: float, enforce_limit: bool = True
+        self, mtmount_remote: salobj.Remote, setpoint: float
     ) -> None:
         """Apply the average temperature plus offset as the top end setpoint.
 
@@ -283,19 +270,12 @@ class M1M3TSModel:
 
         setpoint: float
             The setpoint (without delta applied) for the mirror system.
-
-        enforce_limit : bool
-            If true, then a setpoint less than setpoint_lower_limit will
-            be replaced with setpoint_lower_limit.
         """
         while (
             await mtmount_remote.evt_summaryState.aget(timeout=STD_TIMEOUT)
         ).summaryState != State.ENABLED:
             await asyncio.sleep(DORMANT_TIME)
 
-        top_end_setpoint = setpoint
-        if enforce_limit:
-            top_end_setpoint = max(top_end_setpoint, self.setpoint_lower_limit)
         top_end_setpoint = setpoint + self.top_end_setpoint_delta
         await mtmount_remote.cmd_setThermal.set_start(
             topEndChillerSetpoint=top_end_setpoint
@@ -413,16 +393,13 @@ class M1M3TSModel:
                     )
                     raise RuntimeError("No temperature samples were collected.")
 
-                await self.start_top_end_task(
-                    mtmount_remote, average_temperature, enforce_limit=True
-                )
+                await self.start_top_end_task(mtmount_remote, average_temperature)
 
                 if self.last_m1m3ts_setpoint is None:
                     # No previous setpoint = apply it regardless
                     await self.apply_setpoints(
                         m1m3ts_remote=m1m3ts_remote,
                         setpoint=average_temperature,
-                        enforce_limit=True,
                     )
                     self.last_m1m3ts_setpoint = average_temperature
                 elif average_temperature > self.last_m1m3ts_setpoint:
@@ -442,7 +419,6 @@ class M1M3TSModel:
                         await self.apply_setpoints(
                             m1m3ts_remote=m1m3ts_remote,
                             setpoint=new_setpoint,
-                            enforce_limit=True,
                         )
                 else:
                     # Cool the mirror if the setpoint is past the deadband
@@ -455,7 +431,6 @@ class M1M3TSModel:
                         await self.apply_setpoints(
                             m1m3ts_remote=m1m3ts_remote,
                             setpoint=new_setpoint,
-                            enforce_limit=True,
                         )
 
     async def wait_for_noon(
@@ -490,17 +465,14 @@ class M1M3TSModel:
                     and self.weather_model.last_twilight_temperature is not None
                 ):
                     self.log.info(
-                        "Noon M1M3TS is set based on twilight temperature: "
+                        "Noon M1M3TS and top end is set based on twilight temperature: "
                         f"{self.weather_model.last_twilight_temperature:.2f} "
-                        f"(with floor at {self.setpoint_lower_limit:.2f})"
                     )
                     await self.apply_setpoints(
                         m1m3ts_remote=m1m3ts_remote,
                         setpoint=self.weather_model.last_twilight_temperature,
-                        enforce_limit=False,
                     )
                     await self.start_top_end_task(
                         mtmount_remote=mtmount_remote,
                         setpoint=self.weather_model.last_twilight_temperature,
-                        enforce_limit=False,
                     )

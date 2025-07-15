@@ -184,7 +184,6 @@ class TestM1M3(unittest.IsolatedAsyncioTestCase):
                 weather_model=self.weather_model,
                 indoor_ess_index=112,
                 ess_timeout=20,
-                setpoint_lower_limit=model_args["setpoint_lower_limit"],
                 glycol_setpoint_delta=model_args["glycol_setpoint_delta"],
                 heater_setpoint_delta=model_args["heater_setpoint_delta"],
                 top_end_setpoint_delta=model_args["top_end_setpoint_delta"],
@@ -223,7 +222,6 @@ class TestM1M3(unittest.IsolatedAsyncioTestCase):
         glycol_setpoint_delta = -2
         heater_setpoint_delta = -1
         top_end_setpoint_delta = -0.5
-        setpoint_lower_limit = 6
 
         glycol_setpoint, heater_setpoint, top_end_setpoint = (
             await self.run_with_parameters(
@@ -231,7 +229,6 @@ class TestM1M3(unittest.IsolatedAsyncioTestCase):
                 glycol_setpoint_delta=glycol_setpoint_delta,
                 heater_setpoint_delta=heater_setpoint_delta,
                 top_end_setpoint_delta=top_end_setpoint_delta,
-                setpoint_lower_limit=setpoint_lower_limit,
                 signal_noon=True,
                 features_to_disable=[],
             )
@@ -261,13 +258,11 @@ class TestM1M3(unittest.IsolatedAsyncioTestCase):
         glycol_setpoint_delta = -2
         heater_setpoint_delta = -1
         top_end_setpoint_delta = -1.5
-        setpoint_lower_limit = 6
 
         glycol_setpoint, heater_setpoint, top_end_setpoint = (
             await self.run_with_parameters(
                 ess112_temperature,
                 glycol_setpoint_delta=glycol_setpoint_delta,
-                setpoint_lower_limit=setpoint_lower_limit,
                 heater_setpoint_delta=heater_setpoint_delta,
                 top_end_setpoint_delta=top_end_setpoint_delta,
                 features_to_disable=["m1m3ts"],
@@ -284,14 +279,12 @@ class TestM1M3(unittest.IsolatedAsyncioTestCase):
         glycol_setpoint_delta = -2
         heater_setpoint_delta = -1
         top_end_setpoint_delta = -1
-        setpoint_lower_limit = 6
 
         with self.assertRaises(RuntimeError):
             glycol_setpoint, heater_setpoint, top_end_setpoint = (
                 await self.run_with_parameters(
                     ess112_temperature,
                     glycol_setpoint_delta=glycol_setpoint_delta,
-                    setpoint_lower_limit=setpoint_lower_limit,
                     heater_setpoint_delta=heater_setpoint_delta,
                     top_end_setpoint_delta=top_end_setpoint_delta,
                     features_to_disable=[""],

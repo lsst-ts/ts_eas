@@ -165,7 +165,6 @@ class EasCsc(salobj.ConfigurableCsc):
             weather_model=self.weather_model,
             indoor_ess_index=self.config.indoor_ess_index,
             ess_timeout=self.config.ess_timeout,
-            setpoint_lower_limit=self.config.setpoint_lower_limit,
             glycol_setpoint_delta=self.config.glycol_setpoint_delta,
             heater_setpoint_delta=self.config.heater_setpoint_delta,
             top_end_setpoint_delta=self.config.top_end_setpoint_delta,
