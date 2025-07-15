@@ -206,7 +206,7 @@ class M1M3TSModel:
     ) -> None:
         glycol_setpoint = setpoint + self.glycol_setpoint_delta
         heaters_setpoint = setpoint + self.heater_setpoint_delta
-        self.log.debug(f"Setting MTM1MTS: {glycol_setpoint=} {heaters_setpoint=}")
+        self.log.debug(f"Setting MTM1MTS: {glycol_setpoint=}°C {heaters_setpoint=}°C")
         if hasattr(m1m3ts_remote, "cmd_applySetpoints"):
             await m1m3ts_remote.cmd_applySetpoints.set_start(
                 glycolSetpoint=glycol_setpoint,
@@ -466,7 +466,7 @@ class M1M3TSModel:
                 ):
                     self.log.info(
                         "Noon M1M3TS and top end is set based on twilight temperature: "
-                        f"{self.weather_model.last_twilight_temperature:.2f} "
+                        f"{self.weather_model.last_twilight_temperature:.2f}°C"
                     )
                     await self.apply_setpoints(
                         m1m3ts_remote=m1m3ts_remote,

@@ -151,7 +151,7 @@ class HvacModel:
                 average_windspeed = self.weather_model.average_windspeed
                 wind_threshold = average_windspeed < self.wind_threshold
                 self.log.debug(
-                    f"VEC-04 operation demanded: {average_windspeed} -> {wind_threshold}"
+                    f"VEC-04 operation demanded: {average_windspeed} m/s -> {wind_threshold}"
                 )
                 if wind_threshold != cached_wind_threshold:
                     cached_wind_threshold = wind_threshold
