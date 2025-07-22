@@ -222,6 +222,9 @@ class TmaModel:
                 heatersSetpoint=heaters_setpoint,
             )
 
+        # Record the last setpoint used.
+        self.last_m1m3ts_setpoint = setpoint
+
     async def start_top_end_task(
         self, mtmount_remote: salobj.Remote, setpoint: float
     ) -> None:
@@ -411,7 +414,6 @@ class TmaModel:
                         m1m3ts_remote=m1m3ts_remote,
                         setpoint=average_temperature,
                     )
-                    self.last_m1m3ts_setpoint = average_temperature
                 elif average_temperature > self.last_m1m3ts_setpoint:
                     # Warm the mirror if the setpoint is past the deadband
                     new_setpoint = average_temperature
@@ -420,12 +422,15 @@ class TmaModel:
                         > self.setpoint_deadband_heating
                     ):
                         # Apply the setpoint, limited by maximum_heating_rate
-                        maximum_heating_rate = (
+                        maximum_heating_step = (
                             self.maximum_heating_rate
                             * self.m1m3_setpoint_cadence
                             / 3600.0
                         )
-                        new_setpoint = min(new_setpoint, maximum_heating_rate)
+                        new_setpoint = min(
+                            average_temperature,
+                            self.last_m1m3ts_setpoint + maximum_heating_step,
+                        )
                         await self.apply_setpoints(
                             m1m3ts_remote=m1m3ts_remote,
                             setpoint=new_setpoint,

@@ -200,8 +200,9 @@ class TestTma(unittest.IsolatedAsyncioTestCase):
             if signal_noon:
                 async with self.diurnal_timer.noon_condition:
                     self.diurnal_timer.noon_condition.notify_all()
-
-            await asyncio.sleep(40)
+                await asyncio.sleep(1)
+            else:
+                await asyncio.sleep(40)
 
             monitor_task.cancel()
             try:
