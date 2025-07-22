@@ -54,7 +54,7 @@ class TmaModel:
     weather_model : WeatherModel
         A model for the outdoor weather station, which records the last
         twilight temperature observed while the dome was opened.
-    ess_indoor_index : int
+    indoor_ess_index : int
         The SAL index for the indoor ESS meter.
     ess_timeout : float
         The amount of time (seconds) of no ESS measurements after which
@@ -210,7 +210,7 @@ class TmaModel:
     ) -> None:
         glycol_setpoint = setpoint + self.glycol_setpoint_delta
         heaters_setpoint = setpoint + self.heater_setpoint_delta
-        self.log.debug(f"Setting MTM1MTS: {glycol_setpoint=}°C {heaters_setpoint=}°C")
+        self.log.info(f"Setting MTM1MTS: {glycol_setpoint=}°C {heaters_setpoint=}°C")
         if hasattr(m1m3ts_remote, "cmd_applySetpoints"):
             await m1m3ts_remote.cmd_applySetpoints.set_start(
                 glycolSetpoint=glycol_setpoint,
