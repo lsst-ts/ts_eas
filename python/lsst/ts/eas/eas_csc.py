@@ -172,6 +172,8 @@ class EasCsc(salobj.ConfigurableCsc):
             setpoint_deadband_heating=self.config.setpoint_deadband_heating,
             setpoint_deadband_cooling=self.config.setpoint_deadband_cooling,
             maximum_heating_rate=self.config.maximum_heating_rate,
+            slow_cooling_rate=self.config.slow_cooling_rate,
+            fast_cooling_rate=self.config.fast_cooling_rate,
             features_to_disable=self.config.features_to_disable,
         )
 
