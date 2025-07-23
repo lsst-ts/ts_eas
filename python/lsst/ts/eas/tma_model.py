@@ -26,6 +26,7 @@ import logging
 import math
 import time
 
+from astropy.time import Time
 from lsst.ts import salobj, utils
 from lsst.ts.xml.enums.MTMount import ThermalCommandState
 from lsst.ts.xml.sal_enums import State
@@ -86,6 +87,12 @@ class TmaModel:
         Maximum allowed rate of increase in the M1M3TS setpoint temperature.
         Limits how quickly the setpoint can rise, in degrees Celsius per hour.
         (°C/hr)
+    slow_cooling_rate : float
+        Cooling rate to be used shortly before and during the night.
+        Limits how quickly the setpoint can fall, in degrees Celsius per hour.
+    fast_cooling_rate : float
+        Cooling rate to be used during the day. Limits how quickly the setpoint
+        can fall, in degrees Celsius per hour.
     features_to_disable : list[str]
         A list of features that should be disabled. The following strings can
         be used:
@@ -111,6 +118,8 @@ class TmaModel:
         setpoint_deadband_heating: float,
         setpoint_deadband_cooling: float,
         maximum_heating_rate: float,
+        slow_cooling_rate: float,
+        fast_cooling_rate: float,
         features_to_disable: list[str] = [],
     ) -> None:
         self.domain = domain
@@ -132,6 +141,8 @@ class TmaModel:
         self.setpoint_deadband_heating = setpoint_deadband_heating
         self.setpoint_deadband_cooling = setpoint_deadband_cooling
         self.maximum_heating_rate = maximum_heating_rate
+        self.slow_cooling_rate = slow_cooling_rate
+        self.fast_cooling_rate = fast_cooling_rate
         self.features_to_disable = features_to_disable
 
         # Last setpoint, for deadband purposes
@@ -416,6 +427,29 @@ class TmaModel:
                 if "m1m3ts" in self.features_to_disable:
                     continue
 
+                # Maximum cooling rate depends on environmental conditions:
+                #  * If the dome is open or
+                #    sunrise time > current time > twilight-2hours
+                #    then we use the slow cooling rate
+                #    (currently 1 degree per hour)
+                #  * Otherwise we use the fast cooling rate
+                #    (currently 10 degrees per hour)
+                # We assume that twilight is always shorter than two hours, as
+                # is the case at Cerro Pachón.
+                current_time = time.time()
+                use_slow_cooling_rate = (
+                    (not self.dome_model.is_closed)
+                    or (self.diurnal_timer.sun_altitude_at(current_time) < 0)
+                    or (
+                        self.diurnal_timer.seconds_until_twilight(Time.now()) < 2 * 3600
+                    )
+                )
+                cooling_rate = (
+                    self.slow_cooling_rate
+                    if use_slow_cooling_rate
+                    else self.fast_cooling_rate
+                )
+
                 if self.last_m1m3ts_setpoint is None:
                     # No previous setpoint = apply it regardless
                     await self.apply_setpoints(
@@ -448,9 +482,16 @@ class TmaModel:
                     new_setpoint = average_temperature
                     if (
                         self.last_m1m3ts_setpoint - new_setpoint
-                        > self.setpoint_deadband_heating
+                        > self.setpoint_deadband_cooling
                     ):
-                        # Apply the setpoint, no maximum cooling rate.
+                        # Apply the setpoint, limited by maximum_cooling_rate
+                        maximum_cooling_step = (
+                            cooling_rate * self.m1m3_setpoint_cadence / 3600.0
+                        )
+                        new_setpoint = max(
+                            average_temperature,
+                            self.last_m1m3ts_setpoint - maximum_cooling_step,
+                        )
                         await self.apply_setpoints(
                             m1m3ts_remote=m1m3ts_remote,
                             setpoint=new_setpoint,
