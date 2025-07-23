@@ -19,25 +19,26 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-__all__ = ["M1M3TSModel"]
+__all__ = ["TmaModel"]
 
 import asyncio
 import logging
 import math
 import time
 
-from lsst.ts import salobj
+from lsst.ts import salobj, utils
+from lsst.ts.xml.sal_enums import State
 
 from .diurnal_timer import DiurnalTimer
 from .dome_model import DomeModel
 from .weather_model import WeatherModel
 
 STD_TIMEOUT = 10  # seconds
-DORMANT_TIME = 300  # Time to wait while sleeping, seconds
+DORMANT_TIME = 100  # Time to wait while sleeping, seconds
 
 
-class M1M3TSModel:
-    """A model for the M1M3TS system automation.
+class TmaModel:
+    """A model for the MTMount and M1M3TS system automation.
 
     Parameters
     ----------
@@ -53,7 +54,7 @@ class M1M3TSModel:
     weather_model : WeatherModel
         A model for the outdoor weather station, which records the last
         twilight temperature observed while the dome was opened.
-    ess_indoor_index : int
+    indoor_ess_index : int
         The SAL index for the indoor ESS meter.
     ess_timeout : float
         The amount of time (seconds) of no ESS measurements after which
@@ -66,6 +67,9 @@ class M1M3TSModel:
         The difference between the twilight ambient temperature and the
         setpoint to apply for the FCU heaters, e.g., -1 if the FCU heaters
         should be one degree cooler than ambient.
+    top_end_setpoint_delta : float
+        The difference between the indoor (ESS:112) temperature and the
+        setpoint to apply for the top end, via MTMount.setThermal.
     m1m3_setpoint_cadence : float
         The cadence at which applySetpoints commands should be sent to
         MTM1M3TS (seconds).
@@ -85,6 +89,7 @@ class M1M3TSModel:
         A list of features that should be disabled. The following strings can
         be used:
          * m1m3ts
+         * top_end
         Any other values are ignored.
     """
 
@@ -100,6 +105,7 @@ class M1M3TSModel:
         ess_timeout: float,
         glycol_setpoint_delta: float,
         heater_setpoint_delta: float,
+        top_end_setpoint_delta: float,
         m1m3_setpoint_cadence: float,
         setpoint_deadband_heating: float,
         setpoint_deadband_cooling: float,
@@ -120,6 +126,7 @@ class M1M3TSModel:
         self.ess_timeout = ess_timeout
         self.glycol_setpoint_delta = glycol_setpoint_delta
         self.heater_setpoint_delta = heater_setpoint_delta
+        self.top_end_setpoint_delta = top_end_setpoint_delta
         self.m1m3_setpoint_cadence = m1m3_setpoint_cadence
         self.setpoint_deadband_heating = setpoint_deadband_heating
         self.setpoint_deadband_cooling = setpoint_deadband_cooling
@@ -129,27 +136,43 @@ class M1M3TSModel:
         # Last setpoint, for deadband purposes
         self.last_m1m3ts_setpoint: float | None = None
 
-    async def monitor(self) -> None:
-        self.log.debug("M1M3TSModel.monitor")
+        self.top_end_task = utils.make_done_future()
+        self.top_end_task_warned: bool = False
 
-        async with salobj.Remote(
-            domain=self.domain,
-            name="MTM1M3TS",
-        ) as m1m3ts_remote:
-            if "m1m3ts" not in self.features_to_disable:
+    async def monitor(self) -> None:
+        self.log.debug("TmaModel.monitor")
+
+        async with (
+            salobj.Remote(
+                domain=self.domain,
+                name="MTM1M3TS",
+            ) as m1m3ts_remote,
+            salobj.Remote(
+                domain=self.domain,
+                name="MTMount",
+            ) as mtmount_remote,
+        ):
+            if (
+                "m1m3ts" not in self.features_to_disable
+                or "top_end" not in self.features_to_disable
+            ):
                 ready_futures: list[asyncio.Future] = [
                     asyncio.Future() for _ in range(2)
                 ]
                 m1m3ts_future = asyncio.gather(
                     self.follow_ess_indoor(
-                        m1m3ts_remote=m1m3ts_remote, future=ready_futures[0]
+                        m1m3ts_remote=m1m3ts_remote,
+                        mtmount_remote=mtmount_remote,
+                        future=ready_futures[0],
                     ),
                     self.wait_for_noon(
-                        m1m3ts_remote=m1m3ts_remote, future=ready_futures[1]
+                        m1m3ts_remote=m1m3ts_remote,
+                        mtmount_remote=mtmount_remote,
+                        future=ready_futures[1],
                     ),
                 )
                 await asyncio.gather(*ready_futures)
-                self.log.debug("M1M3TSModel.monitor started")
+                self.log.debug("TmaModel.monitor started")
                 self.monitor_start_event.set()
 
                 try:
@@ -159,9 +182,16 @@ class M1M3TSModel:
                     await asyncio.gather(m1m3ts_future, return_exceptions=True)
                     raise
                 finally:
+                    if not self.top_end_task.done():
+                        self.top_end_task.cancel()
+                        try:
+                            await self.top_end_task
+                        except asyncio.CancelledError:
+                            pass  # Expected
+
                     self.monitor_start_event.clear()
 
-                self.log.debug("M1M3TSModel.monitor closing...")
+                self.log.debug("TmaModel.monitor closing...")
 
             else:
                 # If m1m3ts is disabled, just sleep.
@@ -173,11 +203,14 @@ class M1M3TSModel:
                         raise
 
     async def apply_setpoints(
-        self, *, m1m3ts_remote: salobj.Remote, setpoint: float
+        self,
+        *,
+        m1m3ts_remote: salobj.Remote,
+        setpoint: float,
     ) -> None:
         glycol_setpoint = setpoint + self.glycol_setpoint_delta
         heaters_setpoint = setpoint + self.heater_setpoint_delta
-        self.log.debug(f"Setting MTM1MTS: {glycol_setpoint=} {heaters_setpoint=}")
+        self.log.info(f"Setting MTM1MTS: {glycol_setpoint=}°C {heaters_setpoint=}°C")
         if hasattr(m1m3ts_remote, "cmd_applySetpoints"):
             await m1m3ts_remote.cmd_applySetpoints.set_start(
                 glycolSetpoint=glycol_setpoint,
@@ -188,6 +221,75 @@ class M1M3TSModel:
                 glycolSetpoint=glycol_setpoint,
                 heatersSetpoint=heaters_setpoint,
             )
+
+        # Record the last setpoint used.
+        self.last_m1m3ts_setpoint = setpoint
+
+    async def start_top_end_task(
+        self, mtmount_remote: salobj.Remote, setpoint: float
+    ) -> None:
+        """Schedules self.apply_top_end_setpoint for asynchronous execution.
+
+        This method handles canceling an outstanding call if needed and will
+        raise if the previous call failed. If the previous call was still
+        running (presumably because the MTMount CSC was not enabled) then a
+        warning is logged.
+
+        Parameters
+        ----------
+        mtmount_remote: salobj.Remote
+            The remote object for MTMount CSC commands.
+
+        setpoint: float
+            The setpoint (without delta applied) for the mirror system.
+        """
+        if "top_end" in self.features_to_disable:
+            return
+
+        if self.top_end_task.done():
+            self.top_end_task_warned = False
+        else:
+            self.top_end_task.cancel()
+        try:
+            await self.top_end_task
+        except asyncio.CancelledError:
+            if not self.top_end_task_warned:
+                self.log.warning(
+                    "Previous attempt to apply MTMount setpoint was cancelled."
+                )
+                self.top_end_task_warned = True
+
+        self.top_end_task = asyncio.create_task(
+            self.apply_top_end_setpoint(mtmount_remote, setpoint)
+        )
+
+    async def apply_top_end_setpoint(
+        self, mtmount_remote: salobj.Remote, setpoint: float
+    ) -> None:
+        """Apply the average temperature plus offset as the top end setpoint.
+
+        This is a very simple approach to start with, but more complexity may
+        be added later. That might merit other methods, or a seperate model
+        for the top end, but for now we just use the simplest approach
+        possible.
+
+        Parameters
+        ----------
+        mtmount_remote: salobj.Remote
+            The remote object for MTMount CSC commands.
+
+        setpoint: float
+            The setpoint (without delta applied) for the mirror system.
+        """
+        while (
+            await mtmount_remote.evt_summaryState.aget(timeout=STD_TIMEOUT)
+        ).summaryState != State.ENABLED:
+            await asyncio.sleep(DORMANT_TIME)
+
+        top_end_setpoint = setpoint + self.top_end_setpoint_delta
+        await mtmount_remote.cmd_setThermal.set_start(
+            topEndChillerSetpoint=top_end_setpoint
+        )
 
     async def collect_temperature_samples(
         self, ess_remote: salobj.Remote
@@ -269,7 +371,11 @@ class M1M3TSModel:
         return average_temperature
 
     async def follow_ess_indoor(
-        self, *, m1m3ts_remote: salobj.Remote, future: asyncio.Future
+        self,
+        *,
+        m1m3ts_remote: salobj.Remote,
+        mtmount_remote: salobj.Remote,
+        future: asyncio.Future,
     ) -> None:
         self.log.debug("follow_ess_indoor")
 
@@ -297,12 +403,17 @@ class M1M3TSModel:
                     )
                     raise RuntimeError("No temperature samples were collected.")
 
+                await self.start_top_end_task(mtmount_remote, average_temperature)
+
+                if "m1m3ts" in self.features_to_disable:
+                    continue
+
                 if self.last_m1m3ts_setpoint is None:
                     # No previous setpoint = apply it regardless
                     await self.apply_setpoints(
-                        m1m3ts_remote=m1m3ts_remote, setpoint=average_temperature
+                        m1m3ts_remote=m1m3ts_remote,
+                        setpoint=average_temperature,
                     )
-                    self.last_m1m3ts_setpoint = average_temperature
                 elif average_temperature > self.last_m1m3ts_setpoint:
                     # Warm the mirror if the setpoint is past the deadband
                     new_setpoint = average_temperature
@@ -311,14 +422,18 @@ class M1M3TSModel:
                         > self.setpoint_deadband_heating
                     ):
                         # Apply the setpoint, limited by maximum_heating_rate
-                        maximum_heating_rate = (
+                        maximum_heating_step = (
                             self.maximum_heating_rate
                             * self.m1m3_setpoint_cadence
                             / 3600.0
                         )
-                        new_setpoint = min(new_setpoint, maximum_heating_rate)
+                        new_setpoint = min(
+                            average_temperature,
+                            self.last_m1m3ts_setpoint + maximum_heating_step,
+                        )
                         await self.apply_setpoints(
-                            m1m3ts_remote=m1m3ts_remote, setpoint=new_setpoint
+                            m1m3ts_remote=m1m3ts_remote,
+                            setpoint=new_setpoint,
                         )
                 else:
                     # Cool the mirror if the setpoint is past the deadband
@@ -329,11 +444,16 @@ class M1M3TSModel:
                     ):
                         # Apply the setpoint, no maximum cooling rate.
                         await self.apply_setpoints(
-                            m1m3ts_remote=m1m3ts_remote, setpoint=new_setpoint
+                            m1m3ts_remote=m1m3ts_remote,
+                            setpoint=new_setpoint,
                         )
 
     async def wait_for_noon(
-        self, *, m1m3ts_remote: salobj.Remote, future: asyncio.Future
+        self,
+        *,
+        m1m3ts_remote: salobj.Remote,
+        mtmount_remote: salobj.Remote,
+        future: asyncio.Future,
     ) -> None:
         """Waits for noon and then sets the room temperature.
 
@@ -346,6 +466,8 @@ class M1M3TSModel:
         ----------
         m1m3ts_remote : salobj.Remote
             A SALobj remote representing the MTM1M3TS controller.
+        mtmount_remote : salobj.Remote
+            A SALobj remote representing the MTMount controller.
         """
         while self.diurnal_timer.is_running:
             async with self.diurnal_timer.noon_condition:
@@ -358,10 +480,14 @@ class M1M3TSModel:
                     and self.weather_model.last_twilight_temperature is not None
                 ):
                     self.log.info(
-                        "Noon M1M3TS is set based on twilight temperature: "
-                        f"{self.weather_model.last_twilight_temperature}"
+                        "Noon M1M3TS and top end is set based on twilight temperature: "
+                        f"{self.weather_model.last_twilight_temperature:.2f}°C"
                     )
                     await self.apply_setpoints(
                         m1m3ts_remote=m1m3ts_remote,
+                        setpoint=self.weather_model.last_twilight_temperature,
+                    )
+                    await self.start_top_end_task(
+                        mtmount_remote=mtmount_remote,
                         setpoint=self.weather_model.last_twilight_temperature,
                     )
