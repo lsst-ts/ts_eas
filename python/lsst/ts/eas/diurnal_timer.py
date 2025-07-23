@@ -163,6 +163,7 @@ class DiurnalTimer:
             raise RuntimeError("sun_altitude not in range -90 to 0")
 
         self.sun_altitude = sun_altitude
+        self.twilight_time: Time | None = None
 
         self.noon_condition = asyncio.Condition()
         self.twilight_condition = asyncio.Condition()
@@ -191,8 +192,8 @@ class DiurnalTimer:
         while self.is_running:
             # Search for time of twilight in the next 25 hours. Not necessarily
             # valid in the polar regions, but fine for Rubin.
-            twilight_time = get_crossing_time(self.sun_altitude)
-            wait_seconds = (twilight_time - Time.now()).sec
+            self.twilight_time = get_crossing_time(self.sun_altitude)
+            wait_seconds = self.seconds_until_twilight
             await asyncio.sleep(wait_seconds)
 
             async with self.twilight_condition:
@@ -230,6 +231,28 @@ class DiurnalTimer:
 
         async with self.twilight_condition:
             self.twilight_condition.notify_all()
+
+    def sun_altitude_at(self, t_utc: float) -> float:
+        """Returns the sun altitude in degrees at the specified time.
+
+        Parameters
+        ----------
+        t_utc : float
+            The time of interest to look up sun altitude, specified
+            in UTC seconds in the UNIX epoch.
+
+        Returns
+        -------
+        float
+            Elevation above the local observatory horizon of the center of the
+            sun, in degrees.
+        """
+        return get_sun_altitude_deg(Time(t_utc, format="unix"))
+
+    @property
+    def seconds_until_twilight(self) -> float:
+        """Returns the number of seconds remaining until twilight."""
+        return (self.twilight_time - Time.now()).sec
 
     async def __aenter__(self) -> "DiurnalTimer":
         self.start()
