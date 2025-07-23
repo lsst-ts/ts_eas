@@ -92,7 +92,7 @@ class WeatherModel:
            A newly received air_flow telemetry item.
         """
         self.log.debug(
-            f"air_flow_callback: {air_flow.private_sndStamp=} {air_flow.speed=}"
+            f"air_flow_callback: {air_flow.private_sndStamp=} sec; {air_flow.speed=} m/s"
         )
         now = air_flow.private_sndStamp
         self.wind_history.append((air_flow.speed, now))
@@ -199,5 +199,5 @@ class WeatherModel:
 
         # Store the average for future use.
         last_twilight_temperature = sum(temperature_list) / len(temperature_list)
-        self.log.info(f"Collected twilight temperature: {last_twilight_temperature}")
+        self.log.info(f"Collected twilight temperature: {last_twilight_temperature}°C")
         return last_twilight_temperature
