@@ -1,3 +1,18 @@
+v0.8.5 (2025-07-23)
+===================
+
+Bug Fixes
+---------
+
+* Corrected application of setpoint to M1M3TS when the temperature is warming.
+
+New Features
+------------
+
+* Added lower limit for HVAC temperature.
+* Added control of the top end setpoint.
+
+
 v0.8.2 (2025-06-13)
 ===================
 
