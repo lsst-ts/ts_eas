@@ -27,6 +27,7 @@ import math
 import time
 
 from lsst.ts import salobj, utils
+from lsst.ts.xml.enums.MTMount import ThermalCommandState
 from lsst.ts.xml.sal_enums import State
 
 from .diurnal_timer import DiurnalTimer
@@ -269,7 +270,7 @@ class TmaModel:
         """Apply the average temperature plus offset as the top end setpoint.
 
         This is a very simple approach to start with, but more complexity may
-        be added later. That might merit other methods, or a seperate model
+        be added later. That might merit other methods, or a separate model
         for the top end, but for now we just use the simplest approach
         possible.
 
@@ -287,9 +288,16 @@ class TmaModel:
             await asyncio.sleep(DORMANT_TIME)
 
         top_end_setpoint = setpoint + self.top_end_setpoint_delta
-        await mtmount_remote.cmd_setThermal.set_start(
-            topEndChillerSetpoint=top_end_setpoint
-        )
+        try:
+            await asyncio.wait_for(
+                mtmount_remote.cmd_setThermal.set_start(
+                    topEndChillerSetpoint=top_end_setpoint,
+                    topEndChillerState=ThermalCommandState.ON,
+                ),
+                timeout=STD_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            self.log.exception("Apply setpoint to top end timed out!")
 
     async def collect_temperature_samples(
         self, ess_remote: salobj.Remote
