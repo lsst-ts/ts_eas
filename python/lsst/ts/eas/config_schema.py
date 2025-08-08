@@ -111,6 +111,18 @@ CONFIG_SCHEMA = yaml.safe_load(
           how quickly the setpoint can rise, in degrees Celsius per hour. (°C/hr)
         type: number
         minimum: 0
+      slow_cooling_rate:
+        description: >
+          Cooling rate to be used shortly before and during the night.
+          Limits how quickly the setpoint can fall, in degrees Celsius per hour.
+        type: number
+        minimum: 0
+      fast_cooling_rate:
+        description: >
+          Cooling rate to be used during the day. Limits how quickly the setpoint
+          can fall, in degrees Celsius per hour.
+        type: number
+        minimum: 0
       setpoint_lower_limit:
         description: >
           The minimum allowed setpoint for thermal control. If a lower setpoint
@@ -133,6 +145,8 @@ CONFIG_SCHEMA = yaml.safe_load(
       - setpoint_deadband_heating
       - setpoint_deadband_cooling
       - maximum_heating_rate
+      - slow_cooling_rate
+      - fast_cooling_rate
       - setpoint_lower_limit
     additionalProperties: false
     """
