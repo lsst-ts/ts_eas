@@ -52,14 +52,6 @@ API Removal or Deprecation
 - Removed M1M3TS control loop. (`DM-50624 <https://rubinobs.atlassian.net//browse/DM-50624>`_)
 
 
-.. py:currentmodule:: lsst.ts.eas
-
-.. _lsst.ts.eas.version_history:
-
-###############
-Version History
-###############
-
 v0.6.1
 ======
 
