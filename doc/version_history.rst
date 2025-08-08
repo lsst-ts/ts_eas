@@ -1,3 +1,18 @@
+v0.8.5 (2025-07-23)
+===================
+
+Bug Fixes
+---------
+
+* Corrected application of setpoint to M1M3TS when the temperature is warming.
+
+New Features
+------------
+
+* Added lower limit for HVAC temperature.
+* Added control of the top end setpoint.
+
+
 v0.8.2 (2025-06-13)
 ===================
 
@@ -36,14 +51,6 @@ API Removal or Deprecation
 
 - Removed M1M3TS control loop. (`DM-50624 <https://rubinobs.atlassian.net//browse/DM-50624>`_)
 
-
-.. py:currentmodule:: lsst.ts.eas
-
-.. _lsst.ts.eas.version_history:
-
-###############
-Version History
-###############
 
 v0.6.1
 ======
