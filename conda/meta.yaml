@@ -43,7 +43,7 @@ requirements:
     - python {{ python }}
     - setuptools
     - setuptools_scm
-    - ts-xml =23.2
+    - ts-xml {{ xml_version }}
     - ts-salobj {{ salobj_version }}
     - backoff
     - astropy
