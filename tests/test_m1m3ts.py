@@ -191,6 +191,8 @@ class TestTma(unittest.IsolatedAsyncioTestCase):
                 setpoint_deadband_heating=0,
                 setpoint_deadband_cooling=0,
                 maximum_heating_rate=100,
+                slow_cooling_rate=1,
+                fast_cooling_rate=10,
                 features_to_disable=model_args["features_to_disable"],
             )
             monitor_task = asyncio.create_task(self.tma_model.monitor())
