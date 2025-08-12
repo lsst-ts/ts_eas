@@ -1,0 +1,1 @@
+Fixed MTMount.setThermal to supply state argument.
