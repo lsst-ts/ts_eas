@@ -1,3 +1,18 @@
+v0.8.6 (2025-08-12)
+===================
+
+New Features
+------------
+
+- Implemented cooling rate limit. (`OSW-752 <https://rubinobs.atlassian.net//browse/OSW-752>`_)
+
+
+Bug Fixes
+---------
+
+- Fixed MTMount.setThermal to supply state argument. (`OSW-752 <https://rubinobs.atlassian.net//browse/OSW-752>`_)
+
+
 v0.8.5 (2025-07-23)
 ===================
 
