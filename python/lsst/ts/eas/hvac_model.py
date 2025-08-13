@@ -25,6 +25,7 @@ import asyncio
 import logging
 import math
 
+from astropy.time import Time
 from lsst.ts import salobj, utils
 from lsst.ts.xml.enums.HVAC import DeviceId
 
@@ -118,10 +119,17 @@ class HvacModel:
             name="HVAC",
             include=("enableDevice", "disableDevice", "configAhu"),
         ) as hvac_remote:
-            hvac_future = asyncio.gather(
-                self.control_ahus_and_vec04(hvac_remote=hvac_remote),
-                self.wait_for_noon(hvac_remote=hvac_remote),
-            )
+            tasks = [self.control_ahus_and_vec04(hvac_remote=hvac_remote)]
+
+            if "room_setpoint" not in self.features_to_disable:
+                tasks.extend(
+                    [
+                        self.wait_for_noon(hvac_remote=hvac_remote),
+                        self.apply_setpoint_at_night(hvac_remote=hvac_remote),
+                    ]
+                )
+
+            hvac_future = asyncio.gather(*tasks)
             self.monitor_start_event.clear()
 
             try:
@@ -245,3 +253,52 @@ class HvacModel:
                                 minFanSetpoint=math.nan,
                                 antiFreezeTemperature=math.nan,
                             )
+
+    async def apply_setpoint_at_night(self, *, hvac_remote: salobj.Remote) -> None:
+        """Controls the HVAC setpoint during the night.
+
+        At night time (defined by `DiurnalTimer.is_night`) the HVAC
+        AHU setpoint should be applied based on the outside temperature,
+        if the dome is closed. If the dome is open, the HVAC AHUs
+        should not be enabled, and the setpoint should not matter.
+
+        Parameters
+        ----------
+        hvac_remote : salobj.Remote
+            A SALobj remote representing the HVAC.
+        """
+        warned_no_temperature = False
+
+        while self.diurnal_timer.is_running:
+            if (
+                self.diurnal_timer.is_night(Time.now())
+                and not self.dome_model.is_closed
+            ):
+                setpoint = max(
+                    self.weather_model.current_temperature,
+                    self.setpoint_lower_limit,
+                )
+                if math.isnan(setpoint):
+                    if not warned_no_temperature:
+                        self.log.warn(
+                            "Failed to collect a temperature sample for HVAC setpoint."
+                        )
+                        warned_no_temperature = True
+
+                else:
+                    # Apply setpoint for each of the 4 AHUs
+                    for device_id in (
+                        DeviceId.lowerAHU01P05,
+                        DeviceId.lowerAHU02P05,
+                        DeviceId.lowerAHU03P05,
+                        DeviceId.lowerAHU04P05,
+                    ):
+                        await hvac_remote.cmd_configLowerAhu.set_start(
+                            device_id=device_id,
+                            workingSetpoint=setpoint,
+                            maxFanSetpoint=math.nan,
+                            minFanSetpoint=math.nan,
+                            antiFreezeTemperature=math.nan,
+                        )
+
+            await asyncio.sleep(HVAC_SLEEP_TIME)

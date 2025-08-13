@@ -36,11 +36,18 @@ __all__ = ["DiurnalTimer"]
 iers_conf.auto_download = False
 iers_conf.iers_degraded_accuracy = "ignore"
 iers.IERS_Auto.iers_table = iers.IERS_B.open()
+iers.conf.auto_max_age = None
 
 OBSERVATORY_LOCATION = EarthLocation(
     lat=-30.24074167 * u.deg, lon=-70.7366833 * u.deg, height=2750 * u.m
 )
 OBSERVATORY_TIME_ZONE = ZoneInfo("America/Santiago")
+
+# Accounting for the diameter of the solar disk, average atmospheric
+# refraction at the horizon, and horizon dip at the elevation of
+# Rubin Observatory, the average elevation of the sun at the moment
+# of sunset should be roughly 2.22 degrees below horizon.
+SOLAR_ELEVATION_AT_SUNSET = -2.22
 
 
 def get_local_noon_time() -> Time:
@@ -96,13 +103,18 @@ def get_sun_altitude_deg(t: Time) -> float:
     return altaz.alt.deg
 
 
-def get_crossing_time(target_alt: float) -> Time:
+def get_crossing_time(target_alt: float, going_up: bool = False) -> Time:
     """Computes the time when the sun will reach target_alt.
 
     Parameters
     ----------
     target_alt : float
         The sun altitude at the twilight time to search for, in degrees.
+    going_up : bool
+        True if searching for the crossing of the target altitude
+        while the sun altitude is increasing ("sun is rising"),
+        of False if the sun should be decreasing in altitude at the
+        returned time.
 
     Returns
     -------
@@ -121,8 +133,12 @@ def get_crossing_time(target_alt: float) -> Time:
         t1 = t0 + 1 * u.hour
         sun_altitude_after = get_sun_altitude_deg(t1)
 
-        if sun_altitude_before > target_alt and sun_altitude_after < target_alt:
-            break
+        if going_up:
+            if sun_altitude_before < target_alt and sun_altitude_after > target_alt:
+                break
+        else:
+            if sun_altitude_before > target_alt and sun_altitude_after < target_alt:
+                break
 
         # Nope, keep looking
         sun_altitude_before = sun_altitude_after
@@ -165,6 +181,9 @@ class DiurnalTimer:
         self.sun_altitude = sun_altitude
         self.twilight_time: Time | None = None
 
+        self._noon_loop_ready = asyncio.Event()
+        self._twilight_loop_ready = asyncio.Event()
+
         self.noon_condition = asyncio.Condition()
         self.twilight_condition = asyncio.Condition()
 
@@ -179,6 +198,8 @@ class DiurnalTimer:
         while self.is_running:
             local_noon = get_local_noon_time()
             wait_seconds = (local_noon - Time.now()).sec
+            self._noon_loop_ready.set()
+
             await asyncio.sleep(wait_seconds)
 
             async with self.noon_condition:
@@ -190,16 +211,21 @@ class DiurnalTimer:
         This method loops, notifying for twilight_condition each day.
         """
         while self.is_running:
-            # Search for time of twilight in the next 25 hours. Not necessarily
-            # valid in the polar regions, but fine for Rubin.
-            self.twilight_time = get_crossing_time(self.sun_altitude)
+            # Search for time of twilight and sunrise in the next 25 hours.
+            # Not necessarily valid in the polar regions, but fine for Rubin.
+            self.twilight_time = get_crossing_time(self.sun_altitude, going_up=False)
+            self.sunrise_time = get_crossing_time(
+                SOLAR_ELEVATION_AT_SUNSET, going_up=True
+            )
             wait_seconds = self.seconds_until_twilight(Time.now())
+            self._twilight_loop_ready.set()
+
             await asyncio.sleep(wait_seconds)
 
             async with self.twilight_condition:
                 self.twilight_condition.notify_all()
 
-    def start(self) -> None:
+    async def start(self) -> None:
         """Starts the timers and begins notifying for the conditions."""
         if self.is_running:
             return
@@ -209,11 +235,19 @@ class DiurnalTimer:
             asyncio.create_task(self._run_twilight_loop()),
         ]
 
+        await asyncio.gather(
+            self._noon_loop_ready.wait(),
+            self._twilight_loop_ready.wait(),
+        )
+
     async def stop(self) -> None:
         """Stops the timers and discontinues notificaitons."""
         if not self.is_running:
             return
         self.is_running = False
+
+        self._noon_loop_ready.clear()
+        self._twilight_loop_ready.clear()
 
         # End tasks
         for task in self._tasks:
@@ -263,13 +297,35 @@ class DiurnalTimer:
             If the time calculated is negative, or is greater than
             (a little more than) one day.
         """
-        t = (self.twilight_time - Time.now()).sec
+        t = (self.twilight_time - time).sec
         if t < 0 or t > 25 * 3600:
             raise ValueError("Time until twilight unexpectedly out of range: {t}")
         return t
 
+    def is_night(self, time: Time) -> bool:
+        """Returns True if `time` is in the EAS-defined night.
+
+        If the time is after twilight and before sunrise, it is
+        considered to be night.
+
+        Parameters
+        ----------
+        time : Time
+            The time to use in the determination.
+
+        Returns
+        -------
+        bool
+            True if and only if `time` is between the next twilight and
+            sunrise.
+        """
+        if self.sunrise_time > self.twilight_time:
+            return self.twilight_time <= time <= self.sunrise_time
+        else:
+            return time < self.sunrise_time or time > self.twilight_time
+
     async def __aenter__(self) -> "DiurnalTimer":
-        self.start()
+        await self.start()
         return self
 
     async def __aexit__(

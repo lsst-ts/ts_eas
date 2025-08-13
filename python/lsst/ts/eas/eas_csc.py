@@ -192,7 +192,7 @@ class EasCsc(salobj.ConfigurableCsc):
         self.log.debug("monitor_health")
 
         while self.disabled_or_enabled:
-            self.diurnal_timer.start()
+            await self.diurnal_timer.start()
 
             self.subtasks = [
                 asyncio.create_task(coro())
