@@ -59,7 +59,7 @@ def get_local_noon_time() -> Time:
 
     Returns
     -------
-    Time
+    `~astropy.time.Time`
         The next occurrence of local noon in observatory time zone.
     """
 
@@ -118,7 +118,7 @@ def get_crossing_time(target_alt: float, going_up: bool = False) -> Time:
 
     Returns
     -------
-    Time
+    `~astropy.time.Time`
         The time when the sun will next cross target_alt.
     """
 
@@ -288,12 +288,12 @@ class DiurnalTimer:
 
         Parameters
         ----------
-        time : Time
+        time : `~astropy.time.Time`
             The time from which to calculate the time until twilight.
 
         Raises
         ------
-        ValueError
+        `ValueError`
             If the time calculated is negative, or is greater than
             (a little more than) one day.
         """
@@ -310,7 +310,7 @@ class DiurnalTimer:
 
         Parameters
         ----------
-        time : Time
+        time : `~astropy.time.Time`
             The time to use in the determination.
 
         Returns

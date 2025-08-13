@@ -44,16 +44,16 @@ class TmaModel:
 
     Parameters
     ----------
-    domain : salobj.Domain
+    domain : `~lsst.ts.salobj.Domain`
         A SAL domain object for obtaining remotes.
-    log : logging.Logger
+    log : `~logging.Logger`
         A logger for log messages.
-    diurnal_timer : DiurnalTimer
+    diurnal_timer : `DiurnalTimer`
         A timer that signals every day at noon and at the end of evening
         twilight.
-    dome_model : DomeModel
+    dome_model : `DomeModel`
         A model for the MTDome remote, indicating whether it is closed.
-    weather_model : WeatherModel
+    weather_model : `WeatherModel`
         A model for the outdoor weather station, which records the last
         twilight temperature observed while the dome was opened.
     indoor_ess_index : int
@@ -249,7 +249,7 @@ class TmaModel:
 
         Parameters
         ----------
-        mtmount_remote: salobj.Remote
+        mtmount_remote: `~lsst.ts.salobj.Remote`
             The remote object for MTMount CSC commands.
 
         setpoint: float
@@ -287,7 +287,7 @@ class TmaModel:
 
         Parameters
         ----------
-        mtmount_remote: salobj.Remote
+        mtmount_remote: `~lsst.ts.salobj.Remote`
             The remote object for MTMount CSC commands.
 
         setpoint: float
@@ -316,12 +316,12 @@ class TmaModel:
         """Gather temperature samples over the configured cadence period.
 
         If a single `asyncio.TimeoutError` occurs, the contiguous-time clock is
-        restarted (``end_time = now + cadence``).  Any other exception is
+        restarted (`end_time = now + cadence`).  Any other exception is
         propagated so that the caller can decide how to handle it.
 
         Parameters
         ----------
-        ess_remote : salobj.Remote
+        ess_remote : `~lsst.ts.salobj.Remote`
             A remote endpoint for the ESS to collect from.
 
         Returns
@@ -332,10 +332,10 @@ class TmaModel:
 
         Raises
         ------
-        asyncio.CancelledError
+        `asyncio.CancelledError`
             Propagated immediately so outer tasks can shut down cleanly.
-        Exception
-            Anything other than ``asyncio.TimeoutError`` bubbles up to the
+        `Exception`
+            Anything other than `asyncio.TimeoutError` bubbles up to the
             caller.
         """
         sum_temperatures = 0
@@ -513,9 +513,9 @@ class TmaModel:
 
         Parameters
         ----------
-        m1m3ts_remote : salobj.Remote
+        m1m3ts_remote : `~lsst.ts.salobj.Remote`
             A SALobj remote representing the MTM1M3TS controller.
-        mtmount_remote : salobj.Remote
+        mtmount_remote : `~lsst.ts.salobj.Remote`
             A SALobj remote representing the MTMount controller.
         """
         while self.diurnal_timer.is_running:

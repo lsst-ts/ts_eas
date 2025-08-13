@@ -43,9 +43,9 @@ class WeatherModel:
 
     Parameters
     ----------
-    domain : salobj.Domain
+    domain : `~lsst.ts.salobj.Domain`
         A SAL domain object for obtaining remotes.
-    log : logging.Logger
+    log : `~logging.Logger`
         A logger for log messages.
     wind_average_window : float
         Time over which to average windspeed for threshold determination. (s)
@@ -92,7 +92,7 @@ class WeatherModel:
 
         Parameters
         ----------
-        air_flow : salobj.BaseMsgType
+        air_flow : `~lsst.ts.salobj.BaseMsgType`
            A newly received air_flow telemetry item.
         """
         now = air_flow.private_sndStamp
@@ -110,7 +110,7 @@ class WeatherModel:
 
         Parameters
         ----------
-        temperature : salobj.BaseMsgType
+        temperature : `~lsst.ts.salobj.BaseMsgType`
            A newly received temperature telemetry item.
         """
         now = temperature.private_sndStamp

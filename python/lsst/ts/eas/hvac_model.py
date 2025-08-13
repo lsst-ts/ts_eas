@@ -42,15 +42,15 @@ class HvacModel:
 
     Parameters
     ----------
-    domain : salobj.Domain
+    domain : `~lsst.ts.salobj.Domain`
         A SAL domain object for obtaining remotes.
-    log : logging.Logger
+    log : `~logging.Logger`
         A logger for log messages.
-    diurnal_timer : DiurnalTimer
+    diurnal_timer : `DiurnalTimer`
         A timer that signals at noon and at the end of evening twilight.
-    dome_model : DomeModel
+    dome_model : `DomeModel`
         A model representing the dome state.
-    weather_model : WeatherModel
+    weather_model : `WeatherModel`
         A model representing weather conditions.
     setpoint_lower_limit : float
         The minimum allowed setpoint for thermal control. If a lower setpoint
@@ -221,7 +221,7 @@ class HvacModel:
 
         Parameters
         ----------
-        hvac_remote : salobj.Remote
+        hvac_remote : `~lsst.ts.salobj.Remote`
             A SALobj remote representing the HVAC.
         """
         while self.diurnal_timer.is_running:
@@ -264,7 +264,7 @@ class HvacModel:
 
         Parameters
         ----------
-        hvac_remote : salobj.Remote
+        hvac_remote : `~lsst.ts.salobj.Remote`
             A SALobj remote representing the HVAC.
         """
         warned_no_temperature = False
