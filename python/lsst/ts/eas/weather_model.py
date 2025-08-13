@@ -24,6 +24,7 @@ __all__ = ["WeatherModel"]
 import asyncio
 import logging
 import math
+import statistics
 from collections import deque
 
 import backoff
@@ -42,9 +43,9 @@ class WeatherModel:
 
     Parameters
     ----------
-    domain : salobj.Domain
+    domain : `~lsst.ts.salobj.Domain`
         A SAL domain object for obtaining remotes.
-    log : logging.Logger
+    log : `~logging.Logger`
         A logger for log messages.
     wind_average_window : float
         Time over which to average windspeed for threshold determination. (s)
@@ -76,6 +77,9 @@ class WeatherModel:
         # A deque containing tuples of timestamp, windspeed
         self.wind_history: deque = deque()
 
+        # A deque containing tuples of timestamp, temperature
+        self.temperature_history: deque = deque(maxlen=20)
+
         # The last observed temperature at the end of twilight
         self.last_twilight_temperature: float | None = None
 
@@ -88,12 +92,9 @@ class WeatherModel:
 
         Parameters
         ----------
-        air_flow : salobj.BaseMsgType
+        air_flow : `~lsst.ts.salobj.BaseMsgType`
            A newly received air_flow telemetry item.
         """
-        self.log.debug(
-            f"air_flow_callback: {air_flow.private_sndStamp=} sec; {air_flow.speed=} m/s"
-        )
         now = air_flow.private_sndStamp
         self.wind_history.append((air_flow.speed, now))
 
@@ -101,6 +102,19 @@ class WeatherModel:
         time_horizon = now - self.wind_average_window
         while self.wind_history and self.wind_history[0][1] < time_horizon:
             self.wind_history.popleft()
+
+    async def temperature_callback(self, temperature: salobj.BaseMsgType) -> None:
+        """Callback for ESS.tel_temperature.
+
+        This function appends new temperature data to the existing table.
+
+        Parameters
+        ----------
+        temperature : `~lsst.ts.salobj.BaseMsgType`
+           A newly received temperature telemetry item.
+        """
+        now = temperature.private_sndStamp
+        self.temperature_history.append((temperature.temperatureItem[0], now))
 
     @property
     def average_windspeed(self) -> float:
@@ -139,6 +153,29 @@ class WeatherModel:
         speeds = [s for s, _ in self.wind_history]
         return sum(speeds) / len(speeds)
 
+    @property
+    def current_temperature(self) -> float:
+        """Current temperature in °C.
+
+        Returns
+        -------
+        float
+            The average of the last 10 temperature samples from
+            the ESS, or NaN if there are no temperature samples
+            in the last 5 minutes.
+        """
+        cutoff = utils.current_tai() - 5 * 60
+        recent_samples = [
+            temperature
+            for temperature, time in self.temperature_history
+            if time >= cutoff
+        ]
+
+        if not recent_samples:
+            return math.nan
+
+        return statistics.median(recent_samples)
+
     async def monitor(self) -> None:
         """Monitors the dome status and windspeed to control the HVAC.
 
@@ -155,6 +192,7 @@ class WeatherModel:
             include=("airFlow", "temperature"),
         ) as weather_remote:
             weather_remote.tel_airFlow.callback = self.air_flow_callback
+            weather_remote.tel_temperature.callback = self.temperature_callback
 
             while self.diurnal_timer.is_running:
                 async with self.diurnal_timer.twilight_condition:
@@ -190,14 +228,7 @@ class WeatherModel:
     async def measure_twilight_temperature(
         self, weather_remote: salobj.Remote
     ) -> float:
-        # Collect ten temperature samples from ESS.
-        data = [
-            await weather_remote.tel_temperature.next(flush=True, timeout=SAL_TIMEOUT)
-            for _ in range(N_TWILIGHT_SAMPLES)
-        ]
-        temperature_list = [x for d in data for x in d.temperatureItem[: d.numChannels]]
-
-        # Store the average for future use.
-        last_twilight_temperature = sum(temperature_list) / len(temperature_list)
+        # Store the current temperature for future use.
+        last_twilight_temperature = self.current_temperature
         self.log.info(f"Collected twilight temperature: {last_twilight_temperature}°C")
         return last_twilight_temperature

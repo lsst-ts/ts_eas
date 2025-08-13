@@ -35,11 +35,11 @@ class DomeModel:
 
     Tracks whether and when the dome has been opened.
 
-    Paramters
+    Parameters
     ---------
-    domain : salobj.Domain
+    domain : `~lsst.ts.salobj.Domain`
         A SAL domain object for obtaining remotes.
-    log : logging.Logger
+    log : `~logging.Logger`
         A logger for log messages.
 
     """
@@ -67,7 +67,7 @@ class DomeModel:
 
         Parameters
         ----------
-        aperture_shutter_telemetry: salobj.BaseMsgType
+        aperture_shutter_telemetry: `~lsst.ts.salobj.BaseMsgType`
             A newly received apertureShutter telemetry item.
         """
         self.aperture_shutter_telemetry = aperture_shutter_telemetry

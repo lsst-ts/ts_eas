@@ -58,14 +58,14 @@ class EasCsc(salobj.ConfigurableCsc):
 
     Parameters
     ----------
-    config_dir : `string`
+    config_dir : str
         The configuration directory
-    initial_state : `salobj.State`
+    initial_state : `~lsst.ts.salobj.State`
         The initial state of the CSC
-    simulation_mode : `int`
+    simulation_mode : int
         Simulation mode (1) or not (0)
-    override : `str`, optional
-        Override of settings if ``initial_state`` is `State.DISABLED`
+    override : str, optional
+        Override of settings if `initial_state` is `State.DISABLED`
         or `State.ENABLED`.
     """
 
@@ -192,7 +192,7 @@ class EasCsc(salobj.ConfigurableCsc):
         self.log.debug("monitor_health")
 
         while self.disabled_or_enabled:
-            self.diurnal_timer.start()
+            await self.diurnal_timer.start()
 
             self.subtasks = [
                 asyncio.create_task(coro())

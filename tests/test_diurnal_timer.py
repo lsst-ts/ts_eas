@@ -171,3 +171,40 @@ class TestDiurnalTimer(unittest.IsolatedAsyncioTestCase):
         self.assert_datetime_lists_close(
             self.twilight_times, self.twilight_seen, label="Twilight event"
         )
+
+    async def test_is_night_start_in_daytime(self) -> None:
+        self.fake_now = datetime(2025, 8, 3, 16, tzinfo=timezone.utc)
+        timer = DiurnalTimer(sun_altitude="astronomical")
+        cases = [
+            ("2025-08-03 23:15:00", False, "just before twilight"),
+            ("2025-08-04 01:00:00", True, "between twilight and midnight"),
+            ("2025-08-04 11:15:00", True, "early morning before dawn"),
+            ("2025-08-04 11:35:00", False, "just after dawn"),
+        ]
+
+        with patch("astropy.time.Time.now", side_effect=self.fake_time_now), patch(
+            "asyncio.sleep", side_effect=self.fake_sleep
+        ):
+            async with timer:
+                for when_str, expected, label in cases:
+                    with self.subTest(label=label):
+                        t = Time(when_str, scale="utc")
+                        self.assertIs(timer.is_night(t), expected)
+
+    async def test_is_night_start_at_night(self) -> None:
+        self.fake_now = datetime(2025, 8, 4, 0, tzinfo=timezone.utc)
+        timer = DiurnalTimer(sun_altitude="astronomical")
+        cases = [
+            ("2025-08-04 01:00:00", True, "between twilight and midnight"),
+            ("2025-08-04 11:15:00", True, "early morning before dawn"),
+            ("2025-08-04 11:35:00", False, "just after dawn"),
+            ("2025-08-04 23:15:00", False, "just before twilight next day"),
+            ("2025-08-04 23:45:00", True, "just after twilight next day"),
+        ]
+
+        with patch("astropy.time.Time.now", side_effect=self.fake_time_now):
+            async with timer:
+                for when_str, expected, label in cases:
+                    with self.subTest(label=label):
+                        t = Time(when_str, scale="utc")
+                        self.assertIs(timer.is_night(t), expected)
