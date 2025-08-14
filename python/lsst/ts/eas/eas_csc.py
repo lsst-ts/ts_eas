@@ -141,7 +141,7 @@ class EasCsc(salobj.ConfigurableCsc):
             domain=self.domain,
             log=self.log,
             diurnal_timer=self.diurnal_timer,
-            dome_model=self.dome_model,
+            efd_name=self.config.efd_name,
             ess_index=self.config.weather_ess_index,
             wind_average_window=self.config.wind_average_window,
             wind_minimum_window=self.config.wind_minimum_window,

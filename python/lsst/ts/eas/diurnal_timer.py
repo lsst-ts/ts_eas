@@ -103,13 +103,19 @@ def get_sun_altitude_deg(t: Time) -> float:
     return altaz.alt.deg
 
 
-def get_crossing_time(target_alt: float, going_up: bool = False) -> Time:
+def get_crossing_time(
+    target_alt: float, going_up: bool = False, search_from: Time | None = None
+) -> Time:
     """Computes the time when the sun will reach target_alt.
 
     Parameters
     ----------
     target_alt : float
         The sun altitude at the twilight time to search for, in degrees.
+    search_from : `~astropy.time.Time` | None
+        The time to start searching from. The returned value will be
+        the first instance of the sun crossing the target altitude
+        after this time.
     going_up : bool
         True if searching for the crossing of the target altitude
         while the sun altitude is increasing ("sun is rising"),
@@ -127,7 +133,9 @@ def get_crossing_time(target_alt: float, going_up: bool = False) -> Time:
         return get_sun_altitude_deg(t) - target_alt
 
     # Start by searching for a good window for the root finder.
-    t0 = Time.now() + 1 * u.s
+    if search_from is None:
+        search_from = Time.now()
+    t0 = search_from + 1 * u.s
     sun_altitude_before = get_sun_altitude_deg(t0)
     for i in range(25):  # Start by searching the next 25 hours.
         t1 = t0 + 1 * u.hour
@@ -204,6 +212,17 @@ class DiurnalTimer:
 
             async with self.noon_condition:
                 self.noon_condition.notify_all()
+
+    def get_twilight_time(self, after: Time) -> Time:
+        """Returns the time of next end of twilight for the given time.
+
+        Parameters
+        ----------
+        after : `~astropy.time.Time`
+            Time returned will be time corresponding to the
+            end of twilight on or after this time.
+        """
+        return get_crossing_time(self.sun_altitude, going_up=False, search_from=after)
 
     async def _run_twilight_loop(self) -> None:
         """Notifies twilight_condition whenever it's noon.

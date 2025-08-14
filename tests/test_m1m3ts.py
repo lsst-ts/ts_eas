@@ -22,7 +22,6 @@
 import asyncio
 import contextlib
 import logging
-import os
 import typing
 import unittest
 
@@ -76,13 +75,7 @@ class MTMountMock(salobj.BaseCsc):
         self.top_end_setpoint = data.topEndChillerSetpoint
 
 
-class TestTma(unittest.IsolatedAsyncioTestCase):
-    def run(self, result: typing.Any = None) -> None:
-        salobj.testutils.set_test_topic_subname(randomize=False)
-        os.environ["LSST_SITE"] = "test"
-        self.last_twilight_temperature: float | None = None
-        super().run(result)  # type: ignore
-
+class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
     @contextlib.asynccontextmanager
     async def mock_extra_cscs(
         self, ess112_temperature: float | None
@@ -102,7 +95,7 @@ class TestTma(unittest.IsolatedAsyncioTestCase):
             domain=self.domain,
             log=self.log,
             diurnal_timer=self.diurnal_timer,
-            dome_model=self.dome_model,
+            efd_name="not relevant",
         )
         self.weather_model.last_twilight_temperature = self.last_twilight_temperature
 
@@ -136,6 +129,7 @@ class TestTma(unittest.IsolatedAsyncioTestCase):
                 except asyncio.CancelledError:
                     pass
             await self.ess112.close()
+            await self.dome.close()
             await self.domain.close()
 
     async def emit_ess112_temperature(self, ess112_temperature: float) -> None:
@@ -148,19 +142,6 @@ class TestTma(unittest.IsolatedAsyncioTestCase):
                 temperatureItem=[ess112_temperature] * 16,
                 location="",
             )
-
-    @contextlib.asynccontextmanager
-    async def mock_m1m3ts(self) -> typing.AsyncGenerator[None, None]:
-        self.m1m3ts = M1M3TSMock()
-        await self.m1m3ts.start_task
-
-        try:
-            yield
-        finally:
-            try:
-                await self.m1m3ts.close()
-            except asyncio.CancelledError:
-                pass
 
     async def run_with_parameters(
         self,

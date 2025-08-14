@@ -229,14 +229,17 @@ class HvacModel:
                 self.monitor_start_event.set()
 
                 await self.diurnal_timer.noon_condition.wait()
+                last_twilight_temperature = (
+                    await self.weather_model.get_last_twilight_temperature()
+                )
                 if (
                     self.diurnal_timer.is_running
-                    and self.weather_model.last_twilight_temperature is not None
+                    and last_twilight_temperature is not None
                 ):
                     if "room_setpoint" not in self.features_to_disable:
                         # Time to set the room setpoint based on last twilight
                         setpoint = max(
-                            self.weather_model.last_twilight_temperature,
+                            last_twilight_temperature,
                             self.setpoint_lower_limit,
                         )
 
