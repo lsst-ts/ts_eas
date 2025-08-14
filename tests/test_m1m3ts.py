@@ -25,7 +25,7 @@ import logging
 import typing
 import unittest
 
-from lsst.ts import eas, salobj
+from lsst.ts import eas, salobj, utils
 
 STD_TIMEOUT = 60
 
@@ -48,6 +48,7 @@ class M1M3TSMock(salobj.BaseCsc):
         )
         self.glycol_setpoint: float | None = None
         self.heater_setpoint: float | None = None
+        self.fan_rpm: list[int] | None = None
 
     async def do_applySetpoints(self, data: salobj.BaseMsgType) -> None:
         self.glycol_setpoint = data.glycolSetpoint
@@ -56,6 +57,9 @@ class M1M3TSMock(salobj.BaseCsc):
     async def do_applySetpoint(self, data: salobj.BaseMsgType) -> None:
         self.glycol_setpoint = data.glycolSetpoint
         self.heater_setpoint = data.heatersSetpoint
+
+    async def do_heaterFanDemand(self, data: salobj.BaseMsgType) -> None:
+        self.fan_rpm = data.fanRPM
 
 
 class MTMountMock(salobj.BaseCsc):
@@ -83,13 +87,35 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         self.domain = salobj.Domain()
         self.log = logging.getLogger()
         self.ess112 = salobj.Controller("ESS", 112)
+
+        self.thermal_scanners = [
+            salobj.Controller("ESS", sal_index) for sal_index in (114, 115, 116, 117)
+        ]
+
         self.dome = salobj.Controller("MTDome")
         await self.ess112.start_task
         await self.dome.start_task
 
+        for controller in self.thermal_scanners:
+            await controller.start_task
+
         self.dome_model = eas.dome_model.DomeModel(
             domain=self.domain,
         )
+        self.glass_temperature_model = (
+            eas.glass_temperature_model.GlassTemperatureModel(
+                domain=self.domain,
+                log=self.log,
+            )
+        )
+        self.glass_monitor_task = asyncio.create_task(
+            self.glass_temperature_model.monitor()
+        )
+        await asyncio.wait_for(
+            self.glass_temperature_model.monitor_start_event.wait(),
+            timeout=STD_TIMEOUT,
+        )
+
         dome_monitor_task = asyncio.create_task(self.dome_model.monitor())
         self.weather_model = eas.weather_model.WeatherModel(
             domain=self.domain,
@@ -108,6 +134,16 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             emit_ess112_temperature_task = asyncio.create_task(
                 self.emit_ess112_temperature(ess112_temperature)
             )
+
+        for controller in self.thermal_scanners:
+            for i in range(6):
+                await controller.tel_temperature.set_write(
+                    sensorName=f"m1m3-ts-0{controller.salinfo.index-114} {i + 1}/6",
+                    timestamp=utils.current_tai(),
+                    numChannels=15 if i == 5 else 16,
+                    temperatureItem=[9.5] * 16,
+                    location="",
+                )
 
         await self.dome.tel_apertureShutter.set_write(
             positionActual=(100.0, 100.0),
@@ -148,7 +184,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         ess112_temperature: float | None,
         signal_noon: bool = False,
         **model_args: typing.Any,
-    ) -> tuple[float | None, float | None, float | None]:
+    ) -> tuple[float | None, float | None, float | None, list[float] | None]:
         self.diurnal_timer = eas.diurnal_timer.DiurnalTimer()
         self.diurnal_timer.is_running = True
 
@@ -162,6 +198,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 log=mock_m1m3ts.log,
                 diurnal_timer=self.diurnal_timer,
                 dome_model=self.dome_model,
+                glass_temperature_model=self.glass_temperature_model,
                 weather_model=self.weather_model,
                 indoor_ess_index=112,
                 ess_timeout=20,
@@ -197,6 +234,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 mock_m1m3ts.glycol_setpoint,
                 mock_m1m3ts.heater_setpoint,
                 mock_mtmount.top_end_setpoint,
+                mock_m1m3ts.fan_rpm,
             )
 
     async def test_m1m3ts_applysetpoints(self) -> None:
@@ -207,7 +245,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         heater_setpoint_delta = -1
         top_end_setpoint_delta = -0.5
 
-        glycol_setpoint, heater_setpoint, top_end_setpoint = (
+        glycol_setpoint, heater_setpoint, top_end_setpoint, _ = (
             await self.run_with_parameters(
                 ess112_temperature,
                 glycol_setpoint_delta=glycol_setpoint_delta,
@@ -243,7 +281,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         heater_setpoint_delta = -1
         top_end_setpoint_delta = -1.5
 
-        glycol_setpoint, heater_setpoint, top_end_setpoint = (
+        glycol_setpoint, heater_setpoint, top_end_setpoint, fan_rpm = (
             await self.run_with_parameters(
                 ess112_temperature,
                 glycol_setpoint_delta=glycol_setpoint_delta,
@@ -256,6 +294,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         self.assertTrue(glycol_setpoint is None)
         self.assertTrue(heater_setpoint is None)
         self.assertTrue(top_end_setpoint is not None)
+        self.assertIsNone(fan_rpm)
 
     async def test_disabled_top_end(self) -> None:
         """The applySetpoint should not be called when m1m3ts is disabled."""
@@ -264,7 +303,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         heater_setpoint_delta = -1
         top_end_setpoint_delta = -1.5
 
-        glycol_setpoint, heater_setpoint, top_end_setpoint = (
+        glycol_setpoint, heater_setpoint, top_end_setpoint, fan_rpm = (
             await self.run_with_parameters(
                 ess112_temperature,
                 glycol_setpoint_delta=glycol_setpoint_delta,
@@ -277,6 +316,8 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         self.assertTrue(glycol_setpoint is not None)
         self.assertTrue(heater_setpoint is not None)
         self.assertTrue(top_end_setpoint is None)
+        assert fan_rpm is not None
+        self.assertAlmostEqual(fan_rpm[0], 150, 3)
 
     async def test_disabled_tma(self) -> None:
         """The applySetpoint should not be called when m1m3ts is disabled."""
@@ -285,7 +326,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         heater_setpoint_delta = -1
         top_end_setpoint_delta = -1.5
 
-        glycol_setpoint, heater_setpoint, top_end_setpoint = (
+        glycol_setpoint, heater_setpoint, top_end_setpoint, _ = (
             await self.run_with_parameters(
                 ess112_temperature,
                 glycol_setpoint_delta=glycol_setpoint_delta,
@@ -307,7 +348,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         top_end_setpoint_delta = -1
 
         with self.assertRaises(RuntimeError):
-            glycol_setpoint, heater_setpoint, top_end_setpoint = (
+            glycol_setpoint, heater_setpoint, top_end_setpoint, _ = (
                 await self.run_with_parameters(
                     ess112_temperature,
                     glycol_setpoint_delta=glycol_setpoint_delta,
