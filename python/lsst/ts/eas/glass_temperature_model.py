@@ -39,7 +39,7 @@ class GlassTemperatureModel:
 
     This class provides monitoring of the glass temperature probes.
     Fan speed scales linearly from 500 RPM at zero temperature difference
-    to 2500 RPM at ±1.0 °C difference. Values in between are interpolated,
+    to 2000 RPM at ±1.0 °C difference. Values in between are interpolated,
     and differences greater than or equal to 1.0 °C run at maximum speed.
 
     The glass temperature probes publish to four different ESS CSCs, and
