@@ -148,6 +148,7 @@ class EasCsc(salobj.ConfigurableCsc):
             diurnal_timer=self.diurnal_timer,
             efd_name=self.config.efd_name,
             ess_index=self.config.weather_ess_index,
+            indoor_ess_index=self.config.indor_ess_index,
             wind_average_window=self.config.wind_average_window,
             wind_minimum_window=self.config.wind_minimum_window,
         )

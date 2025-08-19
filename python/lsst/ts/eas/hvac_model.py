@@ -125,6 +125,7 @@ class HvacModel:
                 tasks.extend(
                     [
                         self.wait_for_sunrise(hvac_remote=hvac_remote),
+                        self.adjust_glycol_chillers_at_noon(hvac_remote=hvac_remote),
                         self.apply_setpoint_at_night(hvac_remote=hvac_remote),
                     ]
                 )
@@ -256,6 +257,184 @@ class HvacModel:
                                 minFanSetpoint=math.nan,
                                 antiFreezeTemperature=math.nan,
                             )
+
+    def compute_glycol_setpoints(
+        self, ambient_temperature: float
+    ) -> tuple[float, float]:
+        """Computes staggered glycol chiller setpoints.
+
+        Computes staggered glycol chiller setpoints based on ambient
+        temperature, configured band limits, dew point, and absolute
+        minimum constraints.
+
+        The algorithm enforces:
+          * Average setpoint nominally `ambient - glycol_average_offset`.
+          * Clamped to the band
+            `[ambient - glycol_band_low, ambient - glycol_band_high]`.
+            Default values `glycol_band_low` of 5, `glycol_band_high` of 10.
+          * Raised if necessary to exceed the nightly maximum indoor dew
+            point plus a safety margin (`dewpoint_margin`).
+          * Split into two staggered setpoints (`setpoint1`, `setpoint2`)
+            separated by `glycol_setpoints_delta`, **with chiller 1 warmer**.
+          * Absolute minimum enforced on the colder chiller
+            (`setpoint2 >= glycol_absolute_minimum`),
+            adjusting both setpoints to preserve the delta.
+
+        Parameters
+        ----------
+        ambient_temperature : float
+            Ambient temperature in degrees Celsius. This value
+            is used to determine the nominal target band for the glycol
+            loop average.
+
+        Returns
+        -------
+        setpoint1 : float
+            Active setpoint for chiller 1 (°C), the warmer of the two.
+        setpoint2 : float
+            Active setpoint for chiller 2 (°C), the colder of the two.
+        """
+        # Find the allowed range of the setpoints
+        band_low = ambient_temperature - self.glycol_band_low
+        band_high = ambient_temperature - self.glycol_band_high
+
+        # Compute a target average setpoint
+        target_average = ambient_temperature - self.glycol_average_offset
+        average = min(max(target_average, band_low), band_high)
+
+        # Incorporate dewpoint into the calculation - setpoint
+        # average should not be lower than the dewpoint (with margin)
+        nightly_maximum_dewpoint = self.weather_model.nightly_maximum_dewpoint
+        if nightly_maximum_dewpoint is not None:
+            average = max(
+                average, nightly_maximum_dewpoint + self.glycol_dewpoint_margin
+            )
+
+        # Break average and delta into individual setpoints
+        setpoint1 = average + 0.5 * self.glycol_setpoints_delta
+        setpoint2 = average - 0.5 * self.glycol_setpoints_delta
+
+        # Enforce the absolute minimum temperature (-10°C)
+        if setpoint2 < self.glycol_absolute_minimum:
+            setpoint2 = self.glycol_absolute_minimum
+            setpoint1 = setpoint2 + self.glycol_setpoints_delta
+
+        return setpoint1, setpoint2
+
+    def check_glycol_setpoint(self, ambient_temperature: float) -> bool:
+        """Verify whether the chiller setpoints are within the allowed band.
+
+        Parameters
+        ----------
+        ambient_temperature : float
+            Ambient temperature (°C)
+
+        Returns
+        -------
+        bool
+            True if the current setpoints are acceptable, or False otherwise.
+        """
+        if self.glycol_setpoint1 is None or self.glycol_setpoint2 is None:
+            return False
+
+        average_setpoint = 0.5 * (self.glycol_setpoint1 + self.glycol_setpoint2)
+        return (
+            self.glycol_band_low
+            <= ambient_temperature - average_setpoint
+            <= self.glycol_band_high
+        )
+
+    async def monitor_glycol_chillers(self, *, hvac_remote: salobj.Remote) -> None:
+        """Continuously monitor and enforce glycol chiller setpoints.
+
+        This coroutine runs while the diurnal timer is active. On each cycle it
+        checks whether the current chiller setpoints are within the allowed
+        band relative to the ambient indoor temperature. If the setpoints are
+        outside of the band, new setpoints are computed and applied to the
+        HVAC CSC.
+
+        Parameters
+        ----------
+        hvac_remote : `~lsst.ts.salobj.Remote`
+            A SALobj remote representing the HVAC.
+        """
+        while self.diurnal_timer.is_running:
+            # At night, reset the setpoints and do not control
+            # the glycol.
+            if self.diurnal_timer.is_night(Time.now()):
+                self.glycol_setpoint1 = None
+                self.glycol_setpoint2 = None
+                await asyncio.sleep(HVAC_SLEEP_TIME)
+                continue
+
+            # After the setpoints are chosen at noon, monitor
+            # the system and adjust setpoints if needed.
+            ambient_temperature = self.weather_model.current_indoor_temperature
+            if ambient_temperature is not None and not self.check_glycol_setpoint(
+                ambient_temperature
+            ):
+                glycol_setpoint1, glycol_setpoint2 = self.compute_glycol_setpoints(
+                    ambient_temperature
+                )
+
+                if glycol_setpoint1 is not None and glycol_setpoint2 is not None:
+                    await hvac_remote.cmd_configChiller.set_start(
+                        device_id=DeviceId.chiller01P01,
+                        activeSetpoint=glycol_setpoint1,
+                    )
+                    await hvac_remote.cmd_configChiller.set_start(
+                        device_id=DeviceId.chiller02P01,
+                        activeSetpoint=glycol_setpoint2,
+                    )
+
+                    self.glycol_setpoint1 = glycol_setpoint1
+                    self.glycol_setpoint2 = glycol_setpoint2
+
+            await asyncio.sleep(HVAC_SLEEP_TIME)
+
+    async def adjust_glycol_chillers_at_noon(
+        self, *, hvac_remote: salobj.Remote
+    ) -> None:
+        """Waits for noon and then sets the glycol chillers.
+
+        Waits for the timer to signal noon, and then obtains the minimum
+        temperature that was reported last night, and then applies an
+        appropriate temperature as the glycol setpoint.
+
+        Parameters
+        ----------
+        hvac_remote : `~lsst.ts.salobj.Remote`
+            A SALobj remote representing the HVAC.
+        """
+        while self.diurnal_timer.is_running:
+            async with self.diurnal_timer.noon_condition:
+                self.monitor_start_event.set()
+
+                await self.diurnal_timer.noon_condition.wait()
+                if not self.diurnal_timer.is_running:
+                    return
+
+                nightly_minimum_temperature = (
+                    self.weather_model.nightly_minimum_temperature
+                )
+                if nightly_minimum_temperature is None:
+                    continue
+
+                self.glycol_setpoint1, self.glycol_setpoint2 = (
+                    self.compute_glycol_setpoints(nightly_minimum_temperature)
+                )
+
+                if self.glycol_setpoint1 is None or self.glycol_setpoint2 is None:
+                    continue
+
+                await hvac_remote.cmd_configChiller.set_start(
+                    device_id=DeviceId.chiller01P01,
+                    activeSetpoint=self.glycol_setpoint1,
+                )
+                await hvac_remote.cmd_configChiller.set_start(
+                    device_id=DeviceId.chiller02P01,
+                    activeSetpoint=self.glycol_setpoint2,
+                )
 
     async def apply_setpoint_at_night(self, *, hvac_remote: salobj.Remote) -> None:
         """Control the HVAC setpoint during the night.

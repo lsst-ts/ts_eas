@@ -46,6 +46,14 @@ class WeatherModel:
         A SAL domain object for obtaining remotes.
     log : `~logging.Logger`
         A logger for log messages.
+    diurnal_timer : `DiurnalTimer`
+        A timekeeping class to track day/night, twilight time, etc.
+    efd_name : str
+        The EFD instance name to use for historical queries.
+    ess_index : int
+        The SAL index for the outdoor weather ESS.
+    indoor_ess_index : int
+        The SAL index for the indoor conditions ESS.
     wind_average_window : float
         Time over which to average windspeed for threshold determination. (s)
     wind_minimum_window : float
@@ -60,6 +68,7 @@ class WeatherModel:
         diurnal_timer: DiurnalTimer,
         efd_name: str,
         ess_index: int = 301,
+        indoor_ess_index: int = 112,
         wind_average_window: float = 30 * 60,
         wind_minimum_window: float = 10 * 60,
     ) -> None:
@@ -69,6 +78,7 @@ class WeatherModel:
 
         self.efd_name = efd_name
         self.ess_index = ess_index
+        self.indoor_ess_index = indoor_ess_index
 
         self.monitor_start_event = asyncio.Event()
 
@@ -79,10 +89,31 @@ class WeatherModel:
         self.wind_history: deque = deque()
 
         # A deque containing tuples of timestamp, temperature
-        self.temperature_history: deque = deque(maxlen=20)
+        self.temperature_history: deque[tuple[float, float]] = deque(maxlen=20)
+
+        # A deque containing tuples of timestamp, temperature for indoor ESS
+        self.indoor_temperature_history: deque[tuple[float, float]] = deque(maxlen=20)
 
         # The last observed temperature at the end of twilight
         self.last_twilight_temperature: float | None = None
+
+        # True if the next valid dewpoint sample represents
+        # the beginning of the night.
+        self.need_to_reset_dewpoint = True
+
+        # Maximum reported dewpoint temperature (°C)
+        # for last night (if it is daytime) or the current
+        # night (if it is nighttime).
+        self.nightly_maximum_indoor_dewpoint: float | None = None
+
+        # True if the next valid temperature sample represents
+        # the beginning of the night.
+        self.need_to_reset_temperature = True
+
+        # Minimum reported outdoor temperature (°C)
+        # for last night (if it is daytime) or the current
+        # night (if it is nighttime).
+        self.nightly_minimum_temperature: float | None = None
 
     async def get_last_twilight_temperature(self) -> float | None:
         """Retrieve the most recent twilight temperature from the EFD.
@@ -169,6 +200,56 @@ class WeatherModel:
         now = temperature.private_sndStamp
         self.temperature_history.append((temperature.temperatureItem[0], now))
 
+        # Record the nightly minimum temperature...
+        if self.diurnal_timer.is_night(Time.now()):
+            if self.need_to_reset_temperature:
+                self.nightly_minimum_temperature = temperature.temperatureItem[0]
+                self.need_to_reset_temperature = False
+            else:
+                self.nightly_minimum_temperature = min(
+                    temperature.temperatureItem[0], self.nightly_minimum_temperature
+                )
+        else:
+            self.need_to_reset_temperature = True
+
+    async def indoor_temperature_callback(
+        self, temperature: salobj.BaseMsgType
+    ) -> None:
+        """Callback for ESS.tel_temperature for the indoor ESS.
+
+        This function appends new temperature data to the existing table.
+
+        Parameters
+        ----------
+        temperature : `~lsst.ts.salobj.BaseMsgType`
+           A newly received temperature telemetry item.
+        """
+        now = temperature.private_sndStamp
+        self.indoor_temperature_history.append((temperature.temperatureItem[0], now))
+
+    def indoor_dewpoint_callback(self, dewpoint: salobj.BaseMsgType) -> None:
+        """Callback for ESS.tel_dewpoint.
+
+        This function appends new temperature data to the existing table,
+        but only if it is night. If it is the first sample first the night,
+        the table is cleared and restarted.
+
+        Parameters
+        ----------
+        dewpoint : `~lsst.ts.salobj.BaseMsgType`
+           A newly received dewpoint telemetry item.
+        """
+        if self.diurnal_timer.is_night(Time.now()):
+            if self.need_to_reset_dewpoint:
+                self.nightly_maximum_indoor_dewpoint = dewpoint.dewpointItem
+                self.need_to_reset_dewpoint = False
+            else:
+                self.nightly_maximum_indoor_dewpoint = max(
+                    dewpoint.dewpointItem, self.nightly_maximum_indoor_dewpoint
+                )
+        else:
+            self.need_to_reset_dewpoint = True
+
     @property
     def average_windspeed(self) -> float:
         """Average windspeed in m/s.
@@ -217,11 +298,46 @@ class WeatherModel:
             the ESS, or NaN if there are no temperature samples
             in the last 5 minutes.
         """
+        return self.calculate_current_temperature(self.temperature_history)
+
+    @property
+    def current_indoor_temperature(self) -> float:
+        """Current temperature in °C.
+
+        Returns
+        -------
+        float
+            The average of the last 10 temperature samples from
+            the ESS, or NaN if there are no temperature samples
+            in the last 5 minutes.
+        """
+        return self.calculate_current_temperature(self.indoor_temperature_history)
+
+    def calculate_current_temperature(
+        self, temperature_history: deque[tuple[float, float]]
+    ) -> float:
+        """Calculates a current temperature for the given collection.
+
+        Finds a median over the last 5 minutes for the specfied
+        collection, which can be for either the indoor or outdoor
+        ESS.
+
+        Parameters
+        ----------
+        temperature_history: deque[tuple[float, float]]
+            Collected temperature samples from either the indoor or outdoor
+            ESS remote.
+
+        Returns
+        -------
+        float
+            The average of the last 10 temperature samples from
+            the ESS, or NaN if there are no temperature samples
+            in the last 5 minutes.
+        """
         cutoff = utils.current_tai() - 5 * 60
         recent_samples = [
-            temperature
-            for temperature, time in self.temperature_history
-            if time >= cutoff
+            temperature for temperature, time in temperature_history if time >= cutoff
         ]
 
         if not recent_samples:
@@ -242,10 +358,14 @@ class WeatherModel:
             domain=self.domain,
             name="ESS",
             index=self.ess_index,
-            include=("airFlow", "temperature"),
-        ) as weather_remote:
+        ) as weather_remote, salobj.Remote(
+            domain=self.domain,
+            name="ESS",
+            index=self.indoor_ess_index,
+        ) as indoor_remote:
             weather_remote.tel_airFlow.callback = self.air_flow_callback
             weather_remote.tel_temperature.callback = self.temperature_callback
+            indoor_remote.tel_dewpoint.callback = self.indoor_dewpoint_callback
 
             while self.diurnal_timer.is_running:
                 async with self.diurnal_timer.twilight_condition:
