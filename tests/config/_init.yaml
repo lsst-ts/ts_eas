@@ -17,3 +17,4 @@ maximum_heating_rate: 0.2
 slow_cooling_rate: 1
 fast_cooling_rate: 10
 setpoint_lower_limit: 6
+efd_name: test

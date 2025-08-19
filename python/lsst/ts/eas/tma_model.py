@@ -51,8 +51,6 @@ class TmaModel:
     diurnal_timer : `DiurnalTimer`
         A timer that signals every day at noon and at the end of evening
         twilight.
-    dome_model : `DomeModel`
-        A model for the MTDome remote, indicating whether it is closed.
     weather_model : `WeatherModel`
         A model for the outdoor weather station, which records the last
         twilight temperature observed while the dome was opened.
@@ -524,19 +522,22 @@ class TmaModel:
                     future.set_result(None)
 
                 await self.diurnal_timer.noon_condition.wait()
+                last_twilight_temperature = (
+                    await self.weather_model.get_last_twilight_temperature()
+                )
                 if (
                     self.diurnal_timer.is_running
-                    and self.weather_model.last_twilight_temperature is not None
+                    and last_twilight_temperature is not None
                 ):
                     self.log.info(
                         "Noon M1M3TS and top end is set based on twilight temperature: "
-                        f"{self.weather_model.last_twilight_temperature:.2f}°C"
+                        f"{last_twilight_temperature:.2f}°C"
                     )
                     await self.apply_setpoints(
                         m1m3ts_remote=m1m3ts_remote,
-                        setpoint=self.weather_model.last_twilight_temperature,
+                        setpoint=last_twilight_temperature,
                     )
                     await self.start_top_end_task(
                         mtmount_remote=mtmount_remote,
-                        setpoint=self.weather_model.last_twilight_temperature,
+                        setpoint=last_twilight_temperature,
                     )

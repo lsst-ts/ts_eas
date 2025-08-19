@@ -27,15 +27,14 @@ import math
 import statistics
 from collections import deque
 
-import backoff
+import astropy.units as u
+import lsst_efd_client
+from astropy.time import Time
 from lsst.ts import salobj, utils
 
 from .diurnal_timer import DiurnalTimer
-from .dome_model import DomeModel
 
-N_TWILIGHT_SAMPLES = 10  # Number of samples to collect for twilight temperature.
 SAL_TIMEOUT = 60  # SAL timeout time. (seconds)
-BACKOFF_BASE = 60  # Base of exponential backoff (seconds)
 
 
 class WeatherModel:
@@ -59,7 +58,7 @@ class WeatherModel:
         domain: salobj.Domain,
         log: logging.Logger,
         diurnal_timer: DiurnalTimer,
-        dome_model: DomeModel,
+        efd_name: str,
         ess_index: int = 301,
         wind_average_window: float = 30 * 60,
         wind_minimum_window: float = 10 * 60,
@@ -67,7 +66,9 @@ class WeatherModel:
         self.domain = domain
         self.log = log
         self.diurnal_timer = diurnal_timer
-        self.dome_model = dome_model
+
+        self.efd_name = efd_name
+        self.ess_index = ess_index
 
         self.monitor_start_event = asyncio.Event()
 
@@ -83,7 +84,60 @@ class WeatherModel:
         # The last observed temperature at the end of twilight
         self.last_twilight_temperature: float | None = None
 
-        # The last observed temperature
+    async def get_last_twilight_temperature(self) -> float | None:
+        """Retrieve the most recent twilight temperature from the EFD.
+
+        This method searches for the temperature at the twilight time of
+        interest, going back up to 10 days from the current time. It queries
+        the EFD for a one-minute interval starting at the twilight time for
+        each day until a valid median temperature is found. The result is
+        cached in `self.last_twilight_temperature` for future calls.
+
+        If no valid data is found within the last 10 days, returns None.
+
+        Returns
+        -------
+        float | None
+            The median temperature (°C) at the most recent twilight time found,
+            or None if no usable result is available.
+        """
+        if self.last_twilight_temperature is not None:
+            return self.last_twilight_temperature
+
+        of_date = Time.now()
+        efd_client = lsst_efd_client.EfdClient(self.efd_name)
+        for days_ago in range(10):
+            # Get time of twilight of interest.
+            of_date -= 86400 * u.s
+            if days_ago == 0:
+                continue
+            twilight_time = self.diurnal_timer.get_twilight_time(of_date)
+
+            time_series = await efd_client.select_time_series(
+                "lsst.sal.ESS.temperature",
+                ["temperatureItem0"],
+                twilight_time,
+                twilight_time + 60 * u.s,
+                index=self.ess_index,
+            )
+            if len(time_series) == 0:
+                continue
+
+            self.last_twilight_temperature = float(
+                time_series["temperatureItem0"].median()
+            )
+            if math.isnan(self.last_twilight_temperature):
+                self.last_twilight_temperature = None
+                continue
+
+            self.log.info(
+                "Obtained twilight temperature from EFD for "
+                f"{twilight_time.isot}: {self.last_twilight_temperature}"
+            )
+            return self.last_twilight_temperature
+        else:
+            # Unable to find a usable result.
+            return None
 
     async def air_flow_callback(self, air_flow: salobj.BaseMsgType) -> None:
         """Callback for ESS.tel_airFlow.
@@ -177,7 +231,7 @@ class WeatherModel:
         return statistics.median(recent_samples)
 
     async def monitor(self) -> None:
-        """Monitors the dome status and windspeed to control the HVAC.
+        """Monitors the temperature and windspeed to control the HVAC.
 
         This monitor does the following:
          * Sets a callback for ESS.airFlow to collect average windspeed.
@@ -188,7 +242,7 @@ class WeatherModel:
         async with salobj.Remote(
             domain=self.domain,
             name="ESS",
-            index=301,
+            index=self.ess_index,
             include=("airFlow", "temperature"),
         ) as weather_remote:
             weather_remote.tel_airFlow.callback = self.air_flow_callback
@@ -201,14 +255,9 @@ class WeatherModel:
                     await self.diurnal_timer.twilight_condition.wait()
                     if self.diurnal_timer.is_running:
                         try:
-                            if (
-                                self.dome_model.is_closed is False
-                            ):  # is_closed must not be None
-                                self.last_twilight_temperature = (
-                                    await self.measure_twilight_temperature(
-                                        weather_remote
-                                    )
-                                )
+                            self.last_twilight_temperature = (
+                                await self.measure_twilight_temperature()
+                            )
 
                         except Exception:
                             self.log.exception("Failed to read temperature from ESS")
@@ -218,16 +267,8 @@ class WeatherModel:
 
         self.monitor_start_event.clear()
 
-    @backoff.on_exception(
-        backoff.expo,
-        Exception,
-        max_tries=5,
-        jitter=backoff.full_jitter,
-        base=60,  # Start at 60 seconds
-    )
-    async def measure_twilight_temperature(
-        self, weather_remote: salobj.Remote
-    ) -> float:
+    async def measure_twilight_temperature(self) -> float:
+        """Refreshes the twilight temperature with a new measurement."""
         # Store the current temperature for future use.
         last_twilight_temperature = self.current_temperature
         self.log.info(f"Collected twilight temperature: {last_twilight_temperature}°C")

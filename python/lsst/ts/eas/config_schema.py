@@ -28,7 +28,7 @@ CONFIG_SCHEMA = yaml.safe_load(
     $schema: http://json-schema.org/draft-07/schema#
     $id: https://github.com/lsst-ts/ts_eas/blob/main/python/lsst/ts/eas/config_schema.py
     # title must end with one or more spaces followed by the schema version, which must begin with "v"
-    title: EAS v7
+    title: EAS v8
     description: Schema for EAS configuration files
     type: object
     properties:
@@ -128,6 +128,10 @@ CONFIG_SCHEMA = yaml.safe_load(
           The minimum allowed setpoint for thermal control. If a lower setpoint
           than this is indicated from the ESS temperature readings, this setpoint
           will be used instead.
+      efd_name:
+         description: Name of the EFD instance telemetry should be queried from.
+         type: string
+
     required:
       - wind_threshold
       - wind_average_window
@@ -148,6 +152,7 @@ CONFIG_SCHEMA = yaml.safe_load(
       - slow_cooling_rate
       - fast_cooling_rate
       - setpoint_lower_limit
+      - efd_name
     additionalProperties: false
     """
 )
