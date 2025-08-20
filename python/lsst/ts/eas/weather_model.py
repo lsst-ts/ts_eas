@@ -29,6 +29,7 @@ from collections import deque
 
 import astropy.units as u
 import lsst_efd_client
+import yaml
 from astropy.time import Time
 from lsst.ts import salobj, utils
 
@@ -97,14 +98,14 @@ class WeatherModel:
         # The last observed temperature at the end of twilight
         self.last_twilight_temperature: float | None = None
 
-        # True if the next valid dewpoint sample represents
+        # True if the next valid dew point sample represents
         # the beginning of the night.
-        self.need_to_reset_dewpoint = True
+        self.need_to_reset_dew_point = True
 
-        # Maximum reported dewpoint temperature (°C)
+        # Maximum reported dew point temperature (°C)
         # for last night (if it is daytime) or the current
         # night (if it is nighttime).
-        self.nightly_maximum_indoor_dewpoint: float | None = None
+        self.nightly_maximum_indoor_dew_point: float | None = None
 
         # True if the next valid temperature sample represents
         # the beginning of the night.
@@ -324,19 +325,19 @@ additionalProperties: false
 
         Parameters
         ----------
-        dewpoint : `~lsst.ts.salobj.BaseMsgType`
-           A newly received dewpoint telemetry item.
+        dew_point : `~lsst.ts.salobj.BaseMsgType`
+           A newly received dew point telemetry item.
         """
         if self.diurnal_timer.is_night(Time.now()):
-            if self.need_to_reset_dewpoint:
-                self.nightly_maximum_indoor_dewpoint = dewpoint.dewpointItem
-                self.need_to_reset_dewpoint = False
+            if self.need_to_reset_dew_point:
+                self.nightly_maximum_indoor_dew_point = dew_point.dewPointItem
+                self.need_to_reset_dew_point = False
             else:
-                self.nightly_maximum_indoor_dewpoint = max(
-                    dewpoint.dewpointItem, self.nightly_maximum_indoor_dewpoint
+                self.nightly_maximum_indoor_dew_point = max(
+                    dew_point.dewpointItem, self.nightly_maximum_indoor_dew_point
                 )
         else:
-            self.need_to_reset_dewpoint = True
+            self.need_to_reset_dew_point = True
 
     @property
     def average_windspeed(self) -> float:

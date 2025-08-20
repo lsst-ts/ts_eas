@@ -25,6 +25,7 @@ import asyncio
 import logging
 import math
 
+import yaml
 from astropy.time import Time
 from lsst.ts import salobj, utils
 from lsst.ts.xml.enums.HVAC import DeviceId
@@ -61,6 +62,20 @@ class HvacModel:
     vec04_hold_time : float
         Minimum time to wait before changing the state of the VEC-04 fan. This
         value is ignored if the dome is opened or closed. (s)
+    glycol_band_low:
+        Lower bound of allowed glycol setpoint band relative to ambient (°C).
+    glycol_band_high:
+        Upper bound of allowed glycol setpoint band relative to ambient (°C).
+    glycol_average_offset:
+        Nominal average offset for glycol setpoints relative to ambient (°C).
+    glycol_dew_point_margin:
+        Safety margin (°C) added to the maximum dew point to avoid
+        condensation.
+    glycol_setpoints_delta:
+        Temperature difference (°C) between the two glycol chiller setpoints
+        (chiller 1 warmer).
+    glycol_absolute_minimum:
+        Absolute minimum setpoint (°C) allowed for the colder glycol chiller.
     disable_features: list[str]
         A list of features that should be disabled. The following strings can
         be used:
@@ -81,6 +96,12 @@ class HvacModel:
         setpoint_lower_limit: float = 6,
         wind_threshold: float = 5,
         vec04_hold_time: float = 5 * 60,
+        glycol_band_low: float = -10,
+        glycol_band_high: float = -5,
+        glycol_average_offset: float = -7.5,
+        glycol_dew_point_margin: float = 1.0,
+        glycol_setpoints_delta: float = 1.0,
+        glycol_absolute_minimum: float = -10.0,
         features_to_disable: list[str] = [],
     ) -> None:
         self.domain = domain
@@ -349,7 +370,7 @@ additionalProperties: false
             `[ambient - glycol_band_low, ambient - glycol_band_high]`.
             Default values `glycol_band_low` of 5, `glycol_band_high` of 10.
           * Raised if necessary to exceed the nightly maximum indoor dew
-            point plus a safety margin (`dewpoint_margin`).
+            point plus a safety margin (`dew_point_margin`).
           * Split into two staggered setpoints (`setpoint1`, `setpoint2`)
             separated by `glycol_setpoints_delta`, **with chiller 1 warmer**.
           * Absolute minimum enforced on the colder chiller
@@ -378,12 +399,12 @@ additionalProperties: false
         target_average = ambient_temperature + self.glycol_average_offset
         average = min(max(target_average, band_low), band_high)
 
-        # Incorporate dewpoint into the calculation - setpoint
-        # average should not be lower than the dewpoint (with margin)
-        nightly_maximum_dewpoint = self.weather_model.nightly_maximum_dewpoint
-        if nightly_maximum_dewpoint is not None:
+        # Incorporate dew point into the calculation - setpoint
+        # average should not be lower than the dew point (with margin)
+        nightly_maximum_dew_point = self.weather_model.nightly_maximum_indoor_dew_point
+        if nightly_maximum_dew_point is not None:
             average = max(
-                average, nightly_maximum_dewpoint + self.glycol_dewpoint_margin
+                average, nightly_maximum_dew_point + self.glycol_dew_point_margin
             )
 
         # Break average and delta into individual setpoints

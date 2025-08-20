@@ -142,15 +142,22 @@ class EasCsc(salobj.ConfigurableCsc):
             domain=self.domain,
             log=self.log,
         )
+
+        # Validate the sub-schemas and update with defaults.
+        for object_type, attr in (
+            (WeatherModel, "weather"),
+            (HvacModel, "hvac"),
+            (TmaModel, "tma"),
+        ):
+            schema = object_type.get_config_schema()
+            validator = salobj.DefaultingValidator(schema)
+            setattr(config, attr, validator.validate(getattr(config, attr)))
+
         self.weather_model = WeatherModel(
             domain=self.domain,
             log=self.log,
             diurnal_timer=self.diurnal_timer,
-            efd_name=self.config.efd_name,
-            ess_index=self.config.weather_ess_index,
-            indoor_ess_index=self.config.indor_ess_index,
-            wind_average_window=self.config.wind_average_window,
-            wind_minimum_window=self.config.wind_minimum_window,
+            **self.config.weather,
         )
         self.hvac_model = HvacModel(
             domain=self.domain,
@@ -158,10 +165,8 @@ class EasCsc(salobj.ConfigurableCsc):
             diurnal_timer=self.diurnal_timer,
             dome_model=self.dome_model,
             weather_model=self.weather_model,
-            setpoint_lower_limit=self.config.setpoint_lower_limit,
-            wind_threshold=self.config.wind_threshold,
-            vec04_hold_time=self.config.vec04_hold_time,
             features_to_disable=self.config.features_to_disable,
+            **self.config.hvac,
         )
         self.tma_model = TmaModel(
             domain=self.domain,
@@ -170,18 +175,8 @@ class EasCsc(salobj.ConfigurableCsc):
             dome_model=self.dome_model,
             glass_temperature_model=self.glass_temperature_model,
             weather_model=self.weather_model,
-            indoor_ess_index=self.config.indoor_ess_index,
-            ess_timeout=self.config.ess_timeout,
-            glycol_setpoint_delta=self.config.glycol_setpoint_delta,
-            heater_setpoint_delta=self.config.heater_setpoint_delta,
-            top_end_setpoint_delta=self.config.top_end_setpoint_delta,
-            m1m3_setpoint_cadence=self.config.m1m3_setpoint_cadence,
-            setpoint_deadband_heating=self.config.setpoint_deadband_heating,
-            setpoint_deadband_cooling=self.config.setpoint_deadband_cooling,
-            maximum_heating_rate=self.config.maximum_heating_rate,
-            slow_cooling_rate=self.config.slow_cooling_rate,
-            fast_cooling_rate=self.config.fast_cooling_rate,
             features_to_disable=self.config.features_to_disable,
+            **self.config.tma,
         )
 
     async def monitor_health(self) -> None:

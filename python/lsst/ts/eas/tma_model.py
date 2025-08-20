@@ -37,6 +37,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Callable
 
+import yaml
 from astropy.time import Time
 from lsst.ts import salobj, utils
 from lsst.ts.xml.enums.MTMount import ThermalCommandState
