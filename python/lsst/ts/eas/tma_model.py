@@ -41,6 +41,8 @@ DORMANT_TIME = 100  # Time to wait while sleeping, seconds
 
 MIN_FAN_RPM = 500  # Minimum allowed M1M3TS fan speed
 MAX_FAN_RPM = 2000  # Maximum allowed fan speed
+OFFSET_AT_MIN_RPM = -1.0  # at 500 rpm
+OFFSET_AT_MAX_RPM = -3.0  # at 2000 rpm
 FAN_SCALE_DT = 1.0  # Temperature difference at which we command MAX_RPM
 
 
@@ -228,16 +230,10 @@ class TmaModel:
         glycol_setpoint = setpoint + self.glycol_setpoint_delta
         heaters_setpoint = setpoint + self.heater_setpoint_delta
         self.log.info(f"Setting MTM1MTS: {glycol_setpoint=}°C {heaters_setpoint=}°C")
-        if hasattr(m1m3ts_remote, "cmd_applySetpoints"):
-            await m1m3ts_remote.cmd_applySetpoints.set_start(
-                glycolSetpoint=glycol_setpoint,
-                heatersSetpoint=heaters_setpoint,
-            )
-        else:
-            await m1m3ts_remote.cmd_applySetpoint.set_start(
-                glycolSetpoint=glycol_setpoint,
-                heatersSetpoint=heaters_setpoint,
-            )
+        await m1m3ts_remote.cmd_applySetpoints.set_start(
+            glycolSetpoint=glycol_setpoint,
+            heatersSetpoint=heaters_setpoint,
+        )
 
         # Record the last setpoint used.
         self.last_m1m3ts_setpoint = setpoint
@@ -285,6 +281,21 @@ class TmaModel:
         fan_rpm = int(round(0.1 * fan_speed))
 
         await m1m3ts_remote.cmd_heaterFanDemand.set_start(fanRPM=[fan_rpm] * 96)
+
+        # Adjust glycol offset based on fan speed:
+        #   Fan speed of 500 (minimum) -> glycol offset of -1 from heater
+        #   Fan speed of 2000 (maximum) -> glycol offset of -3 from heater
+        glycol_offset_slope = (OFFSET_AT_MAX_RPM - OFFSET_AT_MIN_RPM) / (
+            MAX_FAN_RPM - MIN_FAN_RPM
+        )
+        glycol_offset = glycol_offset_slope * (fan_speed - MIN_FAN_RPM)
+        glycol_offset += OFFSET_AT_MIN_RPM
+        self.glycol_setpoint_delta = self.heater_setpoint_delta + glycol_offset
+
+        if self.last_m1m3ts_setpoint is not None:
+            await self.apply_setpoints(
+                m1m3ts_remote=m1m3ts_remote, setpoint=self.last_m1m3ts_setpoint
+            )
 
     async def start_top_end_task(
         self, mtmount_remote: salobj.Remote, setpoint: float
@@ -477,10 +488,11 @@ class TmaModel:
                     continue
 
                 # Apply the new setpoint to change fan speed.
-                await self.set_fan_speed(
-                    m1m3ts_remote=m1m3ts_remote,
-                    setpoint=average_temperature,
-                )
+                if "fanspeed" not in self.features_to_disable:
+                    await self.set_fan_speed(
+                        m1m3ts_remote=m1m3ts_remote,
+                        setpoint=average_temperature,
+                    )
 
                 # Maximum cooling rate depends on environmental conditions:
                 #  * If the dome is open or
