@@ -45,6 +45,23 @@ logging.basicConfig(
 )
 
 
+class MTMountMock(salobj.BaseCsc):
+    version = "?"
+
+    def __init__(self) -> None:
+        self.valid_simulation_modes = (0,)
+        super().__init__(
+            name="MTMount",
+            index=None,
+            initial_state=salobj.State.ENABLED,
+            allow_missing_callbacks=True,
+        )
+        self.top_end_setpoint: float | None = None
+
+    async def do_setThermal(self, data: salobj.BaseMsgType) -> None:
+        self.top_end_setpoint = data.topEndChillerSetpoint
+
+
 class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.fake_time = SimpleNamespace(offset=0.0)
@@ -96,6 +113,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         self.hvac = salobj.Controller("HVAC")
         self.ess = salobj.Controller("ESS", 301)
         self.ess112: salobj.Controller | None = salobj.Controller("ESS", 112)
+        self.mtmount = MTMountMock()
 
         eas.hvac_model.HVAC_SLEEP_TIME = 1
 
@@ -105,9 +123,12 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 self.hvac.start_task,
                 self.ess.start_task,
                 self.ess112.start_task,
+                self.mtmount.start_task,
             ),
             timeout=STD_TIMEOUT,
         )
+
+        await self.mtmount.evt_summaryState.set_write(summaryState=salobj.State.ENABLED)
 
         emit_ess112_temperature_task = asyncio.create_task(
             self.emit_ess112_temperature()
@@ -131,6 +152,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             await self.mtdome.close()
             await self.hvac.close()
             await self.ess.close()
+            await self.mtmount.close()
             await ess112.close()
 
     async def emit_ess112_temperature(self) -> None:

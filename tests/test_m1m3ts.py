@@ -153,6 +153,10 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             M1M3TSMock() as mock_m1m3ts,
             MTMountMock() as mock_mtmount,
         ):
+            await mock_mtmount.evt_summaryState.set_write(
+                summaryState=salobj.State.ENABLED
+            )
+
             self.tma_model = eas.tma_model.TmaModel(
                 domain=self.domain,
                 log=mock_m1m3ts.log,

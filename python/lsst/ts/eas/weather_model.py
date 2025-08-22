@@ -115,6 +115,94 @@ class WeatherModel:
         # night (if it is nighttime).
         self.nightly_minimum_temperature: float | None = None
 
+    @classmethod
+    def get_config_schema(cls) -> str:
+        return yaml.safe_load(
+            """
+$schema: http://json-schema.org/draft-07/schema#
+description: Schema for EAS weather configuration.
+type: object
+properties:
+  efd_name:
+    type: string
+    default: test
+  ess_index:
+    type: integer
+    default: 301
+  indoor_ess_index:
+    type: integer
+    default: 112
+  wind_average_window:
+    type: number
+    default: 1800
+  wind_minimum_window:
+    type: number
+    default: 600
+required:
+  - efd_name
+  - ess_index
+  - indoor_ess_index
+  - wind_average_window
+  - wind_minimum_window
+additionalProperties: false
+"""
+        )
+
+    async def initialize_nightly_minimum(self) -> None:
+        """Compute and store the nightly minimum temperature.
+
+        Determines the relevant night window (current or previous) using
+        the diurnal timer, queries the EFD for ESS temperature data within
+        that window, and saves the minimum value to
+        `self.nightly_minimum_temperature`. Also updates
+        `self.need_to_reset_temperature` depending on whether it is
+        currently day or night. This function is used for initialization
+        when the CSC starts, so that it has the needed data without having
+        to be left running.
+        """
+        self.log.debug("initialize_nightly_minimum")
+
+        time_now = Time.now()
+        it_is_night = self.diurnal_timer.is_night(time_now)
+        self.need_to_reset_temperature = not it_is_night
+
+        # Find the time window of the current night (if it is night)
+        # or the previous night (if it is day)
+        if it_is_night:
+            time_window_begin = time_now - 18 * u.hour
+        else:
+            time_window_begin = time_now - 25 * u.hour
+
+        time_window_begin = self.diurnal_timer.get_twilight_time(
+            after=time_window_begin
+        )
+        time_window_end = self.diurnal_timer.get_sunrise_time(after=time_window_begin)
+
+        efd_client = lsst_efd_client.EfdClient(self.efd_name)
+        time_series = await efd_client.select_time_series(
+            "lsst.sal.ESS.temperature",
+            ["temperatureItem0"],
+            time_window_begin,
+            time_window_end,
+            index=self.indoor_ess_index,
+        )
+        self.nightly_minimum_temperature = time_series["temperatureItem0"].min()
+
+        time_series = await efd_client.select_time_series(
+            "lsst.sal.ESS.dewPoint",
+            ["dewPointItem"],
+            time_window_begin,
+            time_window_end,
+            index=self.indoor_ess_index,
+        )
+        self.nightly_maximum_indoor_dew_point = time_series["dewPointItem"].max()
+
+        self.log.info(
+            f"Found nightly minimum temperature was {self.nightly_minimum_temperature}°C, "
+            f"maximum dew point was was {self.nightly_maximum_indoor_dew_point}°C "
+            f"for window {time_window_begin.isot} to {time_window_end.isot}"
+        )
+
     async def get_last_twilight_temperature(self) -> float | None:
         """Retrieve the most recent twilight temperature from the EFD.
 
@@ -200,18 +288,6 @@ class WeatherModel:
         now = temperature.private_sndStamp
         self.temperature_history.append((temperature.temperatureItem[0], now))
 
-        # Record the nightly minimum temperature...
-        if self.diurnal_timer.is_night(Time.now()):
-            if self.need_to_reset_temperature:
-                self.nightly_minimum_temperature = temperature.temperatureItem[0]
-                self.need_to_reset_temperature = False
-            else:
-                self.nightly_minimum_temperature = min(
-                    temperature.temperatureItem[0], self.nightly_minimum_temperature
-                )
-        else:
-            self.need_to_reset_temperature = True
-
     async def indoor_temperature_callback(
         self, temperature: salobj.BaseMsgType
     ) -> None:
@@ -227,8 +303,20 @@ class WeatherModel:
         now = temperature.private_sndStamp
         self.indoor_temperature_history.append((temperature.temperatureItem[0], now))
 
-    def indoor_dewpoint_callback(self, dewpoint: salobj.BaseMsgType) -> None:
-        """Callback for ESS.tel_dewpoint.
+        # Record the nightly minimum temperature...
+        if self.diurnal_timer.is_night(Time.now()):
+            if self.need_to_reset_temperature:
+                self.nightly_minimum_temperature = temperature.temperatureItem[0]
+                self.need_to_reset_temperature = False
+            else:
+                self.nightly_minimum_temperature = min(
+                    temperature.temperatureItem[0], self.nightly_minimum_temperature
+                )
+        else:
+            self.need_to_reset_temperature = True
+
+    async def indoor_dew_point_callback(self, dew_point: salobj.BaseMsgType) -> None:
+        """Callback for ESS.tel_dewPoint.
 
         This function appends new temperature data to the existing table,
         but only if it is night. If it is the first sample first the night,
@@ -341,6 +429,7 @@ class WeatherModel:
         ]
 
         if not recent_samples:
+            self.log.warning("No temperature samples collected.")
             return math.nan
 
         return statistics.median(recent_samples)
@@ -354,6 +443,11 @@ class WeatherModel:
         """
         self.log.debug("WeatherModel.monitor")
 
+        try:
+            await self.initialize_nightly_minimum()
+        except Exception:
+            self.log.exception("initialize_nightly_minimum failed")
+
         async with salobj.Remote(
             domain=self.domain,
             name="ESS",
@@ -365,7 +459,8 @@ class WeatherModel:
         ) as indoor_remote:
             weather_remote.tel_airFlow.callback = self.air_flow_callback
             weather_remote.tel_temperature.callback = self.temperature_callback
-            indoor_remote.tel_dewpoint.callback = self.indoor_dewpoint_callback
+            indoor_remote.tel_dewPoint.callback = self.indoor_dew_point_callback
+            indoor_remote.tel_temperature.callback = self.indoor_temperature_callback
 
             while self.diurnal_timer.is_running:
                 async with self.diurnal_timer.twilight_condition:

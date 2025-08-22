@@ -32,6 +32,7 @@ import asyncio
 import logging
 import math
 import time
+import yaml
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Callable
@@ -73,11 +74,6 @@ class TmaModel:
     weather_model : `WeatherModel`
         A model for the outdoor weather station, which records the last
         twilight temperature observed while the dome was opened.
-    indoor_ess_index : int
-        The SAL index for the indoor ESS meter.
-    ess_timeout : float
-        The amount of time (seconds) of no ESS measurements after which
-        the CSC should fault.
     glycol_setpoint_delta : float
         The difference between the twilight ambient temperature and the
         setpoint to apply for the glycol, e.g., -2 if the glycol should
@@ -127,8 +123,6 @@ class TmaModel:
         dome_model: DomeModel,
         weather_model: WeatherModel,
         glass_temperature_model: GlassTemperatureModel,
-        indoor_ess_index: int,
-        ess_timeout: float,
         glycol_setpoint_delta: float,
         heater_setpoint_delta: float,
         top_end_setpoint_delta: float,
@@ -151,8 +145,6 @@ class TmaModel:
         self.glass_temperature_model = glass_temperature_model
 
         # Configuration parameters:
-        self.indoor_ess_index = indoor_ess_index
-        self.ess_timeout = ess_timeout
         self.glycol_setpoint_delta = glycol_setpoint_delta
         self.heater_setpoint_delta = heater_setpoint_delta
         self.top_end_setpoint_delta = top_end_setpoint_delta
@@ -205,6 +197,55 @@ class TmaModel:
             yield get_last_setpoint
         finally:
             await salinfo_copy.close()
+
+    @classmethod
+    def get_config_schema(cls) -> str:
+        return yaml.safe_load(
+            """
+$schema: http://json-schema.org/draft-07/schema#
+description: Schema for TMA EAS configuration.
+type: object
+properties:
+  glycol_setpoint_delta:
+    type: number
+    default: -2
+  heater_setpoint_delta:
+    type: number
+    default: -1
+  top_end_setpoint_delta:
+    type: number
+    default: -1
+  m1m3_setpoint_cadence:
+    type: number
+    default: 300
+  setpoint_deadband_heating:
+    type: number
+    default: 0.1
+  setpoint_deadband_cooling:
+    type: number
+    default: 0.1
+  maximum_heating_rate:
+    type: number
+    default: 1.0
+  slow_cooling_rate:
+    type: number
+    default: 1.0
+  fast_cooling_rate:
+    type: number
+    default: 10.0
+required:
+  - glycol_setpoint_delta
+  - heater_setpoint_delta
+  - top_end_setpoint_delta
+  - m1m3_setpoint_cadence
+  - setpoint_deadband_heating
+  - setpoint_deadband_cooling
+  - maximum_heating_rate
+  - slow_cooling_rate
+  - fast_cooling_rate
+additionalProperties: false
+"""
+        )
 
     async def monitor(self) -> None:
         self.log.debug("TmaModel.monitor")
@@ -277,13 +318,15 @@ class TmaModel:
         m1m3ts_remote: salobj.Remote,
         setpoint: float,
     ) -> None:
-        glycol_setpoint = setpoint + self.glycol_setpoint_delta
-        heaters_setpoint = setpoint + self.heater_setpoint_delta
-        self.log.info(f"Setting MTM1MTS: {glycol_setpoint=}°C {heaters_setpoint=}°C")
-        await m1m3ts_remote.cmd_applySetpoints.set_start(
-            glycolSetpoint=glycol_setpoint,
-            heatersSetpoint=heaters_setpoint,
-        )
+        if "m1m3ts" in self.features_to_disable:
+            glycol_setpoint = setpoint + self.glycol_setpoint_delta
+            heaters_setpoint = setpoint + self.heater_setpoint_delta
+            self.log.info(f"Setting MTM1MTS: {glycol_setpoint=}°C {heaters_setpoint=}°C")
+            await m1m3ts_remote.cmd_applySetpoints.set_start(
+                glycolSetpoint=glycol_setpoint,
+                heatersSetpoint=heaters_setpoint,
+            )
+
         self.m1m3_setpoints_are_stale = False
 
     async def set_fan_speed(
@@ -421,85 +464,6 @@ class TmaModel:
         except asyncio.TimeoutError:
             self.log.exception("Apply setpoint to top end timed out!")
 
-    async def collect_temperature_samples(
-        self, ess_remote: salobj.Remote
-    ) -> float | None:
-        """Gather temperature samples over the configured cadence period.
-
-        If a single `asyncio.TimeoutError` occurs, the contiguous-time clock is
-        restarted (`end_time = now + cadence`).  Any other exception is
-        propagated so that the caller can decide how to handle it.
-
-        Parameters
-        ----------
-        ess_remote : `~lsst.ts.salobj.Remote`
-            A remote endpoint for the ESS to collect from.
-
-        Returns
-        -------
-        float | None
-            Average temperature readings, or None if a valid average
-            could not be collected.
-
-        Raises
-        ------
-        `asyncio.CancelledError`
-            Propagated immediately so outer tasks can shut down cleanly.
-        `Exception`
-            Anything other than `asyncio.TimeoutError` bubbles up to the
-            caller.
-        """
-        sum_temperatures = 0
-        count_temperatures = 0
-        current_time = time.monotonic()
-        end_time = current_time + self.m1m3_setpoint_cadence
-        timeout_time = current_time + self.ess_timeout
-        warned_nan = False
-        warned_timeout = False
-
-        # Collect average indoor ESS temperature for
-        # m1m3_setpoint_cadence seconds.
-        while (current_time := time.monotonic()) < end_time:
-            if current_time > timeout_time:
-                self.log.error("No temperature samples were collected. CSC will fault.")
-                raise RuntimeError("No temperature samples were collected.")
-
-            try:
-                sample = await ess_remote.tel_temperature.next(timeout=10, flush=True)
-                await asyncio.sleep(0)  # Make sure we get CancelledError
-
-                new_temperature = sample.temperatureItem[0]
-
-                # Check for NaN, warn, and reset the timer if needed.
-                if math.isnan(new_temperature):
-                    end_time = time.monotonic() + self.m1m3_setpoint_cadence
-                    if not warned_nan:
-                        self.log.warning(
-                            f"Received temperature NaN from ESS:{self.indoor_ess_index}"
-                        )
-                        warned_nan = True
-
-                else:
-                    sum_temperatures += new_temperature
-                    count_temperatures += 1
-
-            except asyncio.TimeoutError:
-                end_time = time.monotonic() + self.m1m3_setpoint_cadence
-                if not warned_timeout:
-                    self.log.warning(
-                        f"Timed out while getting ESS:{self.indoor_ess_index} temperature"
-                    )
-                    warned_timeout = True
-
-        average_temperature = (
-            sum_temperatures / count_temperatures if count_temperatures > 0 else None
-        )
-        self.log.debug(
-            f"Collected {count_temperatures} ESS:{self.indoor_ess_index}"
-            f" samples with {average_temperature=}."
-        )
-        return average_temperature
-
     async def follow_ess_indoor(
         self,
         *,
@@ -510,97 +474,99 @@ class TmaModel:
     ) -> None:
         self.log.debug("follow_ess_indoor")
 
-        async with salobj.Remote(
-            domain=self.domain,
-            name="ESS",
-            index=self.indoor_ess_index,
-            include=("temperature",),
-        ) as ess_remote:
-            if not future.done():
-                future.set_result(None)
+        n_failures = 0  # Number of failures to read temperature
 
-            while True:
-                if "require_dome_open" not in self.features_to_disable:
-                    if self.dome_model.is_closed:
-                        event = asyncio.Event()
-                        self.dome_model.on_open.append(event)
-                        await event.wait()
+        if not future.done():
+            future.set_result(None)
 
-                average_temperature = await self.collect_temperature_samples(ess_remote)
+        while self.diurnal_timer.is_running:
+            if "require_dome_open" not in self.features_to_disable:
+                if self.dome_model.is_closed:
+                    event = asyncio.Event()
+                    self.dome_model.on_open.append(event)
+                    await event.wait()
 
-                if average_temperature is None:
+            indoor_temperature = self.weather_model.current_indoor_temperature
+
+            if indoor_temperature is None or math.isnan(indoor_temperature):
+                self.log.warning(
+                    f"Failed to collect an indoor temperature measurement! ({indoor_temperature=})"
+                )
+                n_failures += 1
+                if n_failures == 10:
                     self.log.error(
                         "No temperature samples were collected. CSC will fault."
                     )
                     raise RuntimeError("No temperature samples were collected.")
+                await asyncio.sleep(0.25 * self.m1m3_setpoint_cadence)
+                continue
+            else:
+                n_failures = 0
 
-                await self.start_top_end_task(mtmount_remote, average_temperature)
+            await self.start_top_end_task(mtmount_remote, indoor_temperature)
 
-                if "m1m3ts" in self.features_to_disable:
-                    continue
+            last_m1m3ts_setpoint = get_last_setpoint()
 
-                last_m1m3ts_setpoint = get_last_setpoint()
-
-                # Apply the new setpoint to change fan speed.
-                if "fanspeed" not in self.features_to_disable:
-                    await self.set_fan_speed(
-                        m1m3ts_remote=m1m3ts_remote,
-                        setpoint=average_temperature,
-                    )
-
-                # Maximum cooling rate depends on environmental conditions:
-                #  * If the dome is open or
-                #    sunrise time > current time > twilight-2hours
-                #    then we use the slow cooling rate
-                #    (currently 1 degree per hour)
-                #  * Otherwise we use the fast cooling rate
-                #    (currently 10 degrees per hour)
-                # We assume that twilight is always shorter than two hours, as
-                # is the case at Cerro Pachón.
-                current_time = time.time()
-                use_slow_cooling_rate = (
-                    (not self.dome_model.is_closed)
-                    or (self.diurnal_timer.sun_altitude_at(current_time) < 0)
-                    or (
-                        self.diurnal_timer.seconds_until_twilight(Time.now()) < 2 * 3600
-                    )
-                )
-                cooling_rate = (
-                    self.slow_cooling_rate
-                    if use_slow_cooling_rate
-                    else self.fast_cooling_rate
+            # Apply the new setpoint to change fan speed.
+            if "fanspeed" not in self.features_to_disable and not math.isnan(
+                indoor_temperature
+            ):
+                await self.set_fan_speed(
+                    m1m3ts_remote=m1m3ts_remote,
+                    setpoint=indoor_temperature,
                 )
 
-                if last_m1m3ts_setpoint is None:
-                    # No previous setpoint = apply it regardless
+            # Maximum cooling rate depends on environmental conditions:
+            #  * If the dome is open or
+            #    sunrise time > current time > twilight-2hours
+            #    then we use the slow cooling rate
+            #    (currently 1 degree per hour)
+            #  * Otherwise we use the fast cooling rate
+            #    (currently 10 degrees per hour)
+            # We assume that twilight is always shorter than two hours, as
+            # is the case at Cerro Pachón.
+            current_time = time.time()
+            use_slow_cooling_rate = (
+                (not self.dome_model.is_closed)
+                or (self.diurnal_timer.sun_altitude_at(current_time) < 0)
+                or (
+                    self.diurnal_timer.seconds_until_twilight(Time.now()) < 2 * 3600
+                )
+            )
+            cooling_rate = (
+                self.slow_cooling_rate
+                if use_slow_cooling_rate
+                else self.fast_cooling_rate
+            )
+
+            if last_m1m3ts_setpoint is None:
+                # No previous setpoint = apply it regardless
+                await self.apply_setpoints(
+                    m1m3ts_remote=m1m3ts_remote,
+                    setpoint=indoor_temperature,
+                )
+            elif indoor_temperature > last_m1m3ts_setpoint:
+                # Warm the mirror if the setpoint is past the deadband
+                new_setpoint = indoor_temperature
+                if (
+                    new_setpoint - last_m1m3ts_setpoint
+                    > self.setpoint_deadband_heating
+                ):
+                    # Apply the setpoint, limited by maximum_heating_rate
+                    maximum_heating_step = (
+                        self.maximum_heating_rate * self.m1m3_setpoint_cadence / 3600.0
+                    )
+                    new_setpoint = min(
+                        indoor_temperature,
+                        last_m1m3ts_setpoint + maximum_heating_step,
+                    )
                     await self.apply_setpoints(
                         m1m3ts_remote=m1m3ts_remote,
-                        setpoint=average_temperature,
+                        setpoint=new_setpoint,
                     )
-                elif average_temperature > last_m1m3ts_setpoint:
-                    # Warm the mirror if the setpoint is past the deadband
-                    new_setpoint = average_temperature
-                    if (
-                        new_setpoint - last_m1m3ts_setpoint
-                        > self.setpoint_deadband_heating
-                    ):
-                        # Apply the setpoint, limited by maximum_heating_rate
-                        maximum_heating_step = (
-                            self.maximum_heating_rate
-                            * self.m1m3_setpoint_cadence
-                            / 3600.0
-                        )
-                        new_setpoint = min(
-                            average_temperature,
-                            last_m1m3ts_setpoint + maximum_heating_step,
-                        )
-                        await self.apply_setpoints(
-                            m1m3ts_remote=m1m3ts_remote,
-                            setpoint=new_setpoint,
-                        )
                 else:
                     # Cool the mirror if the setpoint is past the deadband
-                    new_setpoint = average_temperature
+                    new_setpoint = indoor_temperature
                     if (
                         last_m1m3ts_setpoint - new_setpoint
                         > self.setpoint_deadband_cooling
@@ -610,19 +576,40 @@ class TmaModel:
                             cooling_rate * self.m1m3_setpoint_cadence / 3600.0
                         )
                         new_setpoint = max(
-                            average_temperature,
+                            indoor_temperature,
                             last_m1m3ts_setpoint - maximum_cooling_step,
                         )
                         await self.apply_setpoints(
                             m1m3ts_remote=m1m3ts_remote,
                             setpoint=new_setpoint,
                         )
-
-                if self.m1m3_setpoints_are_stale and last_m1m3ts_setpoint is not None:
+            else:
+                # Cool the mirror if the setpoint is past the deadband
+                new_setpoint = indoor_temperature
+                if (
+                    last_m1m3ts_setpoint - new_setpoint
+                    > self.setpoint_deadband_cooling
+                ):
+                    # Apply the setpoint, limited by maximum_cooling_rate
+                    maximum_cooling_step = (
+                        cooling_rate * self.m1m3_setpoint_cadence / 3600.0
+                    )
+                    new_setpoint = max(
+                        indoor_temperature,
+                        last_m1m3ts_setpoint - maximum_cooling_step,
+                    )
                     await self.apply_setpoints(
                         m1m3ts_remote=m1m3ts_remote,
-                        setpoint=average_temperature,
+                        setpoint=new_setpoint,
                     )
+
+            if self.m1m3_setpoints_are_stale and last_m1m3ts_setpoint is not None:
+                await self.apply_setpoints(
+                    m1m3ts_remote=m1m3ts_remote,
+                    setpoint=indoor_temperature,
+                )
+
+            await asyncio.sleep(self.m1m3_setpoint_cadence)
 
     async def wait_for_sunrise(
         self,

@@ -101,6 +101,81 @@ class HvacModel:
         self.vec04_hold_time = vec04_hold_time
         self.features_to_disable = features_to_disable
 
+        # Glycol chiller parameters:
+        self.glycol_band_low = glycol_band_low
+        self.glycol_band_high = glycol_band_high
+        self.glycol_average_offset = glycol_average_offset
+        self.glycol_dew_point_margin = glycol_dew_point_margin
+        self.glycol_setpoints_delta = glycol_setpoints_delta
+        self.glycol_absolute_minimum = glycol_absolute_minimum
+
+        # Glycol setpoints
+        self.glycol_setpoint1: float | None = None
+        self.glycol_setpoint2: float | None = None
+
+    @classmethod
+    def get_config_schema(cls) -> str:
+        return yaml.safe_load(
+            """
+$schema: http://json-schema.org/draft-07/schema#
+description: Schema for EAS HVAC configuration.
+type: object
+properties:
+  setpoint_lower_limit:
+    type: number
+    default: 6
+    description: >-
+      The minimum allowed setpoint for thermal control. If a lower setpoint
+      than this is indicated from the ESS temperature readings, this setpoint
+      will be used instead.
+  wind_threshold:
+    type: number
+    default: 10
+    description: Windspeed limit for the VEC-04 fan. (m/s)
+  vec04_hold_time:
+    type: number
+    default: 300
+    description: >-
+      Minimum time to wait before changing the state of the VEC-04 fan. This
+      value is ignored if the dome is opened or closed. (s)
+  glycol_band_low:
+    type: number
+    default: -10
+    description: Lower bound of allowed glycol setpoint band relative to ambient (°C).
+  glycol_band_high:
+    type: number
+    default: -5
+    description: Upper bound of allowed glycol setpoint band relative to ambient (°C).
+  glycol_average_offset:
+    type: number
+    default: -7.5
+    description: Nominal average offset for glycol setpoints relative to ambient (°C).
+  glycol_dew_point_margin:
+    type: number
+    default: 1.0
+    description: Safety margin (°C) added to the maximum dew point to avoid condensation.
+  glycol_setpoints_delta:
+    type: number
+    default: 1.0
+    description: Temperature difference (°C) between the two glycol chiller setpoints (chiller 1 warmer).
+  glycol_absolute_minimum:
+    type: number
+    default: -10.0
+    description: Absolute minimum setpoint (°C) allowed for the colder glycol chiller.
+required:
+  - setpoint_lower_limit
+  - wind_threshold
+  - vec04_hold_time
+  - glycol_band_low
+  - glycol_band_high
+  - glycol_average_offset
+  - glycol_dew_point_margin
+  - glycol_setpoints_delta
+  - glycol_absolute_minimum
+additionalProperties: false
+"""
+        )
+
     async def monitor(self) -> None:
         """Monitor the dome status and windspeed to control the HVAC.
 
@@ -127,6 +202,7 @@ class HvacModel:
                         self.wait_for_sunrise(hvac_remote=hvac_remote),
                         self.adjust_glycol_chillers_at_noon(hvac_remote=hvac_remote),
                         self.apply_setpoint_at_night(hvac_remote=hvac_remote),
+                        self.monitor_glycol_chillers(hvac_remote=hvac_remote),
                     ]
                 )
 
@@ -295,11 +371,11 @@ class HvacModel:
             Active setpoint for chiller 2 (°C), the colder of the two.
         """
         # Find the allowed range of the setpoints
-        band_low = ambient_temperature - self.glycol_band_low
-        band_high = ambient_temperature - self.glycol_band_high
+        band_low = ambient_temperature + self.glycol_band_low
+        band_high = ambient_temperature + self.glycol_band_high
 
         # Compute a target average setpoint
-        target_average = ambient_temperature - self.glycol_average_offset
+        target_average = ambient_temperature + self.glycol_average_offset
         average = min(max(target_average, band_low), band_high)
 
         # Incorporate dewpoint into the calculation - setpoint
@@ -340,7 +416,7 @@ class HvacModel:
         average_setpoint = 0.5 * (self.glycol_setpoint1 + self.glycol_setpoint2)
         return (
             self.glycol_band_low
-            <= ambient_temperature - average_setpoint
+            <= average_setpoint - ambient_temperature
             <= self.glycol_band_high
         )
 
@@ -359,36 +435,49 @@ class HvacModel:
             A SALobj remote representing the HVAC.
         """
         while self.diurnal_timer.is_running:
-            # At night, reset the setpoints and do not control
-            # the glycol.
-            if self.diurnal_timer.is_night(Time.now()):
-                self.glycol_setpoint1 = None
-                self.glycol_setpoint2 = None
-                await asyncio.sleep(HVAC_SLEEP_TIME)
-                continue
+            try:
+                self.log.debug("monitor_glycol_chillers")
 
-            # After the setpoints are chosen at noon, monitor
-            # the system and adjust setpoints if needed.
-            ambient_temperature = self.weather_model.current_indoor_temperature
-            if ambient_temperature is not None and not self.check_glycol_setpoint(
-                ambient_temperature
-            ):
-                glycol_setpoint1, glycol_setpoint2 = self.compute_glycol_setpoints(
+                # At night, reset the setpoints and do not control
+                # the glycol.
+                if self.diurnal_timer.is_night(Time.now()):
+                    self.glycol_setpoint1 = None
+                    self.glycol_setpoint2 = None
+                    await asyncio.sleep(HVAC_SLEEP_TIME)
+                    continue
+
+                # After the setpoints are chosen at noon, monitor
+                # the system and adjust setpoints if needed.
+                ambient_temperature = self.weather_model.current_indoor_temperature
+                if ambient_temperature is not None and not self.check_glycol_setpoint(
                     ambient_temperature
+                ):
+                    self.log.debug("Recomputing glycol setpoints.")
+                    glycol_setpoint1, glycol_setpoint2 = self.compute_glycol_setpoints(
+                        ambient_temperature
+                    )
+
+                    if all(
+                        (
+                            glycol_setpoint1 is not None,
+                            not math.isnan(glycol_setpoint1),
+                            glycol_setpoint2 is not None,
+                            not math.isnan(glycol_setpoint2),
+                        )
+                    ):
+                        self.glycol_setpoint1 = glycol_setpoint1
+                        self.glycol_setpoint2 = glycol_setpoint2
+
+                await hvac_remote.cmd_configChiller.set_start(
+                    device_id=DeviceId.chiller01P01,
+                    activeSetpoint=glycol_setpoint1,
                 )
-
-                if glycol_setpoint1 is not None and glycol_setpoint2 is not None:
-                    await hvac_remote.cmd_configChiller.set_start(
-                        device_id=DeviceId.chiller01P01,
-                        activeSetpoint=glycol_setpoint1,
-                    )
-                    await hvac_remote.cmd_configChiller.set_start(
-                        device_id=DeviceId.chiller02P01,
-                        activeSetpoint=glycol_setpoint2,
-                    )
-
-                    self.glycol_setpoint1 = glycol_setpoint1
-                    self.glycol_setpoint2 = glycol_setpoint2
+                await hvac_remote.cmd_configChiller.set_start(
+                    device_id=DeviceId.chiller02P01,
+                    activeSetpoint=glycol_setpoint2,
+                )
+            except Exception:
+                self.log.exception("In HVAC glycol control loop")
 
             await asyncio.sleep(HVAC_SLEEP_TIME)
 
@@ -418,6 +507,7 @@ class HvacModel:
                     self.weather_model.nightly_minimum_temperature
                 )
                 if nightly_minimum_temperature is None:
+                    self.log.error("Nightly minimum temperature was not available.")
                     continue
 
                 self.glycol_setpoint1, self.glycol_setpoint2 = (
@@ -425,6 +515,7 @@ class HvacModel:
                 )
 
                 if self.glycol_setpoint1 is None or self.glycol_setpoint2 is None:
+                    self.log.error("Failed to calculate noon glycol setpoints.")
                     continue
 
                 await hvac_remote.cmd_configChiller.set_start(
@@ -459,7 +550,7 @@ class HvacModel:
                 )
                 if math.isnan(setpoint):
                     if not warned_no_temperature:
-                        self.log.warn(
+                        self.log.warning(
                             "Failed to collect a temperature sample for HVAC setpoint."
                         )
                         warned_no_temperature = True

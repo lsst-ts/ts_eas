@@ -366,6 +366,19 @@ class DiurnalTimer:
         """
         return get_crossing_time(self.sun_altitude, going_up=False, search_from=after)
 
+    def get_sunrise_time(self, after: Time) -> Time:
+        """Return the time of next end of twilight for the given time.
+
+        Parameters
+        ----------
+        after : `~astropy.time.Time`
+            Time returned will be time corresponding to the
+            end of twilight on or after this time.
+        """
+        return get_crossing_time(
+            SOLAR_ELEVATION_AT_SUNSET, going_up=True, search_from=after
+        )
+
     def sun_altitude_at(self, t_utc: float) -> float:
         """Return the sun altitude in degrees at the specified time.
 
