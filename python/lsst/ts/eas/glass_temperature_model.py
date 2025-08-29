@@ -23,8 +23,10 @@ __all__ = ["GlassTemperatureModel"]
 
 import asyncio
 import logging
+import re
 import statistics
 from contextlib import AsyncExitStack
+from dataclasses import dataclass
 
 from lsst.ts import salobj, utils
 from lsst.ts.xml.tables.m1m3 import find_thermocouple
@@ -32,6 +34,14 @@ from lsst.ts.xml.tables.m1m3 import find_thermocouple
 SAL_INDICES = (114, 115, 116, 117)
 N_THERMOCOUPLES = 146
 MAX_TIMESTAMP_AGE = 300
+
+
+@dataclass(frozen=True)
+class ThermocoupleSample:
+    """An EFD sample obtained from the M1M3TS thermocouples."""
+
+    temperature: float | None
+    timestamp: float | None
 
 
 class GlassTemperatureModel:
@@ -62,9 +72,11 @@ class GlassTemperatureModel:
         self.monitor_stop = asyncio.Event()
 
         # A list of most recent temperature probe samples.
-        self.thermocouple_cache: list[tuple[float | None, float | None]] = [
-            (None, None)
+        self.thermocouple_cache: list[ThermocoupleSample | None] = [
+            None
         ] * N_THERMOCOUPLES
+
+        self.compiled_regex = re.compile(r"m1m3-ts-\d+ (\d+)/\d+")
 
     async def temperature_callback(self, temperature: salobj.BaseMsgType) -> None:
         """Callback for ESS.tel_temperature.
@@ -82,7 +94,14 @@ class GlassTemperatureModel:
         """
         sal_index = temperature.salIndex
         sensor_name = temperature.sensorName  # Has format 'm1m3-ts-<index> <n>/6'
-        sequence_num = int(sensor_name.split()[1].split("/")[0])
+        regex_match = self.compiled_regex.match(temperature.sensorName)
+        if regex_match is None:
+            message = (
+                f"M1M3TS ESS temperature sample has unexpected sensorName {sensor_name}"
+            )
+            self.log.error(message)
+            raise RuntimeError(message)
+        sequence_num = int(regex_match[1])
 
         n_channels = temperature.numChannels
         temperatures = temperature.temperatureItem
@@ -99,7 +118,9 @@ class GlassTemperatureModel:
             if thermocouple.index < 0 or thermocouple.index >= N_THERMOCOUPLES:
                 raise ValueError("Unexpected thermocouple index")
 
-            self.thermocouple_cache[thermocouple.index] = (temperature, timestamp)
+            self.thermocouple_cache[thermocouple.index] = ThermocoupleSample(
+                temperature, timestamp
+            )
 
     @property
     def median_temperature(self) -> float | None:
@@ -120,12 +141,13 @@ class GlassTemperatureModel:
         self.log.debug("median_temperature")
         cutoff_time = utils.current_tai() - MAX_TIMESTAMP_AGE
         valid_temperatures = [
-            temperature
-            for temperature, timestamp in self.thermocouple_cache
+            sample.temperature
+            for sample in self.thermocouple_cache
             if (
-                temperature is not None
-                and timestamp is not None
-                and timestamp > cutoff_time
+                sample is not None
+                and sample.temperature is not None
+                and sample.timestamp is not None
+                and sample.timestamp > cutoff_time
             )
         ]
         if not valid_temperatures:
@@ -139,11 +161,10 @@ class GlassTemperatureModel:
         sets up callbacks, and idles.
         """
         self.log.debug("GlassTemperatureModel.monitor")
-        indices = (114, 115, 116, 117)
 
         async with AsyncExitStack() as stack:
             remotes = []
-            for index in indices:
+            for index in SAL_INDICES:
                 remote = await stack.enter_async_context(
                     salobj.Remote(
                         domain=self.domain,
