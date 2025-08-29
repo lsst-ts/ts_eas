@@ -32,6 +32,9 @@ import asyncio
 import logging
 import math
 import time
+from collections.abc import AsyncIterator
+from contextlib import AsyncExitStack, asynccontextmanager
+from typing import Callable
 
 from astropy.time import Time
 from lsst.ts import salobj, utils
@@ -51,6 +54,8 @@ MAX_FAN_RPM = 2500  # Maximum allowed fan speed
 OFFSET_AT_MIN_RPM = -1.0  # at 700 rpm
 OFFSET_AT_MAX_RPM = -5.0  # at 2500 rpm
 FAN_SCALE_DT = 1.0  # Temperature difference at which we command MAX_RPM
+
+LastSetpointGetter = Callable[[], float | None]
 
 
 class TmaModel:
@@ -165,19 +170,55 @@ class TmaModel:
         self.top_end_task = utils.make_done_future()
         self.top_end_task_warned: bool = False
 
+    @asynccontextmanager
+    async def last_setpoint_getter(
+        self, mtm1m3ts_remote: salobj.Remote
+    ) -> AsyncIterator[LastSetpointGetter]:
+        """Handles context for a function returning the last MTM1M3TS setpoint.
+
+        Parameters
+        ----------
+        mtm1m3ts_remote: salobj.Remote
+            The MTM1M3TS remote
+
+        Returns
+        -------
+        AsyncIterator[LastSetpointGetter]
+            An asynchronous iterator that yields a function. The yielded
+            function, when called, returns the most recently received MTM1M3TS
+            setpoint value as a float, or `None` if no setpoint is available.
+        """
+        salinfo_copy = salobj.SalInfo(self.domain, mtm1m3ts_remote.salinfo.name)
+        topic = salobj.topics.ReadTopic(
+            salinfo=salinfo_copy, attr_name="cmd_applySetpoints", max_history=1
+        )
+        await salinfo_copy.start()
+
+        def get_last_setpoint() -> float | None:
+            msg = topic.get()
+            if msg is None:
+                return None
+            return msg.glycolSetpoint - self.glycol_setpoint_delta
+
+        try:
+            yield get_last_setpoint
+        finally:
+            await salinfo_copy.close()
+
     async def monitor(self) -> None:
         self.log.debug("TmaModel.monitor")
 
-        async with (
-            salobj.Remote(
-                domain=self.domain,
-                name="MTM1M3TS",
-            ) as m1m3ts_remote,
-            salobj.Remote(
-                domain=self.domain,
-                name="MTMount",
-            ) as mtmount_remote,
-        ):
+        async with AsyncExitStack() as stack:
+            m1m3ts_remote = await stack.enter_async_context(
+                salobj.Remote(domain=self.domain, name="MTM1M3TS")
+            )
+            mtmount_remote = await stack.enter_async_context(
+                salobj.Remote(domain=self.domain, name="MTMount")
+            )
+            get_last_setpoint = await stack.enter_async_context(
+                self.last_setpoint_getter(m1m3ts_remote)
+            )
+
             if (
                 "m1m3ts" not in self.features_to_disable
                 or "top_end" not in self.features_to_disable
@@ -189,6 +230,7 @@ class TmaModel:
                     self.follow_ess_indoor(
                         m1m3ts_remote=m1m3ts_remote,
                         mtmount_remote=mtmount_remote,
+                        get_last_setpoint=get_last_setpoint,
                         future=ready_futures[0],
                     ),
                     self.wait_for_noon(
@@ -242,14 +284,12 @@ class TmaModel:
             heatersSetpoint=heaters_setpoint,
         )
 
-        # Record the last setpoint used.
-        self.last_m1m3ts_setpoint = setpoint
-
     async def set_fan_speed(
         self,
         *,
         m1m3ts_remote: salobj.Remote,
         setpoint: float,
+        last_m1m3ts_setpoint: float | None,
     ) -> None:
         """Compute and send the FCU fan speed based on glass temperature.
 
@@ -269,6 +309,9 @@ class TmaModel:
             SAL remote for the M1M3 thermal system CSC.
         setpoint : float
             Demand temperature (°C) before applying any offsets.
+        last_m1m3ts_setpoint
+            Last setpoint applied to M1M3TS, as determined by the
+            remote, or None, if no setpoint can be determined.
         """
         glass_temperature = self.glass_temperature_model.median_temperature
 
@@ -302,9 +345,9 @@ class TmaModel:
         else:
             self.glycol_setpoint_delta = OFFSET_AT_MIN_RPM
 
-        if self.last_m1m3ts_setpoint is not None:
+        if last_m1m3ts_setpoint is not None:
             await self.apply_setpoints(
-                m1m3ts_remote=m1m3ts_remote, setpoint=self.last_m1m3ts_setpoint
+                m1m3ts_remote=m1m3ts_remote, setpoint=last_m1m3ts_setpoint
             )
 
     async def start_top_end_task(
@@ -464,6 +507,7 @@ class TmaModel:
         *,
         m1m3ts_remote: salobj.Remote,
         mtmount_remote: salobj.Remote,
+        get_last_setpoint: LastSetpointGetter,
         future: asyncio.Future,
     ) -> None:
         self.log.debug("follow_ess_indoor")
@@ -497,11 +541,14 @@ class TmaModel:
                 if "m1m3ts" in self.features_to_disable:
                     continue
 
+                last_m1m3ts_setpoint = get_last_setpoint()
+
                 # Apply the new setpoint to change fan speed.
                 if "fanspeed" not in self.features_to_disable:
                     await self.set_fan_speed(
                         m1m3ts_remote=m1m3ts_remote,
                         setpoint=average_temperature,
+                        last_m1m3ts_setpoint=last_m1m3ts_setpoint,
                     )
 
                 # Maximum cooling rate depends on environmental conditions:
@@ -527,17 +574,17 @@ class TmaModel:
                     else self.fast_cooling_rate
                 )
 
-                if self.last_m1m3ts_setpoint is None:
+                if last_m1m3ts_setpoint is None:
                     # No previous setpoint = apply it regardless
                     await self.apply_setpoints(
                         m1m3ts_remote=m1m3ts_remote,
                         setpoint=average_temperature,
                     )
-                elif average_temperature > self.last_m1m3ts_setpoint:
+                elif average_temperature > last_m1m3ts_setpoint:
                     # Warm the mirror if the setpoint is past the deadband
                     new_setpoint = average_temperature
                     if (
-                        new_setpoint - self.last_m1m3ts_setpoint
+                        new_setpoint - last_m1m3ts_setpoint
                         > self.setpoint_deadband_heating
                     ):
                         # Apply the setpoint, limited by maximum_heating_rate
@@ -548,7 +595,7 @@ class TmaModel:
                         )
                         new_setpoint = min(
                             average_temperature,
-                            self.last_m1m3ts_setpoint + maximum_heating_step,
+                            last_m1m3ts_setpoint + maximum_heating_step,
                         )
                         await self.apply_setpoints(
                             m1m3ts_remote=m1m3ts_remote,
@@ -558,7 +605,7 @@ class TmaModel:
                     # Cool the mirror if the setpoint is past the deadband
                     new_setpoint = average_temperature
                     if (
-                        self.last_m1m3ts_setpoint - new_setpoint
+                        last_m1m3ts_setpoint - new_setpoint
                         > self.setpoint_deadband_cooling
                     ):
                         # Apply the setpoint, limited by maximum_cooling_rate
@@ -567,7 +614,7 @@ class TmaModel:
                         )
                         new_setpoint = max(
                             average_temperature,
-                            self.last_m1m3ts_setpoint - maximum_cooling_step,
+                            last_m1m3ts_setpoint - maximum_cooling_step,
                         )
                         await self.apply_setpoints(
                             m1m3ts_remote=m1m3ts_remote,
