@@ -39,10 +39,10 @@ from .weather_model import WeatherModel
 STD_TIMEOUT = 10  # seconds
 DORMANT_TIME = 100  # Time to wait while sleeping, seconds
 
-MIN_FAN_RPM = 500  # Minimum allowed M1M3TS fan speed
-MAX_FAN_RPM = 2000  # Maximum allowed fan speed
-OFFSET_AT_MIN_RPM = -1.0  # at 500 rpm
-OFFSET_AT_MAX_RPM = -3.0  # at 2000 rpm
+MIN_FAN_RPM = 700  # Minimum allowed M1M3TS fan speed
+MAX_FAN_RPM = 2500  # Maximum allowed fan speed
+OFFSET_AT_MIN_RPM = -1.0  # at 700 rpm
+OFFSET_AT_MAX_RPM = -5.0  # at 2500 rpm
 FAN_SCALE_DT = 1.0  # Temperature difference at which we command MAX_RPM
 
 
