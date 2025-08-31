@@ -19,7 +19,14 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-__all__ = ["TmaModel"]
+__all__ = [
+    "TmaModel",
+    "MIN_FAN_RPM",
+    "MAX_FAN_RPM",
+    "OFFSET_AT_MIN_RPM",
+    "OFFSET_AT_MAX_RPM",
+    "FAN_SCALE_DT",
+]
 
 import asyncio
 import logging
@@ -282,15 +289,18 @@ class TmaModel:
 
         await m1m3ts_remote.cmd_heaterFanDemand.set_start(fanRPM=[fan_rpm] * 96)
 
-        # Adjust glycol offset based on fan speed:
-        #   Fan speed of 500 (minimum) -> glycol offset of -1 from heater
-        #   Fan speed of 2000 (maximum) -> glycol offset of -3 from heater
-        glycol_offset_slope = (OFFSET_AT_MAX_RPM - OFFSET_AT_MIN_RPM) / (
-            MAX_FAN_RPM - MIN_FAN_RPM
-        )
-        glycol_offset = glycol_offset_slope * (fan_speed - MIN_FAN_RPM)
-        glycol_offset += OFFSET_AT_MIN_RPM
-        self.glycol_setpoint_delta = self.heater_setpoint_delta + glycol_offset
+        if glass_temperature > setpoint:
+            # Adjust glycol offset based on fan speed:
+            #   Fan speed of 700 (minimum) -> glycol offset of -1 from heater
+            #   Fan speed of 2500 (maximum) -> glycol offset of -5 from heater
+            glycol_offset_slope = (OFFSET_AT_MAX_RPM - OFFSET_AT_MIN_RPM) / (
+                MAX_FAN_RPM - MIN_FAN_RPM
+            )
+            glycol_offset = glycol_offset_slope * (fan_speed - MIN_FAN_RPM)
+            glycol_offset += OFFSET_AT_MIN_RPM
+            self.glycol_setpoint_delta = glycol_offset
+        else:
+            self.glycol_setpoint_delta = OFFSET_AT_MIN_RPM
 
         if self.last_m1m3ts_setpoint is not None:
             await self.apply_setpoints(
