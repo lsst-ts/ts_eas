@@ -273,10 +273,7 @@ class HvacModel:
         warned_no_temperature = False
 
         while self.diurnal_timer.is_running:
-            if (
-                self.diurnal_timer.is_night(Time.now())
-                and not self.dome_model.is_closed
-            ):
+            if self.diurnal_timer.is_night(Time.now()) and self.dome_model.is_closed:
                 setpoint = max(
                     self.weather_model.current_temperature,
                     self.setpoint_lower_limit,

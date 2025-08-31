@@ -21,13 +21,14 @@ test:
     - astropy
     - numpy
     - scipy
+    - lsst-efd-client
   source_files:
     - python
     - bin
     - tests
     - pyproject.toml
   commands:
-    - pytest -vv --log-cli-level=INFO
+    - pytest -v
 
 requirements:
   host:
@@ -49,3 +50,4 @@ requirements:
     - astropy
     - numpy
     - scipy
+    - lsst-efd-client

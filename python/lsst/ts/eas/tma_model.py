@@ -19,7 +19,14 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-__all__ = ["TmaModel"]
+__all__ = [
+    "TmaModel",
+    "MIN_FAN_RPM",
+    "MAX_FAN_RPM",
+    "OFFSET_AT_MIN_RPM",
+    "OFFSET_AT_MAX_RPM",
+    "FAN_SCALE_DT",
+]
 
 import asyncio
 import logging
@@ -33,10 +40,17 @@ from lsst.ts.xml.sal_enums import State
 
 from .diurnal_timer import DiurnalTimer
 from .dome_model import DomeModel
+from .glass_temperature_model import GlassTemperatureModel
 from .weather_model import WeatherModel
 
 STD_TIMEOUT = 10  # seconds
 DORMANT_TIME = 100  # Time to wait while sleeping, seconds
+
+MIN_FAN_RPM = 700  # Minimum allowed M1M3TS fan speed
+MAX_FAN_RPM = 2500  # Maximum allowed fan speed
+OFFSET_AT_MIN_RPM = -1.0  # at 700 rpm
+OFFSET_AT_MAX_RPM = -5.0  # at 2500 rpm
+FAN_SCALE_DT = 1.0  # Temperature difference at which we command MAX_RPM
 
 
 class TmaModel:
@@ -107,6 +121,7 @@ class TmaModel:
         diurnal_timer: DiurnalTimer,
         dome_model: DomeModel,
         weather_model: WeatherModel,
+        glass_temperature_model: GlassTemperatureModel,
         indoor_ess_index: int,
         ess_timeout: float,
         glycol_setpoint_delta: float,
@@ -128,6 +143,7 @@ class TmaModel:
         self.diurnal_timer = diurnal_timer
         self.dome_model = dome_model
         self.weather_model = weather_model
+        self.glass_temperature_model = glass_temperature_model
 
         # Configuration parameters:
         self.indoor_ess_index = indoor_ess_index
@@ -221,19 +237,75 @@ class TmaModel:
         glycol_setpoint = setpoint + self.glycol_setpoint_delta
         heaters_setpoint = setpoint + self.heater_setpoint_delta
         self.log.info(f"Setting MTM1MTS: {glycol_setpoint=}°C {heaters_setpoint=}°C")
-        if hasattr(m1m3ts_remote, "cmd_applySetpoints"):
-            await m1m3ts_remote.cmd_applySetpoints.set_start(
-                glycolSetpoint=glycol_setpoint,
-                heatersSetpoint=heaters_setpoint,
-            )
-        else:
-            await m1m3ts_remote.cmd_applySetpoint.set_start(
-                glycolSetpoint=glycol_setpoint,
-                heatersSetpoint=heaters_setpoint,
-            )
+        await m1m3ts_remote.cmd_applySetpoints.set_start(
+            glycolSetpoint=glycol_setpoint,
+            heatersSetpoint=heaters_setpoint,
+        )
 
         # Record the last setpoint used.
         self.last_m1m3ts_setpoint = setpoint
+
+    async def set_fan_speed(
+        self,
+        *,
+        m1m3ts_remote: salobj.Remote,
+        setpoint: float,
+    ) -> None:
+        """Compute and send the FCU fan speed based on glass temperature.
+
+        The commanded fan speed is determined by the absolute difference
+        between the median bulk glass temperature and the target setpoint
+        (including the heater setpoint delta). The speed scales linearly
+        from `MIN_FAN_RPM` at zero temperature difference to `MAX_FAN_RPM`
+        at `FAN_SCALE_DT` degrees difference, with any larger differences
+        clamped at maximum.
+
+        The computed speed is scaled as required by the
+        heaterFanDemand command and applied to all 96 fans.
+
+        Parameters
+        ----------
+        m1m3ts_remote : `~lsst.ts.salobj.Remote`
+            SAL remote for the M1M3 thermal system CSC.
+        setpoint : float
+            Demand temperature (°C) before applying any offsets.
+        """
+        glass_temperature = self.glass_temperature_model.median_temperature
+
+        if (
+            glass_temperature is None
+            or not math.isfinite(glass_temperature)
+            or not -100 < glass_temperature < 100
+        ):
+            return
+
+        setpoint += self.heater_setpoint_delta
+        slope = (MAX_FAN_RPM - MIN_FAN_RPM) / FAN_SCALE_DT
+        temperature_difference = abs(glass_temperature - setpoint)
+
+        fan_speed = MIN_FAN_RPM + slope * temperature_difference
+        fan_speed = min(fan_speed, MAX_FAN_RPM)
+        fan_rpm = int(round(0.1 * fan_speed))
+
+        await m1m3ts_remote.cmd_heaterFanDemand.set_start(fanRPM=[fan_rpm] * 96)
+
+        if glass_temperature > setpoint:
+            # Adjust glycol offset based on fan speed:
+            #   Fan speed of 700 (minimum) -> glycol offset of -1 from heater
+            #   Fan speed of 2500 (maximum) -> glycol offset of -5 from heater
+            glycol_offset_slope = (OFFSET_AT_MAX_RPM - OFFSET_AT_MIN_RPM) / (
+                MAX_FAN_RPM - MIN_FAN_RPM
+            )
+            glycol_offset = glycol_offset_slope * (fan_speed - MIN_FAN_RPM)
+            glycol_offset += OFFSET_AT_MIN_RPM
+            self.glycol_setpoint_delta = glycol_offset
+        else:
+            self.glycol_setpoint_delta = OFFSET_AT_MIN_RPM
+
+        if self.last_m1m3ts_setpoint is not None:
+            await self.apply_setpoints(
+                m1m3ts_remote=m1m3ts_remote, setpoint=self.last_m1m3ts_setpoint
+            )
 
     async def start_top_end_task(
         self, mtmount_remote: salobj.Remote, setpoint: float
@@ -424,6 +496,13 @@ class TmaModel:
 
                 if "m1m3ts" in self.features_to_disable:
                     continue
+
+                # Apply the new setpoint to change fan speed.
+                if "fanspeed" not in self.features_to_disable:
+                    await self.set_fan_speed(
+                        m1m3ts_remote=m1m3ts_remote,
+                        setpoint=average_temperature,
+                    )
 
                 # Maximum cooling rate depends on environmental conditions:
                 #  * If the dome is open or
