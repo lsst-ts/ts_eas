@@ -33,7 +33,7 @@ import logging
 import math
 import time
 from collections.abc import AsyncIterator
-from contextlib import AsyncExitStack, asynccontextmanager
+from contextlib import asynccontextmanager
 from typing import Callable
 
 from astropy.time import Time
@@ -174,7 +174,7 @@ class TmaModel:
     async def last_setpoint_getter(
         self, mtm1m3ts_remote: salobj.Remote
     ) -> AsyncIterator[LastSetpointGetter]:
-        """Handles context for a function returning the last MTM1M3TS setpoint.
+        """Handles context for a function getting the last MTM1M3TS setpoint.
 
         Parameters
         ----------
@@ -185,7 +185,7 @@ class TmaModel:
         -------
         AsyncIterator[LastSetpointGetter]
             An asynchronous iterator that yields a function. The yielded
-            function, when called, returns the most recently received MTM1M3TS
+            function, when called, gets the most recently received MTM1M3TS
             setpoint value as a float, or `None` if no setpoint is available.
         """
         salinfo_copy = salobj.SalInfo(self.domain, mtm1m3ts_remote.salinfo.name)
@@ -198,7 +198,7 @@ class TmaModel:
             msg = topic.get()
             if msg is None:
                 return None
-            return msg.glycolSetpoint - self.glycol_setpoint_delta
+            return msg.heatersSetpoint - self.heater_setpoint_delta
 
         try:
             yield get_last_setpoint
@@ -208,17 +208,17 @@ class TmaModel:
     async def monitor(self) -> None:
         self.log.debug("TmaModel.monitor")
 
-        async with AsyncExitStack() as stack:
-            m1m3ts_remote = await stack.enter_async_context(
-                salobj.Remote(domain=self.domain, name="MTM1M3TS")
-            )
-            mtmount_remote = await stack.enter_async_context(
-                salobj.Remote(domain=self.domain, name="MTMount")
-            )
-            get_last_setpoint = await stack.enter_async_context(
-                self.last_setpoint_getter(m1m3ts_remote)
-            )
-
+        async with (
+            salobj.Remote(
+                domain=self.domain,
+                name="MTM1M3TS",
+            ) as m1m3ts_remote,
+            salobj.Remote(
+                domain=self.domain,
+                name="MTMount",
+            ) as mtmount_remote,
+            self.last_setpoint_getter(m1m3ts_remote) as get_last_setpoint,
+        ):
             if (
                 "m1m3ts" not in self.features_to_disable
                 or "top_end" not in self.features_to_disable
