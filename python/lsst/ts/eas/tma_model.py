@@ -164,8 +164,9 @@ class TmaModel:
         self.fast_cooling_rate = fast_cooling_rate
         self.features_to_disable = features_to_disable
 
-        # Last setpoint, for deadband purposes
-        self.last_m1m3ts_setpoint: float | None = None
+        # If true, applySetpoints needs to be called to
+        # refresh the setpoints on M1M3
+        self.m1m3_setpoints_are_stale: bool = True
 
         self.top_end_task = utils.make_done_future()
         self.top_end_task_warned: bool = False
@@ -283,13 +284,13 @@ class TmaModel:
             glycolSetpoint=glycol_setpoint,
             heatersSetpoint=heaters_setpoint,
         )
+        self.m1m3_setpoints_are_stale = False
 
     async def set_fan_speed(
         self,
         *,
         m1m3ts_remote: salobj.Remote,
         setpoint: float,
-        last_m1m3ts_setpoint: float | None,
     ) -> None:
         """Compute and send the FCU fan speed based on glass temperature.
 
@@ -309,9 +310,6 @@ class TmaModel:
             SAL remote for the M1M3 thermal system CSC.
         setpoint : float
             Demand temperature (°C) before applying any offsets.
-        last_m1m3ts_setpoint
-            Last setpoint applied to M1M3TS, as determined by the
-            remote, or None, if no setpoint can be determined.
         """
         glass_temperature = self.glass_temperature_model.median_temperature
 
@@ -345,10 +343,7 @@ class TmaModel:
         else:
             self.glycol_setpoint_delta = OFFSET_AT_MIN_RPM
 
-        if last_m1m3ts_setpoint is not None:
-            await self.apply_setpoints(
-                m1m3ts_remote=m1m3ts_remote, setpoint=last_m1m3ts_setpoint
-            )
+        self.m1m3_setpoints_are_stale = True
 
     async def start_top_end_task(
         self, mtmount_remote: salobj.Remote, setpoint: float
@@ -548,7 +543,6 @@ class TmaModel:
                     await self.set_fan_speed(
                         m1m3ts_remote=m1m3ts_remote,
                         setpoint=average_temperature,
-                        last_m1m3ts_setpoint=last_m1m3ts_setpoint,
                     )
 
                 # Maximum cooling rate depends on environmental conditions:
@@ -620,6 +614,12 @@ class TmaModel:
                             m1m3ts_remote=m1m3ts_remote,
                             setpoint=new_setpoint,
                         )
+
+                if self.m1m3_setpoints_are_stale and last_m1m3ts_setpoint is not None:
+                    await self.apply_setpoints(
+                        m1m3ts_remote=m1m3ts_remote,
+                        setpoint=average_temperature,
+                    )
 
     async def wait_for_noon(
         self,
