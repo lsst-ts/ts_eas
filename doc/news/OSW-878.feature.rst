@@ -1,1 +1,0 @@
-Rely on SAL to get the previous MTM1M3TS setpoint.
