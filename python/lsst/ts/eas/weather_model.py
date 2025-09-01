@@ -24,17 +24,17 @@ __all__ = ["WeatherModel"]
 import asyncio
 import logging
 import math
+import statistics
 from collections import deque
 
-import backoff
+import astropy.units as u
+import lsst_efd_client
+from astropy.time import Time
 from lsst.ts import salobj, utils
 
 from .diurnal_timer import DiurnalTimer
-from .dome_model import DomeModel
 
-N_TWILIGHT_SAMPLES = 10  # Number of samples to collect for twilight temperature.
 SAL_TIMEOUT = 60  # SAL timeout time. (seconds)
-BACKOFF_BASE = 60  # Base of exponential backoff (seconds)
 
 
 class WeatherModel:
@@ -42,9 +42,9 @@ class WeatherModel:
 
     Parameters
     ----------
-    domain : salobj.Domain
+    domain : `~lsst.ts.salobj.Domain`
         A SAL domain object for obtaining remotes.
-    log : logging.Logger
+    log : `~logging.Logger`
         A logger for log messages.
     wind_average_window : float
         Time over which to average windspeed for threshold determination. (s)
@@ -58,7 +58,7 @@ class WeatherModel:
         domain: salobj.Domain,
         log: logging.Logger,
         diurnal_timer: DiurnalTimer,
-        dome_model: DomeModel,
+        efd_name: str,
         ess_index: int = 301,
         wind_average_window: float = 30 * 60,
         wind_minimum_window: float = 10 * 60,
@@ -66,7 +66,9 @@ class WeatherModel:
         self.domain = domain
         self.log = log
         self.diurnal_timer = diurnal_timer
-        self.dome_model = dome_model
+
+        self.efd_name = efd_name
+        self.ess_index = ess_index
 
         self.monitor_start_event = asyncio.Event()
 
@@ -76,10 +78,65 @@ class WeatherModel:
         # A deque containing tuples of timestamp, windspeed
         self.wind_history: deque = deque()
 
+        # A deque containing tuples of timestamp, temperature
+        self.temperature_history: deque = deque(maxlen=20)
+
         # The last observed temperature at the end of twilight
         self.last_twilight_temperature: float | None = None
 
-        # The last observed temperature
+    async def get_last_twilight_temperature(self) -> float | None:
+        """Retrieve the most recent twilight temperature from the EFD.
+
+        This method searches for the temperature at the twilight time of
+        interest, going back up to 10 days from the current time. It queries
+        the EFD for a one-minute interval starting at the twilight time for
+        each day until a valid median temperature is found. The result is
+        cached in `self.last_twilight_temperature` for future calls.
+
+        If no valid data is found within the last 10 days, returns None.
+
+        Returns
+        -------
+        float | None
+            The median temperature (°C) at the most recent twilight time found,
+            or None if no usable result is available.
+        """
+        if self.last_twilight_temperature is not None:
+            return self.last_twilight_temperature
+
+        of_date = Time.now()
+        efd_client = lsst_efd_client.EfdClient(self.efd_name)
+        for days_ago in range(10):
+            # Get time of twilight of interest.
+            of_date -= 86400 * u.s
+
+            twilight_time = self.diurnal_timer.get_twilight_time(of_date)
+
+            time_series = await efd_client.select_time_series(
+                "lsst.sal.ESS.temperature",
+                ["temperatureItem0"],
+                twilight_time,
+                twilight_time + 60 * u.s,
+                index=self.ess_index,
+            )
+            if len(time_series) == 0:
+                continue
+
+            self.last_twilight_temperature = float(
+                time_series["temperatureItem0"].median()
+            )
+            if math.isnan(self.last_twilight_temperature):
+                self.last_twilight_temperature = None
+                continue
+
+            self.log.info(
+                "Obtained twilight temperature from EFD for "
+                f"{twilight_time.isot}: {self.last_twilight_temperature}"
+            )
+            return self.last_twilight_temperature
+        else:
+            # Unable to find a usable result.
+            return None
 
     async def air_flow_callback(self, air_flow: salobj.BaseMsgType) -> None:
         """Callback for ESS.tel_airFlow.
@@ -88,12 +145,9 @@ class WeatherModel:
 
         Parameters
         ----------
-        air_flow : salobj.BaseMsgType
+        air_flow : `~lsst.ts.salobj.BaseMsgType`
            A newly received air_flow telemetry item.
         """
-        self.log.debug(
-            f"air_flow_callback: {air_flow.private_sndStamp=} sec; {air_flow.speed=} m/s"
-        )
         now = air_flow.private_sndStamp
         self.wind_history.append((air_flow.speed, now))
 
@@ -101,6 +155,19 @@ class WeatherModel:
         time_horizon = now - self.wind_average_window
         while self.wind_history and self.wind_history[0][1] < time_horizon:
             self.wind_history.popleft()
+
+    async def temperature_callback(self, temperature: salobj.BaseMsgType) -> None:
+        """Callback for ESS.tel_temperature.
+
+        This function appends new temperature data to the existing table.
+
+        Parameters
+        ----------
+        temperature : `~lsst.ts.salobj.BaseMsgType`
+           A newly received temperature telemetry item.
+        """
+        now = temperature.private_sndStamp
+        self.temperature_history.append((temperature.temperatureItem[0], now))
 
     @property
     def average_windspeed(self) -> float:
@@ -139,8 +206,31 @@ class WeatherModel:
         speeds = [s for s, _ in self.wind_history]
         return sum(speeds) / len(speeds)
 
+    @property
+    def current_temperature(self) -> float:
+        """Current temperature in °C.
+
+        Returns
+        -------
+        float
+            The average of the last 10 temperature samples from
+            the ESS, or NaN if there are no temperature samples
+            in the last 5 minutes.
+        """
+        cutoff = utils.current_tai() - 5 * 60
+        recent_samples = [
+            temperature
+            for temperature, time in self.temperature_history
+            if time >= cutoff
+        ]
+
+        if not recent_samples:
+            return math.nan
+
+        return statistics.median(recent_samples)
+
     async def monitor(self) -> None:
-        """Monitors the dome status and windspeed to control the HVAC.
+        """Monitors the temperature and windspeed to control the HVAC.
 
         This monitor does the following:
          * Sets a callback for ESS.airFlow to collect average windspeed.
@@ -151,10 +241,11 @@ class WeatherModel:
         async with salobj.Remote(
             domain=self.domain,
             name="ESS",
-            index=301,
+            index=self.ess_index,
             include=("airFlow", "temperature"),
         ) as weather_remote:
             weather_remote.tel_airFlow.callback = self.air_flow_callback
+            weather_remote.tel_temperature.callback = self.temperature_callback
 
             while self.diurnal_timer.is_running:
                 async with self.diurnal_timer.twilight_condition:
@@ -163,14 +254,9 @@ class WeatherModel:
                     await self.diurnal_timer.twilight_condition.wait()
                     if self.diurnal_timer.is_running:
                         try:
-                            if (
-                                self.dome_model.is_closed is False
-                            ):  # is_closed must not be None
-                                self.last_twilight_temperature = (
-                                    await self.measure_twilight_temperature(
-                                        weather_remote
-                                    )
-                                )
+                            self.last_twilight_temperature = (
+                                await self.measure_twilight_temperature()
+                            )
 
                         except Exception:
                             self.log.exception("Failed to read temperature from ESS")
@@ -180,24 +266,9 @@ class WeatherModel:
 
         self.monitor_start_event.clear()
 
-    @backoff.on_exception(
-        backoff.expo,
-        Exception,
-        max_tries=5,
-        jitter=backoff.full_jitter,
-        base=60,  # Start at 60 seconds
-    )
-    async def measure_twilight_temperature(
-        self, weather_remote: salobj.Remote
-    ) -> float:
-        # Collect ten temperature samples from ESS.
-        data = [
-            await weather_remote.tel_temperature.next(flush=True, timeout=SAL_TIMEOUT)
-            for _ in range(N_TWILIGHT_SAMPLES)
-        ]
-        temperature_list = [x for d in data for x in d.temperatureItem[: d.numChannels]]
-
-        # Store the average for future use.
-        last_twilight_temperature = sum(temperature_list) / len(temperature_list)
+    async def measure_twilight_temperature(self) -> float:
+        """Refreshes the twilight temperature with a new measurement."""
+        # Store the current temperature for future use.
+        last_twilight_temperature = self.current_temperature
         self.log.info(f"Collected twilight temperature: {last_twilight_temperature}°C")
         return last_twilight_temperature

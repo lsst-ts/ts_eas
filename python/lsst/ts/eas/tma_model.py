@@ -19,12 +19,22 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-__all__ = ["TmaModel"]
+__all__ = [
+    "TmaModel",
+    "MIN_FAN_RPM",
+    "MAX_FAN_RPM",
+    "OFFSET_AT_MIN_RPM",
+    "OFFSET_AT_MAX_RPM",
+    "FAN_SCALE_DT",
+]
 
 import asyncio
 import logging
 import math
 import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from typing import Callable
 
 from astropy.time import Time
 from lsst.ts import salobj, utils
@@ -33,10 +43,19 @@ from lsst.ts.xml.sal_enums import State
 
 from .diurnal_timer import DiurnalTimer
 from .dome_model import DomeModel
+from .glass_temperature_model import GlassTemperatureModel
 from .weather_model import WeatherModel
 
 STD_TIMEOUT = 10  # seconds
 DORMANT_TIME = 100  # Time to wait while sleeping, seconds
+
+MIN_FAN_RPM = 700  # Minimum allowed M1M3TS fan speed
+MAX_FAN_RPM = 2500  # Maximum allowed fan speed
+OFFSET_AT_MIN_RPM = -1.0  # at 700 rpm
+OFFSET_AT_MAX_RPM = -5.0  # at 2500 rpm
+FAN_SCALE_DT = 1.0  # Temperature difference at which we command MAX_RPM
+
+LastSetpointGetter = Callable[[], float | None]
 
 
 class TmaModel:
@@ -44,16 +63,14 @@ class TmaModel:
 
     Parameters
     ----------
-    domain : salobj.Domain
+    domain : `~lsst.ts.salobj.Domain`
         A SAL domain object for obtaining remotes.
-    log : logging.Logger
+    log : `~logging.Logger`
         A logger for log messages.
-    diurnal_timer : DiurnalTimer
+    diurnal_timer : `DiurnalTimer`
         A timer that signals every day at noon and at the end of evening
         twilight.
-    dome_model : DomeModel
-        A model for the MTDome remote, indicating whether it is closed.
-    weather_model : WeatherModel
+    weather_model : `WeatherModel`
         A model for the outdoor weather station, which records the last
         twilight temperature observed while the dome was opened.
     indoor_ess_index : int
@@ -109,6 +126,7 @@ class TmaModel:
         diurnal_timer: DiurnalTimer,
         dome_model: DomeModel,
         weather_model: WeatherModel,
+        glass_temperature_model: GlassTemperatureModel,
         indoor_ess_index: int,
         ess_timeout: float,
         glycol_setpoint_delta: float,
@@ -130,6 +148,7 @@ class TmaModel:
         self.diurnal_timer = diurnal_timer
         self.dome_model = dome_model
         self.weather_model = weather_model
+        self.glass_temperature_model = glass_temperature_model
 
         # Configuration parameters:
         self.indoor_ess_index = indoor_ess_index
@@ -145,11 +164,47 @@ class TmaModel:
         self.fast_cooling_rate = fast_cooling_rate
         self.features_to_disable = features_to_disable
 
-        # Last setpoint, for deadband purposes
-        self.last_m1m3ts_setpoint: float | None = None
+        # If true, applySetpoints needs to be called to
+        # refresh the setpoints on M1M3
+        self.m1m3_setpoints_are_stale: bool = True
 
         self.top_end_task = utils.make_done_future()
         self.top_end_task_warned: bool = False
+
+    @asynccontextmanager
+    async def last_setpoint_getter(
+        self, mtm1m3ts_remote: salobj.Remote
+    ) -> AsyncIterator[LastSetpointGetter]:
+        """Handles context for a function getting the last MTM1M3TS setpoint.
+
+        Parameters
+        ----------
+        mtm1m3ts_remote: salobj.Remote
+            The MTM1M3TS remote
+
+        Returns
+        -------
+        AsyncIterator[LastSetpointGetter]
+            An asynchronous iterator that yields a function. The yielded
+            function, when called, gets the most recently received MTM1M3TS
+            setpoint value as a float, or `None` if no setpoint is available.
+        """
+        salinfo_copy = salobj.SalInfo(self.domain, mtm1m3ts_remote.salinfo.name)
+        topic = salobj.topics.ReadTopic(
+            salinfo=salinfo_copy, attr_name="cmd_applySetpoints", max_history=1
+        )
+        await salinfo_copy.start()
+
+        def get_last_setpoint() -> float | None:
+            msg = topic.get()
+            if msg is None:
+                return None
+            return msg.heatersSetpoint - self.heater_setpoint_delta
+
+        try:
+            yield get_last_setpoint
+        finally:
+            await salinfo_copy.close()
 
     async def monitor(self) -> None:
         self.log.debug("TmaModel.monitor")
@@ -163,6 +218,7 @@ class TmaModel:
                 domain=self.domain,
                 name="MTMount",
             ) as mtmount_remote,
+            self.last_setpoint_getter(m1m3ts_remote) as get_last_setpoint,
         ):
             if (
                 "m1m3ts" not in self.features_to_disable
@@ -175,6 +231,7 @@ class TmaModel:
                     self.follow_ess_indoor(
                         m1m3ts_remote=m1m3ts_remote,
                         mtmount_remote=mtmount_remote,
+                        get_last_setpoint=get_last_setpoint,
                         future=ready_futures[0],
                     ),
                     self.wait_for_noon(
@@ -223,19 +280,70 @@ class TmaModel:
         glycol_setpoint = setpoint + self.glycol_setpoint_delta
         heaters_setpoint = setpoint + self.heater_setpoint_delta
         self.log.info(f"Setting MTM1MTS: {glycol_setpoint=}°C {heaters_setpoint=}°C")
-        if hasattr(m1m3ts_remote, "cmd_applySetpoints"):
-            await m1m3ts_remote.cmd_applySetpoints.set_start(
-                glycolSetpoint=glycol_setpoint,
-                heatersSetpoint=heaters_setpoint,
-            )
-        else:
-            await m1m3ts_remote.cmd_applySetpoint.set_start(
-                glycolSetpoint=glycol_setpoint,
-                heatersSetpoint=heaters_setpoint,
-            )
+        await m1m3ts_remote.cmd_applySetpoints.set_start(
+            glycolSetpoint=glycol_setpoint,
+            heatersSetpoint=heaters_setpoint,
+        )
+        self.m1m3_setpoints_are_stale = False
 
-        # Record the last setpoint used.
-        self.last_m1m3ts_setpoint = setpoint
+    async def set_fan_speed(
+        self,
+        *,
+        m1m3ts_remote: salobj.Remote,
+        setpoint: float,
+    ) -> None:
+        """Compute and send the FCU fan speed based on glass temperature.
+
+        The commanded fan speed is determined by the absolute difference
+        between the median bulk glass temperature and the target setpoint
+        (including the heater setpoint delta). The speed scales linearly
+        from `MIN_FAN_RPM` at zero temperature difference to `MAX_FAN_RPM`
+        at `FAN_SCALE_DT` degrees difference, with any larger differences
+        clamped at maximum.
+
+        The computed speed is scaled as required by the
+        heaterFanDemand command and applied to all 96 fans.
+
+        Parameters
+        ----------
+        m1m3ts_remote : `~lsst.ts.salobj.Remote`
+            SAL remote for the M1M3 thermal system CSC.
+        setpoint : float
+            Demand temperature (°C) before applying any offsets.
+        """
+        glass_temperature = self.glass_temperature_model.median_temperature
+
+        if (
+            glass_temperature is None
+            or not math.isfinite(glass_temperature)
+            or not -100 < glass_temperature < 100
+        ):
+            return
+
+        setpoint += self.heater_setpoint_delta
+        slope = (MAX_FAN_RPM - MIN_FAN_RPM) / FAN_SCALE_DT
+        temperature_difference = abs(glass_temperature - setpoint)
+
+        fan_speed = MIN_FAN_RPM + slope * temperature_difference
+        fan_speed = min(fan_speed, MAX_FAN_RPM)
+        fan_rpm = int(round(0.1 * fan_speed))
+
+        await m1m3ts_remote.cmd_heaterFanDemand.set_start(fanRPM=[fan_rpm] * 96)
+
+        if glass_temperature > setpoint:
+            # Adjust glycol offset based on fan speed:
+            #   Fan speed of 700 (minimum) -> glycol offset of -1 from heater
+            #   Fan speed of 2500 (maximum) -> glycol offset of -5 from heater
+            glycol_offset_slope = (OFFSET_AT_MAX_RPM - OFFSET_AT_MIN_RPM) / (
+                MAX_FAN_RPM - MIN_FAN_RPM
+            )
+            glycol_offset = glycol_offset_slope * (fan_speed - MIN_FAN_RPM)
+            glycol_offset += OFFSET_AT_MIN_RPM
+            self.glycol_setpoint_delta = glycol_offset
+        else:
+            self.glycol_setpoint_delta = OFFSET_AT_MIN_RPM
+
+        self.m1m3_setpoints_are_stale = True
 
     async def start_top_end_task(
         self, mtmount_remote: salobj.Remote, setpoint: float
@@ -249,7 +357,7 @@ class TmaModel:
 
         Parameters
         ----------
-        mtmount_remote: salobj.Remote
+        mtmount_remote: `~lsst.ts.salobj.Remote`
             The remote object for MTMount CSC commands.
 
         setpoint: float
@@ -287,7 +395,7 @@ class TmaModel:
 
         Parameters
         ----------
-        mtmount_remote: salobj.Remote
+        mtmount_remote: `~lsst.ts.salobj.Remote`
             The remote object for MTMount CSC commands.
 
         setpoint: float
@@ -316,12 +424,12 @@ class TmaModel:
         """Gather temperature samples over the configured cadence period.
 
         If a single `asyncio.TimeoutError` occurs, the contiguous-time clock is
-        restarted (``end_time = now + cadence``).  Any other exception is
+        restarted (`end_time = now + cadence`).  Any other exception is
         propagated so that the caller can decide how to handle it.
 
         Parameters
         ----------
-        ess_remote : salobj.Remote
+        ess_remote : `~lsst.ts.salobj.Remote`
             A remote endpoint for the ESS to collect from.
 
         Returns
@@ -332,10 +440,10 @@ class TmaModel:
 
         Raises
         ------
-        asyncio.CancelledError
+        `asyncio.CancelledError`
             Propagated immediately so outer tasks can shut down cleanly.
-        Exception
-            Anything other than ``asyncio.TimeoutError`` bubbles up to the
+        `Exception`
+            Anything other than `asyncio.TimeoutError` bubbles up to the
             caller.
         """
         sum_temperatures = 0
@@ -394,6 +502,7 @@ class TmaModel:
         *,
         m1m3ts_remote: salobj.Remote,
         mtmount_remote: salobj.Remote,
+        get_last_setpoint: LastSetpointGetter,
         future: asyncio.Future,
     ) -> None:
         self.log.debug("follow_ess_indoor")
@@ -427,6 +536,15 @@ class TmaModel:
                 if "m1m3ts" in self.features_to_disable:
                     continue
 
+                last_m1m3ts_setpoint = get_last_setpoint()
+
+                # Apply the new setpoint to change fan speed.
+                if "fanspeed" not in self.features_to_disable:
+                    await self.set_fan_speed(
+                        m1m3ts_remote=m1m3ts_remote,
+                        setpoint=average_temperature,
+                    )
+
                 # Maximum cooling rate depends on environmental conditions:
                 #  * If the dome is open or
                 #    sunrise time > current time > twilight-2hours
@@ -450,17 +568,17 @@ class TmaModel:
                     else self.fast_cooling_rate
                 )
 
-                if self.last_m1m3ts_setpoint is None:
+                if last_m1m3ts_setpoint is None:
                     # No previous setpoint = apply it regardless
                     await self.apply_setpoints(
                         m1m3ts_remote=m1m3ts_remote,
                         setpoint=average_temperature,
                     )
-                elif average_temperature > self.last_m1m3ts_setpoint:
+                elif average_temperature > last_m1m3ts_setpoint:
                     # Warm the mirror if the setpoint is past the deadband
                     new_setpoint = average_temperature
                     if (
-                        new_setpoint - self.last_m1m3ts_setpoint
+                        new_setpoint - last_m1m3ts_setpoint
                         > self.setpoint_deadband_heating
                     ):
                         # Apply the setpoint, limited by maximum_heating_rate
@@ -471,7 +589,7 @@ class TmaModel:
                         )
                         new_setpoint = min(
                             average_temperature,
-                            self.last_m1m3ts_setpoint + maximum_heating_step,
+                            last_m1m3ts_setpoint + maximum_heating_step,
                         )
                         await self.apply_setpoints(
                             m1m3ts_remote=m1m3ts_remote,
@@ -481,7 +599,7 @@ class TmaModel:
                     # Cool the mirror if the setpoint is past the deadband
                     new_setpoint = average_temperature
                     if (
-                        self.last_m1m3ts_setpoint - new_setpoint
+                        last_m1m3ts_setpoint - new_setpoint
                         > self.setpoint_deadband_cooling
                     ):
                         # Apply the setpoint, limited by maximum_cooling_rate
@@ -490,12 +608,18 @@ class TmaModel:
                         )
                         new_setpoint = max(
                             average_temperature,
-                            self.last_m1m3ts_setpoint - maximum_cooling_step,
+                            last_m1m3ts_setpoint - maximum_cooling_step,
                         )
                         await self.apply_setpoints(
                             m1m3ts_remote=m1m3ts_remote,
                             setpoint=new_setpoint,
                         )
+
+                if self.m1m3_setpoints_are_stale and last_m1m3ts_setpoint is not None:
+                    await self.apply_setpoints(
+                        m1m3ts_remote=m1m3ts_remote,
+                        setpoint=average_temperature,
+                    )
 
     async def wait_for_noon(
         self,
@@ -513,9 +637,9 @@ class TmaModel:
 
         Parameters
         ----------
-        m1m3ts_remote : salobj.Remote
+        m1m3ts_remote : `~lsst.ts.salobj.Remote`
             A SALobj remote representing the MTM1M3TS controller.
-        mtmount_remote : salobj.Remote
+        mtmount_remote : `~lsst.ts.salobj.Remote`
             A SALobj remote representing the MTMount controller.
         """
         while self.diurnal_timer.is_running:
@@ -524,19 +648,22 @@ class TmaModel:
                     future.set_result(None)
 
                 await self.diurnal_timer.noon_condition.wait()
+                last_twilight_temperature = (
+                    await self.weather_model.get_last_twilight_temperature()
+                )
                 if (
                     self.diurnal_timer.is_running
-                    and self.weather_model.last_twilight_temperature is not None
+                    and last_twilight_temperature is not None
                 ):
                     self.log.info(
                         "Noon M1M3TS and top end is set based on twilight temperature: "
-                        f"{self.weather_model.last_twilight_temperature:.2f}°C"
+                        f"{last_twilight_temperature:.2f}°C"
                     )
                     await self.apply_setpoints(
                         m1m3ts_remote=m1m3ts_remote,
-                        setpoint=self.weather_model.last_twilight_temperature,
+                        setpoint=last_twilight_temperature,
                     )
                     await self.start_top_end_task(
                         mtmount_remote=mtmount_remote,
-                        setpoint=self.weather_model.last_twilight_temperature,
+                        setpoint=last_twilight_temperature,
                     )

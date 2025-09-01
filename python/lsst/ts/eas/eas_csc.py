@@ -32,6 +32,7 @@ from . import __version__
 from .config_schema import CONFIG_SCHEMA
 from .diurnal_timer import DiurnalTimer
 from .dome_model import DomeModel
+from .glass_temperature_model import GlassTemperatureModel
 from .hvac_model import HvacModel
 from .tma_model import TmaModel
 from .weather_model import WeatherModel
@@ -58,14 +59,14 @@ class EasCsc(salobj.ConfigurableCsc):
 
     Parameters
     ----------
-    config_dir : `string`
+    config_dir : str
         The configuration directory
-    initial_state : `salobj.State`
+    initial_state : `~lsst.ts.salobj.State`
         The initial state of the CSC
-    simulation_mode : `int`
+    simulation_mode : int
         Simulation mode (1) or not (0)
-    override : `str`, optional
-        Override of settings if ``initial_state`` is `State.DISABLED`
+    override : str, optional
+        Override of settings if `initial_state` is `State.DISABLED`
         or `State.ENABLED`.
     """
 
@@ -137,11 +138,15 @@ class EasCsc(salobj.ConfigurableCsc):
         self.config = config
         self.diurnal_timer = DiurnalTimer(sun_altitude=self.config.twilight_definition)
         self.dome_model = DomeModel(domain=self.domain)
+        self.glass_temperature_model = GlassTemperatureModel(
+            domain=self.domain,
+            log=self.log,
+        )
         self.weather_model = WeatherModel(
             domain=self.domain,
             log=self.log,
             diurnal_timer=self.diurnal_timer,
-            dome_model=self.dome_model,
+            efd_name=self.config.efd_name,
             ess_index=self.config.weather_ess_index,
             wind_average_window=self.config.wind_average_window,
             wind_minimum_window=self.config.wind_minimum_window,
@@ -162,6 +167,7 @@ class EasCsc(salobj.ConfigurableCsc):
             log=self.log,
             diurnal_timer=self.diurnal_timer,
             dome_model=self.dome_model,
+            glass_temperature_model=self.glass_temperature_model,
             weather_model=self.weather_model,
             indoor_ess_index=self.config.indoor_ess_index,
             ess_timeout=self.config.ess_timeout,
@@ -188,17 +194,19 @@ class EasCsc(salobj.ConfigurableCsc):
         assert self.hvac_model is not None, "HVAC Model not initialized."
         assert self.tma_model is not None, "TMA Model not initialized."
         assert self.diurnal_timer is not None, "Timer not initialized."
+        assert self.glass_temperature_model is not None, "Glass model not initialized."
 
         self.log.debug("monitor_health")
 
         while self.disabled_or_enabled:
-            self.diurnal_timer.start()
+            await self.diurnal_timer.start()
 
             self.subtasks = [
                 asyncio.create_task(coro())
                 for coro in (
                     self.dome_model.monitor,
                     self.weather_model.monitor,
+                    self.glass_temperature_model.monitor,
                     self.hvac_model.monitor,
                     self.tma_model.monitor,
                 )
@@ -208,6 +216,7 @@ class EasCsc(salobj.ConfigurableCsc):
             await asyncio.gather(
                 self.dome_model.monitor_start_event.wait(),
                 self.weather_model.monitor_start_event.wait(),
+                self.glass_temperature_model.monitor_start_event.wait(),
                 self.hvac_model.monitor_start_event.wait(),
                 self.tma_model.monitor_start_event.wait(),
             )

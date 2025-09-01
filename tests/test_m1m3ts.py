@@ -22,9 +22,9 @@
 import asyncio
 import contextlib
 import logging
-import os
 import typing
 import unittest
+from types import SimpleNamespace
 
 from lsst.ts import eas, salobj
 
@@ -49,6 +49,7 @@ class M1M3TSMock(salobj.BaseCsc):
         )
         self.glycol_setpoint: float | None = None
         self.heater_setpoint: float | None = None
+        self.fan_rpm: list[int] | None = None
 
     async def do_applySetpoints(self, data: salobj.BaseMsgType) -> None:
         self.glycol_setpoint = data.glycolSetpoint
@@ -57,6 +58,9 @@ class M1M3TSMock(salobj.BaseCsc):
     async def do_applySetpoint(self, data: salobj.BaseMsgType) -> None:
         self.glycol_setpoint = data.glycolSetpoint
         self.heater_setpoint = data.heatersSetpoint
+
+    async def do_heaterFanDemand(self, data: salobj.BaseMsgType) -> None:
+        self.fan_rpm = data.fanRPM
 
 
 class MTMountMock(salobj.BaseCsc):
@@ -76,12 +80,23 @@ class MTMountMock(salobj.BaseCsc):
         self.top_end_setpoint = data.topEndChillerSetpoint
 
 
-class TestTma(unittest.IsolatedAsyncioTestCase):
-    def run(self, result: typing.Any = None) -> None:
-        salobj.testutils.set_test_topic_subname(randomize=False)
-        os.environ["LSST_SITE"] = "test"
-        self.last_twilight_temperature: float | None = None
-        super().run(result)  # type: ignore
+class WeatherModelMock:
+    def __init__(self, last_twilight_temperature: float) -> None:
+        self.last_twilight_temperature = last_twilight_temperature
+
+    async def get_last_twilight_temperature(self) -> float:
+        return self.last_twilight_temperature
+
+
+class DomeModelMock:
+    def __init__(self, is_closed: bool) -> None:
+        self.is_closed = is_closed
+
+
+class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.last_twilight_temperature = 20
+        super().setUp()
 
     @contextlib.asynccontextmanager
     async def mock_extra_cscs(
@@ -90,45 +105,20 @@ class TestTma(unittest.IsolatedAsyncioTestCase):
         self.domain = salobj.Domain()
         self.log = logging.getLogger()
         self.ess112 = salobj.Controller("ESS", 112)
-        self.dome = salobj.Controller("MTDome")
+
         await self.ess112.start_task
-        await self.dome.start_task
 
-        self.dome_model = eas.dome_model.DomeModel(
-            domain=self.domain,
-        )
-        dome_monitor_task = asyncio.create_task(self.dome_model.monitor())
-        self.weather_model = eas.weather_model.WeatherModel(
-            domain=self.domain,
-            log=self.log,
-            diurnal_timer=self.diurnal_timer,
-            dome_model=self.dome_model,
-        )
-        self.weather_model.last_twilight_temperature = self.last_twilight_temperature
-
-        await asyncio.wait_for(
-            self.dome_model.monitor_start_event.wait(),
-            timeout=STD_TIMEOUT,
-        )
+        self.weather_model = WeatherModelMock(self.last_twilight_temperature)
+        self.dome_model = DomeModelMock(is_closed=False)
 
         if ess112_temperature is not None:
             emit_ess112_temperature_task = asyncio.create_task(
                 self.emit_ess112_temperature(ess112_temperature)
             )
 
-        await self.dome.tel_apertureShutter.set_write(
-            positionActual=(100.0, 100.0),
-        )
-
         try:
             yield
         finally:
-            dome_monitor_task.cancel()
-            try:
-                await dome_monitor_task
-            except asyncio.CancelledError:
-                pass
-
             if ess112_temperature is not None:
                 emit_ess112_temperature_task.cancel()
                 try:
@@ -149,25 +139,12 @@ class TestTma(unittest.IsolatedAsyncioTestCase):
                 location="",
             )
 
-    @contextlib.asynccontextmanager
-    async def mock_m1m3ts(self) -> typing.AsyncGenerator[None, None]:
-        self.m1m3ts = M1M3TSMock()
-        await self.m1m3ts.start_task
-
-        try:
-            yield
-        finally:
-            try:
-                await self.m1m3ts.close()
-            except asyncio.CancelledError:
-                pass
-
     async def run_with_parameters(
         self,
         ess112_temperature: float | None,
         signal_noon: bool = False,
         **model_args: typing.Any,
-    ) -> tuple[float | None, float | None, float | None]:
+    ) -> tuple[float | None, float | None, float | None, list[float] | None]:
         self.diurnal_timer = eas.diurnal_timer.DiurnalTimer()
         self.diurnal_timer.is_running = True
 
@@ -181,6 +158,7 @@ class TestTma(unittest.IsolatedAsyncioTestCase):
                 log=mock_m1m3ts.log,
                 diurnal_timer=self.diurnal_timer,
                 dome_model=self.dome_model,
+                glass_temperature_model=SimpleNamespace(median_temperature=0.0),
                 weather_model=self.weather_model,
                 indoor_ess_index=112,
                 ess_timeout=20,
@@ -197,14 +175,14 @@ class TestTma(unittest.IsolatedAsyncioTestCase):
             )
             monitor_task = asyncio.create_task(self.tma_model.monitor())
 
-            await asyncio.sleep(30)
+            await asyncio.sleep(15)
 
             if signal_noon:
                 async with self.diurnal_timer.noon_condition:
                     self.diurnal_timer.noon_condition.notify_all()
                 await asyncio.sleep(1)
             else:
-                await asyncio.sleep(40)
+                await asyncio.sleep(20)
 
             monitor_task.cancel()
             try:
@@ -212,21 +190,24 @@ class TestTma(unittest.IsolatedAsyncioTestCase):
             except asyncio.CancelledError:
                 pass
 
+            await mock_mtmount.close()
+            await mock_m1m3ts.close()
+
             return (
                 mock_m1m3ts.glycol_setpoint,
                 mock_m1m3ts.heater_setpoint,
                 mock_mtmount.top_end_setpoint,
+                mock_m1m3ts.fan_rpm,
             )
 
     async def test_m1m3ts_applysetpoints(self) -> None:
         """M1M3TS.applySetpoint should be called at noon."""
-        self.last_twilight_temperature = 20
         ess112_temperature = 10
         glycol_setpoint_delta = -2
         heater_setpoint_delta = -1
         top_end_setpoint_delta = -0.5
 
-        glycol_setpoint, heater_setpoint, top_end_setpoint = (
+        glycol_setpoint, heater_setpoint, top_end_setpoint, _ = (
             await self.run_with_parameters(
                 ess112_temperature,
                 glycol_setpoint_delta=glycol_setpoint_delta,
@@ -242,7 +223,7 @@ class TestTma(unittest.IsolatedAsyncioTestCase):
         )
         self.assertAlmostEqual(
             glycol_setpoint,
-            self.last_twilight_temperature + glycol_setpoint_delta,
+            self.last_twilight_temperature + self.tma_model.glycol_setpoint_delta,
             places=4,
         )
 
@@ -262,7 +243,7 @@ class TestTma(unittest.IsolatedAsyncioTestCase):
         heater_setpoint_delta = -1
         top_end_setpoint_delta = -1.5
 
-        glycol_setpoint, heater_setpoint, top_end_setpoint = (
+        glycol_setpoint, heater_setpoint, top_end_setpoint, fan_rpm = (
             await self.run_with_parameters(
                 ess112_temperature,
                 glycol_setpoint_delta=glycol_setpoint_delta,
@@ -275,15 +256,16 @@ class TestTma(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(glycol_setpoint is None)
         self.assertTrue(heater_setpoint is None)
         self.assertTrue(top_end_setpoint is not None)
+        self.assertIsNone(fan_rpm)
 
     async def test_disabled_top_end(self) -> None:
         """The applySetpoint should not be called when m1m3ts is disabled."""
-        ess112_temperature = 10
+        ess112_temperature = 0.5
         glycol_setpoint_delta = -2
         heater_setpoint_delta = -1
-        top_end_setpoint_delta = -1.5
+        top_end_setpoint_delta = -1
 
-        glycol_setpoint, heater_setpoint, top_end_setpoint = (
+        glycol_setpoint, heater_setpoint, top_end_setpoint, fan_rpm = (
             await self.run_with_parameters(
                 ess112_temperature,
                 glycol_setpoint_delta=glycol_setpoint_delta,
@@ -296,6 +278,11 @@ class TestTma(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(glycol_setpoint is not None)
         self.assertTrue(heater_setpoint is not None)
         self.assertTrue(top_end_setpoint is None)
+        assert fan_rpm is not None
+        expected_fan_rpm = int(
+            0.1 * 0.5 * (eas.tma_model.MIN_FAN_RPM + eas.tma_model.MAX_FAN_RPM)
+        )
+        self.assertAlmostEqual(fan_rpm[0], expected_fan_rpm, 3)
 
     async def test_disabled_tma(self) -> None:
         """The applySetpoint should not be called when m1m3ts is disabled."""
@@ -304,7 +291,7 @@ class TestTma(unittest.IsolatedAsyncioTestCase):
         heater_setpoint_delta = -1
         top_end_setpoint_delta = -1.5
 
-        glycol_setpoint, heater_setpoint, top_end_setpoint = (
+        glycol_setpoint, heater_setpoint, top_end_setpoint, _ = (
             await self.run_with_parameters(
                 ess112_temperature,
                 glycol_setpoint_delta=glycol_setpoint_delta,
@@ -326,7 +313,7 @@ class TestTma(unittest.IsolatedAsyncioTestCase):
         top_end_setpoint_delta = -1
 
         with self.assertRaises(RuntimeError):
-            glycol_setpoint, heater_setpoint, top_end_setpoint = (
+            glycol_setpoint, heater_setpoint, top_end_setpoint, _ = (
                 await self.run_with_parameters(
                     ess112_temperature,
                     glycol_setpoint_delta=glycol_setpoint_delta,
@@ -343,3 +330,89 @@ class TestTma(unittest.IsolatedAsyncioTestCase):
             # Should not matter how long this sleep is because it should
             # be interrupted by the RuntimeError.
             await asyncio.sleep(60)
+
+    async def test_fan_speed(self) -> None:
+        """Compare behavior with specifications in OSW-820."""
+        self.diurnal_timer = eas.diurnal_timer.DiurnalTimer()
+        self.diurnal_timer.is_running = True
+
+        async with (
+            self.mock_extra_cscs(10),
+            M1M3TSMock() as mock_m1m3ts,
+            salobj.Remote(name="MTM1M3TS", domain=self.domain) as mtm1m3ts_remote,
+        ):
+            tma_model = eas.tma_model.TmaModel(
+                domain=self.domain,
+                log=mock_m1m3ts.log,
+                diurnal_timer=self.diurnal_timer,
+                dome_model=self.dome_model,
+                glass_temperature_model=SimpleNamespace(median_temperature=0.0),
+                weather_model=self.weather_model,
+                indoor_ess_index=112,
+                ess_timeout=20,
+                glycol_setpoint_delta=-2,
+                heater_setpoint_delta=-1,
+                top_end_setpoint_delta=-1,
+                m1m3_setpoint_cadence=10,
+                setpoint_deadband_heating=0,
+                setpoint_deadband_cooling=0,
+                maximum_heating_rate=100,
+                slow_cooling_rate=1,
+                fast_cooling_rate=10,
+                features_to_disable=[],
+            )
+
+            fan_minimum = int(0.1 * eas.tma_model.MIN_FAN_RPM)
+            fan_maximum = int(0.1 * eas.tma_model.MAX_FAN_RPM)
+
+            # No difference between glass and setpoint (with offset):
+            #    * fan at minimum RPM (700)
+            #    * glycol delta at minimum (-1)
+            await tma_model.set_fan_speed(m1m3ts_remote=mtm1m3ts_remote, setpoint=1.0)
+            self.assertEqual(mock_m1m3ts.fan_rpm, [fan_minimum] * 96)
+            self.assertEqual(
+                tma_model.glycol_setpoint_delta, eas.tma_model.OFFSET_AT_MIN_RPM
+            )
+
+            # Difference of +1°C between glass and setpoint (with offset):
+            # (warming up the glass)
+            #    * fan at maximum RPM (2500)
+            #    * glycol delta at minimum (-1)
+            await tma_model.set_fan_speed(m1m3ts_remote=mtm1m3ts_remote, setpoint=2.0)
+            self.assertEqual(mock_m1m3ts.fan_rpm, [fan_maximum] * 96)
+            self.assertEqual(
+                tma_model.glycol_setpoint_delta, eas.tma_model.OFFSET_AT_MIN_RPM
+            )
+
+            # Difference of -1°C between glass and setpoint (with offset):
+            # (cooling the glass)
+            #    * fan at maximum RPM (2500)
+            #    * glycol delta at maximum (-5)
+            await tma_model.set_fan_speed(m1m3ts_remote=mtm1m3ts_remote, setpoint=0.0)
+            self.assertEqual(mock_m1m3ts.fan_rpm, [fan_maximum] * 96)
+            self.assertEqual(
+                tma_model.glycol_setpoint_delta, eas.tma_model.OFFSET_AT_MAX_RPM
+            )
+
+    def basic_make_csc(
+        self,
+        initial_state: salobj.State | int | None,
+        config_dir: str,
+        simulation_mode: int,
+    ) -> salobj.BaseCsc:
+        """Make and return a CSC.
+
+        Parameters
+        ----------
+        initial_state : `lsst.ts.salobj.State` or `int`
+            The initial state of the CSC.
+        config_dir : `str` or `pathlib.Path` or `None`
+            Directory of configuration files, or None for the standard
+            configuration directory (obtained from
+            `ConfigureCsc._get_default_config_dir`).
+        simulation_mode : `int`
+            Simulation mode.
+        kwargs : `dict`
+            Extra keyword arguments, if needed.
+        """
+        raise NotImplementedError()
