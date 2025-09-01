@@ -109,8 +109,7 @@ class WeatherModel:
         for days_ago in range(10):
             # Get time of twilight of interest.
             of_date -= 86400 * u.s
-            if days_ago == 0:
-                continue
+
             twilight_time = self.diurnal_timer.get_twilight_time(of_date)
 
             time_series = await efd_client.select_time_series(
