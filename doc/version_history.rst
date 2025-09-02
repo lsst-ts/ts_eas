@@ -1,3 +1,20 @@
+v0.9.0 (2025-09-01)
+===================
+
+New Features
+------------
+
+- Added HVAC setpoint control for nighttime. (`OSW-656 <https://rubinobs.atlassian.net//browse/OSW-656>`_)
+- Added control of the M1M3TS fans and dynamic glycol setpoint offset. (`OSW-820 <https://rubinobs.atlassian.net//browse/OSW-820>`_)
+- Rely on SAL to get the previous MTM1M3TS setpoint. (`OSW-878 <https://rubinobs.atlassian.net//browse/OSW-878>`_)
+
+
+Bug Fixes
+---------
+
+- Don't skip last night in searching for twilight temperature. (`OSW-878 <https://rubinobs.atlassian.net//browse/OSW-878>`_)
+
+
 v0.8.6 (2025-08-12)
 ===================
 
