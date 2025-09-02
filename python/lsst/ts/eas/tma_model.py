@@ -32,7 +32,6 @@ import asyncio
 import logging
 import math
 import time
-import yaml
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Callable
@@ -319,10 +318,12 @@ additionalProperties: false
         m1m3ts_remote: salobj.Remote,
         setpoint: float,
     ) -> None:
-        if "m1m3ts" in self.features_to_disable:
+        if "m1m3ts" not in self.features_to_disable:
             glycol_setpoint = setpoint + self.glycol_setpoint_delta
             heaters_setpoint = setpoint + self.heater_setpoint_delta
-            self.log.info(f"Setting MTM1MTS: {glycol_setpoint=}°C {heaters_setpoint=}°C")
+            self.log.info(
+                f"Setting MTM1MTS: {glycol_setpoint=}°C {heaters_setpoint=}°C"
+            )
             await m1m3ts_remote.cmd_applySetpoints.set_start(
                 glycolSetpoint=glycol_setpoint,
                 heatersSetpoint=heaters_setpoint,
@@ -530,9 +531,7 @@ additionalProperties: false
             use_slow_cooling_rate = (
                 (not self.dome_model.is_closed)
                 or (self.diurnal_timer.sun_altitude_at(current_time) < 0)
-                or (
-                    self.diurnal_timer.seconds_until_twilight(Time.now()) < 2 * 3600
-                )
+                or (self.diurnal_timer.seconds_until_twilight(Time.now()) < 2 * 3600)
             )
             cooling_rate = (
                 self.slow_cooling_rate
@@ -549,10 +548,7 @@ additionalProperties: false
             elif indoor_temperature > last_m1m3ts_setpoint:
                 # Warm the mirror if the setpoint is past the deadband
                 new_setpoint = indoor_temperature
-                if (
-                    new_setpoint - last_m1m3ts_setpoint
-                    > self.setpoint_deadband_heating
-                ):
+                if new_setpoint - last_m1m3ts_setpoint > self.setpoint_deadband_heating:
                     # Apply the setpoint, limited by maximum_heating_rate
                     maximum_heating_step = (
                         self.maximum_heating_rate * self.m1m3_setpoint_cadence / 3600.0
@@ -587,10 +583,7 @@ additionalProperties: false
             else:
                 # Cool the mirror if the setpoint is past the deadband
                 new_setpoint = indoor_temperature
-                if (
-                    last_m1m3ts_setpoint - new_setpoint
-                    > self.setpoint_deadband_cooling
-                ):
+                if last_m1m3ts_setpoint - new_setpoint > self.setpoint_deadband_cooling:
                     # Apply the setpoint, limited by maximum_cooling_rate
                     maximum_cooling_step = (
                         cooling_rate * self.m1m3_setpoint_cadence / 3600.0
