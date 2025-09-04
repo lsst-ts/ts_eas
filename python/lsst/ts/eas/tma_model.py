@@ -328,7 +328,10 @@ class TmaModel:
         fan_speed = min(fan_speed, MAX_FAN_RPM)
         fan_rpm = int(round(0.1 * fan_speed))
 
-        await m1m3ts_remote.cmd_heaterFanDemand.set_start(fanRPM=[fan_rpm] * 96)
+        await m1m3ts_remote.cmd_heaterFanDemand.set_start(
+            heaterPWM=[-1] * 96,
+            fanRPM=[fan_rpm] * 96,
+        )
 
         if glass_temperature > setpoint:
             # Adjust glycol offset based on fan speed:
