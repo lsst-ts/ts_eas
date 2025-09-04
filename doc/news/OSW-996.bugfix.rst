@@ -1,1 +1,0 @@
-Added headerPWM argument to the heaterFanDemand command.

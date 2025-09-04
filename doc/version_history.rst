@@ -1,3 +1,12 @@
+v0.9.1 (2025-09-04)
+===================
+
+Bug Fixes
+---------
+
+- Added headerPWM argument to the heaterFanDemand command. (`OSW-996 <https://rubinobs.atlassian.net//browse/OSW-996>`_)
+
+
 v0.9.0 (2025-09-01)
 ===================
 
