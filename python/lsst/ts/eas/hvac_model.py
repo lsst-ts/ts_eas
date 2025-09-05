@@ -47,7 +47,7 @@ class HvacModel:
     log : `~logging.Logger`
         A logger for log messages.
     diurnal_timer : `DiurnalTimer`
-        A timer that signals at noon and at the end of evening twilight.
+        A timer that signals at noon, sunrise, and at the end of twilight.
     dome_model : `DomeModel`
         A model representing the dome state.
     weather_model : `WeatherModel`
@@ -124,7 +124,7 @@ class HvacModel:
             if "room_setpoint" not in self.features_to_disable:
                 tasks.extend(
                     [
-                        self.wait_for_noon(hvac_remote=hvac_remote),
+                        self.wait_for_sunrise(hvac_remote=hvac_remote),
                         self.apply_setpoint_at_night(hvac_remote=hvac_remote),
                     ]
                 )
@@ -211,10 +211,10 @@ class HvacModel:
 
             await asyncio.sleep(HVAC_SLEEP_TIME)
 
-    async def wait_for_noon(self, *, hvac_remote: salobj.Remote) -> None:
-        """Waits for noon and then sets the room temperature.
+    async def wait_for_sunrise(self, *, hvac_remote: salobj.Remote) -> None:
+        """Waits for sunrise and then sets the room temperature.
 
-        Waits for the timer to signal noon, and then obtains the
+        Waits for the timer to signal sunrise, and then obtains the
         temperature that was reported last night at the end
         of twilight, and then applies that temperature as at AHU
         setpoint.
@@ -225,10 +225,10 @@ class HvacModel:
             A SALobj remote representing the HVAC.
         """
         while self.diurnal_timer.is_running:
-            async with self.diurnal_timer.noon_condition:
+            async with self.diurnal_timer.sunrise_condition:
                 self.monitor_start_event.set()
 
-                await self.diurnal_timer.noon_condition.wait()
+                await self.diurnal_timer.sunrise_condition.wait()
                 last_twilight_temperature = (
                     await self.weather_model.get_last_twilight_temperature()
                 )

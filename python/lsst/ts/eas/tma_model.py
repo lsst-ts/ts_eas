@@ -68,8 +68,8 @@ class TmaModel:
     log : `~logging.Logger`
         A logger for log messages.
     diurnal_timer : `DiurnalTimer`
-        A timer that signals every day at noon and at the end of evening
-        twilight.
+        A timer that signals every day at noon, at sunrise, and at the
+        end of evening twilight.
     weather_model : `WeatherModel`
         A model for the outdoor weather station, which records the last
         twilight temperature observed while the dome was opened.
@@ -234,7 +234,7 @@ class TmaModel:
                         get_last_setpoint=get_last_setpoint,
                         future=ready_futures[0],
                     ),
-                    self.wait_for_noon(
+                    self.wait_for_sunrise(
                         m1m3ts_remote=m1m3ts_remote,
                         mtmount_remote=mtmount_remote,
                         future=ready_futures[1],
@@ -624,19 +624,19 @@ class TmaModel:
                         setpoint=average_temperature,
                     )
 
-    async def wait_for_noon(
+    async def wait_for_sunrise(
         self,
         *,
         m1m3ts_remote: salobj.Remote,
         mtmount_remote: salobj.Remote,
         future: asyncio.Future,
     ) -> None:
-        """Waits for noon and then sets the room temperature.
+        """Waits for sunrise and then sets the room temperature.
 
-        Waits for the timer to signal noon, and then obtains the
+        Waits for the timer to signal sunrise, and then obtains the
         temperature that was reported last night at the end
         of twilight, and then applies that temperature as the
-        M1M3TS for the afternoon.
+        M1M3TS for the day.
 
         Parameters
         ----------
@@ -646,11 +646,11 @@ class TmaModel:
             A SALobj remote representing the MTMount controller.
         """
         while self.diurnal_timer.is_running:
-            async with self.diurnal_timer.noon_condition:
+            async with self.diurnal_timer.sunrise_condition:
                 if not future.done():
                     future.set_result(None)
 
-                await self.diurnal_timer.noon_condition.wait()
+                await self.diurnal_timer.sunrise_condition.wait()
                 last_twilight_temperature = (
                     await self.weather_model.get_last_twilight_temperature()
                 )
@@ -659,7 +659,7 @@ class TmaModel:
                     and last_twilight_temperature is not None
                 ):
                     self.log.info(
-                        "Noon M1M3TS and top end is set based on twilight temperature: "
+                        "Sunrise M1M3TS and top end is set based on twilight temperature: "
                         f"{last_twilight_temperature:.2f}°C"
                     )
                     await self.apply_setpoints(
