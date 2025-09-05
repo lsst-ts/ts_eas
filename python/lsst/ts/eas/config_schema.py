@@ -29,7 +29,7 @@ CONFIG_SCHEMA = yaml.safe_load(
     $id: https://github.com/lsst-ts/ts_eas/blob/main/python/lsst/ts/eas/config_schema.py
     # title must end with one or more spaces followed by the schema version, which must begin with "v"
     title: EAS v9
-    description: Schema for EAS configuration files
+    description: Schema for EAS configuration files.
     type: object
     properties:
       weather:
@@ -42,14 +42,28 @@ CONFIG_SCHEMA = yaml.safe_load(
         description: TMA configuration items.
         type: object
       features_to_disable:
-        description: List of CSC control points to disable
+        description: >-
+          List of EAS functionalities to disable. Options are:
+            * `room_setpoint`: HVAC setpoints will not be applied.
+            * `ahu`: HVAC AHUs will not be enabled / disabled.
+            * `vec04`: VEC-04 exhaust fan will not be enabled / disabled.
+            * `fanspeed`: MTM1M3TS fans will not be controlled.
+            * `m1m3ts`: MTM1M3TS setpoints will not be applied.
+            * `require_dome_open`: functionality will operate even when the dome is closed.
         type: array
         items:
           type: string
+          enum:
+            - room_setpoint
+            - ahu
+            - vec04
+            - fanspeed
+            - m1m3ts
+            - require_dome_open
       twilight_definition:
         description: >
           Definition of twilight. Can be a number (in degrees) between -90 and 0, corresponding
-          to sun elevation, or one of the strings: "civil", "nautical", "astronomical"
+          to sun elevation, or one of the strings: "civil", "nautical", "astronomical".
         oneOf:
           - type: number
             minimum: -90

@@ -207,30 +207,43 @@ description: Schema for TMA EAS configuration.
 type: object
 properties:
   glycol_setpoint_delta:
+    description: Difference (°C) between the ambient temperature and M1M3TS glycol setpoint.
     type: number
     default: -2
   heater_setpoint_delta:
+    description: Difference (°C) between the ambient temperature and M1M3TS heater setpoint.
     type: number
     default: -1
   top_end_setpoint_delta:
+    description: Difference (°C) between the ambient temperature and MTMount thermal setpoint.
     type: number
     default: -1
   m1m3_setpoint_cadence:
+    description: Time (s) between successive assessments of the TMA setpoint.
     type: number
     default: 300
   setpoint_deadband_heating:
+    description: Allowed upward deviation (°C) of MTM1M3TS setpoint before it is re-applied.
     type: number
     default: 0.1
   setpoint_deadband_cooling:
+    description: Allowed downward deviation (°C) of MTM1M3TS setpoint before it is re-applied.
     type: number
     default: 0.1
   maximum_heating_rate:
+    description: Maximum allowed rate (°C/hour) at which the MTM1M3 setpoint is allowed to increase.
     type: number
     default: 1.0
   slow_cooling_rate:
+    description: >-
+        Maximum allowed rate (°C/hour) at which the MTM1M3 setpoint is allowed to decrease
+        while observing.
     type: number
     default: 1.0
   fast_cooling_rate:
+    description: >-
+        Maximum allowed rate (°C/hour) at which the MTM1M3 setpoint is allowed to decrease
+        while observing.
     type: number
     default: 10.0
 required:

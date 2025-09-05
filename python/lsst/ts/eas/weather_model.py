@@ -125,18 +125,25 @@ description: Schema for EAS weather configuration.
 type: object
 properties:
   efd_name:
+    description: The name of the EFD deployment to use.
     type: string
     default: test
   ess_index:
+    description: The SAL index to use for outdoor weather information.
     type: integer
     default: 301
   indoor_ess_index:
+    description: The SAL index to use for indoor weather information.
     type: integer
     default: 112
   wind_average_window:
+    description: Time window (s) of past windspeed telemetry to use in calculating an average.
     type: number
     default: 1800
   wind_minimum_window:
+    description: >-
+      Minimum required baseline time (s) of past windspeed data needed to calculate a reliable
+      average. If this baseline is not available, the VEC-04 fan will be turned off.
     type: number
     default: 600
 required:

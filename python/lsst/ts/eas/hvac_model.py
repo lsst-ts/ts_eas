@@ -152,13 +152,13 @@ properties:
   wind_threshold:
     type: number
     default: 10
-    description: Windspeed limit for the VEC-04 fan. (m/s)
+    description: Windspeed limit for the VEC-04 fan (m/s).
   vec04_hold_time:
     type: number
     default: 300
     description: >-
       Minimum time to wait before changing the state of the VEC-04 fan. This
-      value is ignored if the dome is opened or closed. (s)
+      value is ignored if the dome is opened or closed (s).
   glycol_band_low:
     type: number
     default: -10
