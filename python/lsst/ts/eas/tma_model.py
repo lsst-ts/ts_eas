@@ -521,7 +521,7 @@ class TmaModel:
 
             while True:
                 if "require_dome_open" not in self.features_to_disable:
-                    if self.dome_model.is_closed:
+                    if self.dome_model.is_closed is not False:
                         event = asyncio.Event()
                         self.dome_model.on_open.append(event)
                         await event.wait()
