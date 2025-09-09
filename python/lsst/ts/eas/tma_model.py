@@ -53,7 +53,7 @@ DORMANT_TIME = 100  # Time to wait while sleeping, seconds
 MIN_FAN_RPM = 700  # Minimum allowed M1M3TS fan speed
 MAX_FAN_RPM = 2000  # Maximum allowed fan speed
 OFFSET_AT_MIN_RPM = -1.0  # at 700 rpm
-OFFSET_AT_MAX_RPM = -5.0  # at 2000 rpm
+OFFSET_AT_MAX_RPM = -4.0  # at 2000 rpm
 FAN_SCALE_DT = 1.0  # Temperature difference at which we command MAX_RPM
 
 MAX_TEMPERATURE_FAILURES = 10
@@ -407,9 +407,9 @@ additionalProperties: false
             )
             glycol_offset = glycol_offset_slope * (fan_speed - MIN_FAN_RPM)
             glycol_offset += OFFSET_AT_MIN_RPM
-            self.glycol_setpoint_delta = glycol_offset
+            self.glycol_setpoint_delta = self.heater_setpoint_delta + glycol_offset
         else:
-            self.glycol_setpoint_delta = OFFSET_AT_MIN_RPM
+            self.glycol_setpoint_delta = self.heater_setpoint_delta + OFFSET_AT_MIN_RPM
 
         self.m1m3_setpoints_are_stale = True
 
