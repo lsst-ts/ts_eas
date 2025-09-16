@@ -66,8 +66,8 @@ CONFIG_SCHEMA = yaml.safe_load(
           to sun elevation, or one of the strings: "civil", "nautical", "astronomical".
         oneOf:
           - type: number
-            minimum: -90
-            maximum: 0
+            minimum: -90.0
+            maximum: 0.0
           - type: string
             enum: ["civil", "nautical", "astronomical"]
 

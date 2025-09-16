@@ -36,6 +36,19 @@ from lsst.ts import salobj, utils
 from .diurnal_timer import DiurnalTimer
 
 SAL_TIMEOUT = 60  # SAL timeout time. (seconds)
+TEMPERATURE_CUTOFF_TIME = (
+    5 * 60
+)  # Maximum age of temperature data to continue. (seconds)
+MAX_TEMPERATURE_SAMPLES = 20  # The maximum number of temperature samples to retain.
+
+NIGHT_SEARCH_WINDOW = 18 * u.hour
+DAY_SEARCH_WINDOW = 25 * u.hour
+
+DAY = 86400 * u.s
+
+DAYS_TO_SEARCH_FOR_TWILIGHT_TEMPERATURE = 10
+
+TWILIGHT_SAMPLE_WINDOW = 1 * u.min
 
 
 class WeatherModel:
@@ -49,15 +62,15 @@ class WeatherModel:
         A logger for log messages.
     diurnal_timer : `DiurnalTimer`
         A timekeeping class to track day/night, twilight time, etc.
-    efd_name : str
+    efd_name : `str`
         The EFD instance name to use for historical queries.
-    ess_index : int
+    ess_index : `int`
         The SAL index for the outdoor weather ESS.
-    indoor_ess_index : int
+    indoor_ess_index : `int`
         The SAL index for the indoor conditions ESS.
-    wind_average_window : float
+    wind_average_window : `float`
         Time over which to average windspeed for threshold determination. (s)
-    wind_minimum_window : float
+    wind_minimum_window : `float`
         Minimum amount of time to collect wind data before acting on it. (s)
     """
 
@@ -68,10 +81,10 @@ class WeatherModel:
         log: logging.Logger,
         diurnal_timer: DiurnalTimer,
         efd_name: str,
-        ess_index: int = 301,
-        indoor_ess_index: int = 112,
-        wind_average_window: float = 30 * 60,
-        wind_minimum_window: float = 10 * 60,
+        ess_index: int,
+        indoor_ess_index: int,
+        wind_average_window: float,
+        wind_minimum_window: float,
     ) -> None:
         self.domain = domain
         self.log = log
@@ -90,10 +103,14 @@ class WeatherModel:
         self.wind_history: deque = deque()
 
         # A deque containing tuples of timestamp, temperature
-        self.temperature_history: deque[tuple[float, float]] = deque(maxlen=20)
+        self.temperature_history: deque[tuple[float, float]] = deque(
+            maxlen=MAX_TEMPERATURE_SAMPLES
+        )
 
         # A deque containing tuples of timestamp, temperature for indoor ESS
-        self.indoor_temperature_history: deque[tuple[float, float]] = deque(maxlen=20)
+        self.indoor_temperature_history: deque[tuple[float, float]] = deque(
+            maxlen=MAX_TEMPERATURE_SAMPLES
+        )
 
         # The last observed temperature at the end of twilight
         self.last_twilight_temperature: float | None = None
@@ -139,13 +156,13 @@ properties:
   wind_average_window:
     description: Time window (s) of past windspeed telemetry to use in calculating an average.
     type: number
-    default: 1800
+    default: 1800.0
   wind_minimum_window:
     description: >-
       Minimum required baseline time (s) of past windspeed data needed to calculate a reliable
       average. If this baseline is not available, the VEC-04 fan will be turned off.
     type: number
-    default: 600
+    default: 600.0
 required:
   - efd_name
   - ess_index
@@ -159,10 +176,10 @@ additionalProperties: false
     async def initialize_nightly_minimum(self) -> None:
         """Compute and store the nightly minimum temperature.
 
-        Determines the relevant night window (current or previous) using
-        the diurnal timer, queries the EFD for ESS temperature data within
-        that window, and saves the minimum value to
-        `self.nightly_minimum_temperature`. Also updates
+        Determine the relevant night window (current or previous) using
+        the diurnal timer, query the EFD for ESS temperature data within
+        that window, and save the minimum value to
+        `self.nightly_minimum_temperature`. Also update
         `self.need_to_reset_temperature` depending on whether it is
         currently day or night. This function is used for initialization
         when the CSC starts, so that it has the needed data without having
@@ -177,9 +194,9 @@ additionalProperties: false
         # Find the time window of the current night (if it is night)
         # or the previous night (if it is day)
         if it_is_night:
-            time_window_begin = time_now - 18 * u.hour
+            time_window_begin = time_now - NIGHT_SEARCH_WINDOW
         else:
-            time_window_begin = time_now - 25 * u.hour
+            time_window_begin = time_now - DAY_SEARCH_WINDOW
 
         time_window_begin = self.diurnal_timer.get_twilight_time(
             after=time_window_begin
@@ -205,7 +222,7 @@ additionalProperties: false
         )
         self.nightly_maximum_indoor_dew_point = time_series["dewPointItem"].max()
 
-        self.log.info(
+        self.log.debug(
             f"Found nightly minimum temperature was {self.nightly_minimum_temperature}°C, "
             f"maximum dew point was was {self.nightly_maximum_indoor_dew_point}°C "
             f"for window {time_window_begin.isot} to {time_window_end.isot}"
@@ -215,12 +232,14 @@ additionalProperties: false
         """Retrieve the most recent twilight temperature from the EFD.
 
         This method searches for the temperature at the twilight time of
-        interest, going back up to 10 days from the current time. It queries
-        the EFD for a one-minute interval starting at the twilight time for
-        each day until a valid median temperature is found. The result is
-        cached in `self.last_twilight_temperature` for future calls.
+        interest, going back up to DAYS_TO_SEARCH_FOR_TWILIGHT_TEMPERATURE
+        days from the current time. It queries the EFD for a one-minute
+        interval starting at the twilight time for each day until a valid
+        median temperature is found. The result is cached in
+        `self.last_twilight_temperature` for future calls.
 
-        If no valid data is found within the last 10 days, returns None.
+        If no valid data is found within the last
+        DAYS_TO_SEARCH_FOR_TWILIGHT_TEMPERATURE days, returns None.
 
         Returns
         -------
@@ -233,9 +252,9 @@ additionalProperties: false
 
         of_date = Time.now()
         efd_client = lsst_efd_client.EfdClient(self.efd_name)
-        for days_ago in range(10):
+        for days_ago in range(DAYS_TO_SEARCH_FOR_TWILIGHT_TEMPERATURE):
             # Get time of twilight of interest.
-            of_date -= 86400 * u.s
+            of_date -= DAY
 
             twilight_time = self.diurnal_timer.get_twilight_time(of_date)
 
@@ -243,7 +262,7 @@ additionalProperties: false
                 "lsst.sal.ESS.temperature",
                 ["temperatureItem0"],
                 twilight_time,
-                twilight_time + 60 * u.s,
+                twilight_time + TWILIGHT_SAMPLE_WINDOW,
                 index=self.ess_index,
             )
             if len(time_series) == 0:
@@ -390,9 +409,9 @@ additionalProperties: false
         Returns
         -------
         float
-            The average of the last 10 temperature samples from
-            the ESS, or NaN if there are no temperature samples
-            in the last 5 minutes.
+            The average of the last MAX_TEMPERATURE_SAMPLES temperature
+            samples from the ESS, or NaN if there are no temperature samples
+            in the last TEMPERATURE_CUTOFF_TIME seconds.
         """
         return self.calculate_current_temperature(self.temperature_history)
 
@@ -403,9 +422,9 @@ additionalProperties: false
         Returns
         -------
         float
-            The average of the last 10 temperature samples from
-            the ESS, or NaN if there are no temperature samples
-            in the last 5 minutes.
+            The average of the last MAX_TEMPERATURE_SAMPLES temperature
+            samples from the ESS, or NaN if there are no temperature samples
+            in the last TEMPERATURE_CUTOFF_TIME minutes.
         """
         return self.calculate_current_temperature(self.indoor_temperature_history)
 
@@ -427,11 +446,11 @@ additionalProperties: false
         Returns
         -------
         float
-            The average of the last 10 temperature samples from
-            the ESS, or NaN if there are no temperature samples
-            in the last 5 minutes.
+            The average of the last MAX_TEMPERATURE_SAMPLES temperature samples
+            from the ESS, or NaN if there are no temperature samples in the
+            last 5 minutes.
         """
-        cutoff = utils.current_tai() - 5 * 60
+        cutoff = utils.current_tai() - TEMPERATURE_CUTOFF_TIME
         recent_samples = [
             temperature for temperature, time in temperature_history if time >= cutoff
         ]

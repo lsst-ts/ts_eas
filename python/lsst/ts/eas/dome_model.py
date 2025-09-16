@@ -28,12 +28,13 @@ from lsst.ts import salobj, utils
 
 DORMANT_TIME = 300  # Time to wait while sleeping, seconds
 MAX_TELEMETRY_AGE = 300  # Time at which apertureShutter telemetry expires, seconds
+DOME_OPEN_THRESHOLD = 50  # Dome open percentage at which the dome is considered "open"
 
 
 class DomeModel:
     """A model for MTDome.
 
-    Tracks whether and when the dome has been opened.
+    Track whether and when the dome has been opened.
 
     Parameters
     ---------
@@ -95,7 +96,7 @@ class DomeModel:
 
     @property
     def is_closed(self) -> bool | None:
-        """Returns true if the dome is currently closed.
+        """Return true if the dome is currently closed.
 
         If the current state of the dome is unknown, None is returned.
         """
@@ -108,6 +109,6 @@ class DomeModel:
             return None
 
         return (
-            self.aperture_shutter_telemetry.positionActual[0] < 50
-            and self.aperture_shutter_telemetry.positionActual[1] < 50
+            self.aperture_shutter_telemetry.positionActual[0] < DOME_OPEN_THRESHOLD
+            and self.aperture_shutter_telemetry.positionActual[1] < DOME_OPEN_THRESHOLD
         )

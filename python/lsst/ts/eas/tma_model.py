@@ -56,6 +56,13 @@ OFFSET_AT_MIN_RPM = -1.0  # at 700 rpm
 OFFSET_AT_MAX_RPM = -5.0  # at 2500 rpm
 FAN_SCALE_DT = 1.0  # Temperature difference at which we command MAX_RPM
 
+MAX_TEMPERATURE_FAILURES = 10
+
+SECONDS_PER_HOUR = 3600.0  # Number of seconds in one hour
+SLOW_COOLING_START_TIME = (
+    2  # Time (in hours) before twilight to begin using the slow cooling rate.
+)
+
 LastSetpointGetter = Callable[[], float | None]
 
 
@@ -74,39 +81,39 @@ class TmaModel:
     weather_model : `WeatherModel`
         A model for the outdoor weather station, which records the last
         twilight temperature observed while the dome was opened.
-    glycol_setpoint_delta : float
+    glycol_setpoint_delta : `float`
         The difference between the twilight ambient temperature and the
         setpoint to apply for the glycol, e.g., -2 if the glycol should
         be two degrees cooler than ambient.
-    heater_setpoint_delta : float
+    heater_setpoint_delta : `float`
         The difference between the twilight ambient temperature and the
         setpoint to apply for the FCU heaters, e.g., -1 if the FCU heaters
         should be one degree cooler than ambient.
-    top_end_setpoint_delta : float
+    top_end_setpoint_delta : `float`
         The difference between the indoor (ESS:112) temperature and the
         setpoint to apply for the top end, via MTMount.setThermal.
     m1m3_setpoint_cadence : float
         The cadence at which applySetpoints commands should be sent to
         MTM1M3TS (seconds).
-    setpoint_deadband_heating : float
+    setpoint_deadband_heating : `float`
         Deadband for M1M3TS heating. If the the new setpoint exceeds the
         previous setpoint by less than this amount, no new command is sent.
         (°C)
-    setpoint_deadband_cooling : float
+    setpoint_deadband_cooling : `float`
         Deadband for M1M3TS cooling. If the new setpoint is lower than the
         previous setpoint by less than this amount, no new command is sent.
         (°C)
-    maximum_heating_rate : float
+    maximum_heating_rate : `float`
         Maximum allowed rate of increase in the M1M3TS setpoint temperature.
         Limits how quickly the setpoint can rise, in degrees Celsius per hour.
         (°C/hr)
-    slow_cooling_rate : float
+    slow_cooling_rate : `float`
         Cooling rate to be used shortly before and during the night.
         Limits how quickly the setpoint can fall, in degrees Celsius per hour.
-    fast_cooling_rate : float
+    fast_cooling_rate : `float`
         Cooling rate to be used during the day. Limits how quickly the setpoint
         can fall, in degrees Celsius per hour.
-    features_to_disable : list[str]
+    features_to_disable : `list[str]`
         A list of features that should be disabled. The following strings can
         be used:
          * m1m3ts
@@ -132,7 +139,7 @@ class TmaModel:
         maximum_heating_rate: float,
         slow_cooling_rate: float,
         fast_cooling_rate: float,
-        features_to_disable: list[str] = [],
+        features_to_disable: list[str],
     ) -> None:
         self.domain = domain
         self.log = log
@@ -167,7 +174,7 @@ class TmaModel:
     async def last_setpoint_getter(
         self, mtm1m3ts_remote: salobj.Remote
     ) -> AsyncIterator[LastSetpointGetter]:
-        """Handles context for a function getting the last MTM1M3TS setpoint.
+        """Handle context for a function getting the last MTM1M3TS setpoint.
 
         Parameters
         ----------
@@ -209,19 +216,19 @@ properties:
   glycol_setpoint_delta:
     description: Difference (°C) between the ambient temperature and M1M3TS glycol setpoint.
     type: number
-    default: -2
+    default: -2.0
   heater_setpoint_delta:
     description: Difference (°C) between the ambient temperature and M1M3TS heater setpoint.
     type: number
-    default: -1
+    default: -1.0
   top_end_setpoint_delta:
     description: Difference (°C) between the ambient temperature and MTMount thermal setpoint.
     type: number
-    default: -1
+    default: -1.0
   m1m3_setpoint_cadence:
     description: Time (s) between successive assessments of the TMA setpoint.
     type: number
-    default: 300
+    default: 300.0
   setpoint_deadband_heating:
     description: Allowed upward deviation (°C) of MTM1M3TS setpoint before it is re-applied.
     type: number
@@ -366,7 +373,7 @@ additionalProperties: false
         ----------
         m1m3ts_remote : `~lsst.ts.salobj.Remote`
             SAL remote for the M1M3 thermal system CSC.
-        setpoint : float
+        setpoint : `float`
             Demand temperature (°C) before applying any offsets.
         """
         glass_temperature = self.glass_temperature_model.median_temperature
@@ -409,7 +416,7 @@ additionalProperties: false
     async def start_top_end_task(
         self, mtmount_remote: salobj.Remote, setpoint: float
     ) -> None:
-        """Schedules self.apply_top_end_setpoint for asynchronous execution.
+        """Schedule self.apply_top_end_setpoint for asynchronous execution.
 
         This method handles canceling an outstanding call if needed and will
         raise if the previous call failed. If the previous call was still
@@ -508,12 +515,12 @@ additionalProperties: false
                     f"Failed to collect an indoor temperature measurement! ({indoor_temperature=})"
                 )
                 n_failures += 1
-                if n_failures == 10:
+                if n_failures == MAX_TEMPERATURE_FAILURES:
                     self.log.error(
                         "No temperature samples were collected. CSC will fault."
                     )
                     raise RuntimeError("No temperature samples were collected.")
-                await asyncio.sleep(0.25 * self.m1m3_setpoint_cadence)
+                await asyncio.sleep(self.m1m3_setpoint_cadence)
                 continue
             else:
                 n_failures = 0
@@ -544,7 +551,10 @@ additionalProperties: false
             use_slow_cooling_rate = (
                 (not self.dome_model.is_closed)
                 or (self.diurnal_timer.sun_altitude_at(current_time) < 0)
-                or (self.diurnal_timer.seconds_until_twilight(Time.now()) < 2 * 3600)
+                or (
+                    self.diurnal_timer.seconds_until_twilight(Time.now())
+                    < SLOW_COOLING_START_TIME * SECONDS_PER_HOUR
+                )
             )
             cooling_rate = (
                 self.slow_cooling_rate
@@ -564,7 +574,9 @@ additionalProperties: false
                 if new_setpoint - last_m1m3ts_setpoint > self.setpoint_deadband_heating:
                     # Apply the setpoint, limited by maximum_heating_rate
                     maximum_heating_step = (
-                        self.maximum_heating_rate * self.m1m3_setpoint_cadence / 3600.0
+                        self.maximum_heating_rate
+                        * self.m1m3_setpoint_cadence
+                        / SECONDS_PER_HOUR
                     )
                     new_setpoint = min(
                         indoor_temperature,
@@ -583,7 +595,7 @@ additionalProperties: false
                     ):
                         # Apply the setpoint, limited by maximum_cooling_rate
                         maximum_cooling_step = (
-                            cooling_rate * self.m1m3_setpoint_cadence / 3600.0
+                            cooling_rate * self.m1m3_setpoint_cadence / SECONDS_PER_HOUR
                         )
                         new_setpoint = max(
                             indoor_temperature,
@@ -599,7 +611,7 @@ additionalProperties: false
                 if last_m1m3ts_setpoint - new_setpoint > self.setpoint_deadband_cooling:
                     # Apply the setpoint, limited by maximum_cooling_rate
                     maximum_cooling_step = (
-                        cooling_rate * self.m1m3_setpoint_cadence / 3600.0
+                        cooling_rate * self.m1m3_setpoint_cadence / SECONDS_PER_HOUR
                     )
                     new_setpoint = max(
                         indoor_temperature,
@@ -625,11 +637,11 @@ additionalProperties: false
         mtmount_remote: salobj.Remote,
         future: asyncio.Future,
     ) -> None:
-        """Waits for sunrise and then sets the room temperature.
+        """Wait for sunrise and then sets the room temperature.
 
-        Waits for the timer to signal sunrise, and then obtains the
+        Wait for the timer to signal sunrise, and then obtain the
         temperature that was reported last night at the end
-        of twilight, and then applies that temperature as the
+        of twilight, and then apply that temperature as the
         M1M3TS for the day.
 
         Parameters

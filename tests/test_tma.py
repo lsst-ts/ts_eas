@@ -263,32 +263,6 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         self.assertTrue(heater_setpoint is None)
         self.assertTrue(top_end_setpoint is None)
 
-    async def test_no_ess112(self) -> None:
-        """tma_model.monitor() should raise if ESS112 does not send data."""
-        indoor_temperature = None
-        glycol_setpoint_delta = -2
-        heater_setpoint_delta = -1
-        top_end_setpoint_delta = -1
-
-        with self.assertRaises(RuntimeError):
-            glycol_setpoint, heater_setpoint, top_end_setpoint, _ = (
-                await self.run_with_parameters(
-                    indoor_temperature=indoor_temperature,
-                    glycol_setpoint_delta=glycol_setpoint_delta,
-                    heater_setpoint_delta=heater_setpoint_delta,
-                    top_end_setpoint_delta=top_end_setpoint_delta,
-                    features_to_disable=[""],
-                )
-            )
-
-            self.assertTrue(glycol_setpoint is None)
-            self.assertTrue(heater_setpoint is None)
-            self.assertTrue(top_end_setpoint is None)
-
-            # Should not matter how long this sleep is because it should
-            # be interrupted by the RuntimeError.
-            await asyncio.sleep(60)
-
     async def test_fan_speed(self) -> None:
         """Compare behavior with specifications in OSW-820."""
         diurnal_timer = eas.diurnal_timer.DiurnalTimer()

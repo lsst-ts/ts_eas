@@ -59,13 +59,13 @@ class EasCsc(salobj.ConfigurableCsc):
 
     Parameters
     ----------
-    config_dir : str
+    config_dir : `str`
         The configuration directory
     initial_state : `~lsst.ts.salobj.State`
         The initial state of the CSC
-    simulation_mode : int
+    simulation_mode : `int`
         Simulation mode (1) or not (0)
-    override : str, optional
+    override : `str`, optional
         Override of settings if `initial_state` is `State.DISABLED`
         or `State.ENABLED`.
     """
@@ -114,7 +114,7 @@ class EasCsc(salobj.ConfigurableCsc):
             await self.shutdown_health_monitor()
 
     async def shutdown_health_monitor(self) -> None:
-        """Cancels the health monitor task and waits for completion."""
+        """Cancel the health monitor task and waits for completion."""
         tasks_to_cancel = self.subtasks
         self.subtasks = []
         tasks_to_cancel.append(self.health_monitor_task)
@@ -180,9 +180,9 @@ class EasCsc(salobj.ConfigurableCsc):
         )
 
     async def monitor_health(self) -> None:
-        """Manages the `monitor_dome_shutter` control loop.
+        """Manage the `monitor_dome_shutter` control loop.
 
-        Manages the `monitor_dome_shutter` control loop with backoff and
+        Manage the `monitor_dome_shutter` control loop with backoff and
         time-based failure reset, which is (hopefully) robust against
         disconnects of the remotes, as well as any other form of
         recoverable failure.

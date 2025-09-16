@@ -36,6 +36,7 @@ from .weather_model import WeatherModel
 
 HVAC_SLEEP_TIME = 60.0  # How often to check the HVAC state (seconds)
 STD_TIMEOUT = 5  # seconds
+N_CHILLERS = 2  # EAS controls two HVAC glycol chillers.
 
 
 class HvacModel:
@@ -53,30 +54,38 @@ class HvacModel:
         A model representing the dome state.
     weather_model : `WeatherModel`
         A model representing weather conditions.
-    setpoint_lower_limit : float
+    setpoint_lower_limit : `float`
         The minimum allowed setpoint for thermal control. If a lower setpoint
         than this is indicated from the ESS temperature readings, this setpoint
         will be used instead.
-    wind_threshold : float
+    wind_threshold : `float`
         Windspeed limit for the VEC-04 fan. (m/s)
-    vec04_hold_time : float
+    vec04_hold_time : `float`
         Minimum time to wait before changing the state of the VEC-04 fan. This
         value is ignored if the dome is opened or closed. (s)
-    glycol_band_low:
-        Lower bound of allowed glycol setpoint band relative to ambient (°C).
-    glycol_band_high:
-        Upper bound of allowed glycol setpoint band relative to ambient (°C).
-    glycol_average_offset:
+    glycol_band_low : `float`
+        The lower bound (more negative) of the allowed difference between the
+        average glycol setpoint and the ambient temperature (°C). This
+        represents how far below ambient the setpoint is permitted to drift
+        before being considered out of range. This number is expected (but not
+        required) to be negative.
+    glycol_band_high : `float`
+        Upper bound of allowed glycol setpoint band relative to ambient (°C),
+        corresponding to `glycol_band_low`. This number is expected (but not
+        required) to be negative.
+    glycol_average_offset : `float`
         Nominal average offset for glycol setpoints relative to ambient (°C).
-    glycol_dew_point_margin:
+        The average of the two glycol setpoints should differ from the
+        ambient temperature reported by the ESS by this amount.
+    glycol_dew_point_margin : `float`
         Safety margin (°C) added to the maximum dew point to avoid
         condensation.
-    glycol_setpoints_delta:
+    glycol_setpoints_delta : `float`
         Temperature difference (°C) between the two glycol chiller setpoints
         (chiller 1 warmer).
-    glycol_absolute_minimum:
+    glycol_absolute_minimum : `float`
         Absolute minimum setpoint (°C) allowed for the colder glycol chiller.
-    disable_features: list[str]
+    disable_features: `list[str]`
         A list of features that should be disabled. The following strings can
         be used:
          * vec04
@@ -93,16 +102,16 @@ class HvacModel:
         diurnal_timer: DiurnalTimer,
         dome_model: DomeModel,
         weather_model: WeatherModel,
-        setpoint_lower_limit: float = 6,
-        wind_threshold: float = 5,
-        vec04_hold_time: float = 5 * 60,
-        glycol_band_low: float = -10,
-        glycol_band_high: float = -5,
-        glycol_average_offset: float = -7.5,
-        glycol_dew_point_margin: float = 1.0,
-        glycol_setpoints_delta: float = 1.0,
-        glycol_absolute_minimum: float = -10.0,
-        features_to_disable: list[str] = [],
+        setpoint_lower_limit: float,
+        wind_threshold: float,
+        vec04_hold_time: float,
+        glycol_band_low: float,
+        glycol_band_high: float,
+        glycol_average_offset: float,
+        glycol_dew_point_margin: float,
+        glycol_setpoints_delta: float,
+        glycol_absolute_minimum: float,
+        features_to_disable: list[str],
     ) -> None:
         self.domain = domain
         self.log = log
@@ -144,28 +153,28 @@ type: object
 properties:
   setpoint_lower_limit:
     type: number
-    default: 6
+    default: 6.0
     description: >-
       The minimum allowed setpoint for thermal control. If a lower setpoint
       than this is indicated from the ESS temperature readings, this setpoint
       will be used instead.
   wind_threshold:
     type: number
-    default: 10
+    default: 10.0
     description: Windspeed limit for the VEC-04 fan (m/s).
   vec04_hold_time:
     type: number
-    default: 300
+    default: 300.0
     description: >-
       Minimum time to wait before changing the state of the VEC-04 fan. This
       value is ignored if the dome is opened or closed (s).
   glycol_band_low:
     type: number
-    default: -10
+    default: -10.0
     description: Lower bound of allowed glycol setpoint band relative to ambient (°C).
   glycol_band_high:
     type: number
-    default: -5
+    default: -5.0
     description: Upper bound of allowed glycol setpoint band relative to ambient (°C).
   glycol_average_offset:
     type: number
@@ -358,60 +367,58 @@ additionalProperties: false
     def compute_glycol_setpoints(
         self, ambient_temperature: float
     ) -> tuple[float, float]:
-        """Computes staggered glycol chiller setpoints.
+        """Compute staggered glycol chiller setpoints.
 
-        Computes staggered glycol chiller setpoints based on ambient
+        Compute staggered glycol chiller setpoints based on ambient
         temperature, configured band limits, dew point, and absolute
-        minimum constraints.
+        minimum constraint.
 
         The algorithm enforces:
-          * Average setpoint nominally `ambient - glycol_average_offset`.
-          * Clamped to the band
-            `[ambient - glycol_band_low, ambient - glycol_band_high]`.
-            Default values `glycol_band_low` of 5, `glycol_band_high` of 10.
+          * Average setpoint nominally `ambient + glycol_average_offset`
+            (float, with `glycol_average_offset` being negative).
           * Raised if necessary to exceed the nightly maximum indoor dew
-            point plus a safety margin (`dew_point_margin`).
-          * Split into two staggered setpoints (`setpoint1`, `setpoint2`)
-            separated by `glycol_setpoints_delta`, **with chiller 1 warmer**.
+            point plus a safety margin (`dew_point_margin`: `float`).
+          * Split into two staggered setpoints
+            (`setpoint1`: `float`, `setpoint2`: `float`)
+            separated by `glycol_setpoints_delta`: `float`, **with chiller 1
+            warmer**.
           * Absolute minimum enforced on the colder chiller
-            (`setpoint2 >= glycol_absolute_minimum`),
+            (`setpoint2` : `float` >= `glycol_absolute_minimum`: `float`),
             adjusting both setpoints to preserve the delta.
 
         Parameters
         ----------
-        ambient_temperature : float
+        ambient_temperature : `float`
             Ambient temperature in degrees Celsius. This value
             is used to determine the nominal target band for the glycol
             loop average.
 
         Returns
         -------
-        setpoint1 : float
+        setpoint1 : `float`
             Active setpoint for chiller 1 (°C), the warmer of the two.
-        setpoint2 : float
+        setpoint2 : `float`
             Active setpoint for chiller 2 (°C), the colder of the two.
         """
-        # Find the allowed range of the setpoints
-        band_low = ambient_temperature + self.glycol_band_low
-        band_high = ambient_temperature + self.glycol_band_high
-
         # Compute a target average setpoint
         target_average = ambient_temperature + self.glycol_average_offset
-        average = min(max(target_average, band_low), band_high)
 
         # Incorporate dew point into the calculation - setpoint
         # average should not be lower than the dew point (with margin)
         nightly_maximum_dew_point = self.weather_model.nightly_maximum_indoor_dew_point
         if nightly_maximum_dew_point is not None:
-            average = max(
-                average, nightly_maximum_dew_point + self.glycol_dew_point_margin
+            target_average = max(
+                target_average, nightly_maximum_dew_point + self.glycol_dew_point_margin
             )
 
-        # Break average and delta into individual setpoints
-        setpoint1 = average + 0.5 * self.glycol_setpoints_delta
-        setpoint2 = average - 0.5 * self.glycol_setpoints_delta
+        # Break average and delta into individual setpoints. The two
+        # setpoints should have the computed average and differ
+        # with each other by `glycol_setpoints_delta`.
+        setpoint1, setpoint2 = target_average, target_average
+        setpoint1 += self.glycol_setpoints_delta / N_CHILLERS
+        setpoint2 -= self.glycol_setpoints_delta / N_CHILLERS
 
-        # Enforce the absolute minimum temperature (-10°C)
+        # Enforce the absolute minimum temperature
         if setpoint2 < self.glycol_absolute_minimum:
             setpoint2 = self.glycol_absolute_minimum
             setpoint1 = setpoint2 + self.glycol_setpoints_delta
@@ -423,7 +430,7 @@ additionalProperties: false
 
         Parameters
         ----------
-        ambient_temperature : float
+        ambient_temperature : `float`
             Ambient temperature (°C)
 
         Returns
@@ -431,10 +438,16 @@ additionalProperties: false
         bool
             True if the current setpoints are acceptable, or False otherwise.
         """
+        # This test makes mypy happy:
         if self.glycol_setpoint1 is None or self.glycol_setpoint2 is None:
             return False
 
-        average_setpoint = 0.5 * (self.glycol_setpoint1 + self.glycol_setpoint2)
+        # Find the average of the two glycol setpoints.
+        average_setpoint = (self.glycol_setpoint1 + self.glycol_setpoint2) / N_CHILLERS
+
+        # The difference between the average and the current ambient
+        # reading must not fall below `glycol_band_low` or above
+        # `glycol_band_high`.
         return (
             self.glycol_band_low
             <= average_setpoint - ambient_temperature
@@ -489,14 +502,16 @@ additionalProperties: false
                         self.glycol_setpoint1 = glycol_setpoint1
                         self.glycol_setpoint2 = glycol_setpoint2
 
-                await hvac_remote.cmd_configChiller.set_start(
-                    device_id=DeviceId.chiller01P01,
-                    activeSetpoint=glycol_setpoint1,
-                )
-                await hvac_remote.cmd_configChiller.set_start(
-                    device_id=DeviceId.chiller02P01,
-                    activeSetpoint=glycol_setpoint2,
-                )
+                if self.glycol_setpoint1 is not None:
+                    await hvac_remote.cmd_configChiller.set_start(
+                        device_id=DeviceId.chiller01P01,
+                        activeSetpoint=self.glycol_setpoint1,
+                    )
+                if self.glycol_setpoint2 is not None:
+                    await hvac_remote.cmd_configChiller.set_start(
+                        device_id=DeviceId.chiller02P01,
+                        activeSetpoint=self.glycol_setpoint2,
+                    )
             except Exception:
                 self.log.exception("In HVAC glycol control loop")
 
@@ -505,10 +520,10 @@ additionalProperties: false
     async def adjust_glycol_chillers_at_noon(
         self, *, hvac_remote: salobj.Remote
     ) -> None:
-        """Waits for noon and then sets the glycol chillers.
+        """Wait for noon and then sets the glycol chillers.
 
-        Waits for the timer to signal noon, and then obtains the minimum
-        temperature that was reported last night, and then applies an
+        Wait for the timer to signal noon, and then obtain the minimum
+        temperature that was reported last night, and then apply an
         appropriate temperature as the glycol setpoint.
 
         Parameters
