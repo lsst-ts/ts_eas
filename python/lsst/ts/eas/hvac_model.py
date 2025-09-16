@@ -102,7 +102,7 @@ class HvacModel:
         self.features_to_disable = features_to_disable
 
     async def monitor(self) -> None:
-        """Monitors the dome status and windspeed to control the HVAC.
+        """Monitor the dome status and windspeed to control the HVAC.
 
         This monitor does the following:
          * If the dome is open, it turns on the four AHUs.
@@ -212,11 +212,11 @@ class HvacModel:
             await asyncio.sleep(HVAC_SLEEP_TIME)
 
     async def wait_for_sunrise(self, *, hvac_remote: salobj.Remote) -> None:
-        """Waits for sunrise and then sets the room temperature.
+        """Wait for sunrise and then set the room temperature.
 
-        Waits for the timer to signal sunrise, and then obtains the
+        Wait for the timer to signal sunrise, and then obtain the
         temperature that was reported last night at the end
-        of twilight, and then applies that temperature as at AHU
+        of twilight, and then apply that temperature as at AHU
         setpoint.
 
         Parameters
@@ -258,7 +258,7 @@ class HvacModel:
                             )
 
     async def apply_setpoint_at_night(self, *, hvac_remote: salobj.Remote) -> None:
-        """Controls the HVAC setpoint during the night.
+        """Control the HVAC setpoint during the night.
 
         At night time (defined by `DiurnalTimer.is_night`) the HVAC
         AHU setpoint should be applied based on the outside temperature,

@@ -202,9 +202,9 @@ class DiurnalTimer:
 
     @staticmethod
     def _seconds_until(target: Time, now: Time | None = None) -> float:
-        """Returns time from `now` until `target` in seconds.
+        """Return time from `now` until `target` in seconds.
 
-        If the target has already passed, zero is returned to avoid
+        If the target has already passed, return zero to avoid
         passing a negative value to `sleep`.
 
         Parameters
@@ -236,10 +236,10 @@ class DiurnalTimer:
         """
         Background loop to schedule and notify a diurnal event.
 
-        This coroutine repeatedly computes the next occurrence of an event
-        (e.g., noon, twilight, sunrise), waits until that time, and then
-        notifies all tasks waiting on the associated condition. The loop
-        continues until the timer is stopped or the task is cancelled.
+        Compute the next occurrence of an event (e.g., noon, twilight,
+        sunrise), wait until that time, and then notify all tasks waiting
+        on the associated condition. Continues the loop until the timer is
+        stopped or the task is cancelled.
 
         Parameters
         ----------
@@ -269,22 +269,22 @@ class DiurnalTimer:
                 condition.notify_all()
 
     def _next_noon(self) -> Time:
-        """Returns time of next noon."""
+        """Return time of next noon."""
         return get_local_noon_time()
 
     def _next_twilight(self) -> Time:
-        """Returns time of next end of evening twilight."""
+        """Return time of next end of evening twilight."""
         return get_crossing_time(self.sun_altitude, going_up=False)
 
     def _next_sunrise(self) -> Time:
-        """Returns time of next sunrise."""
+        """Return time of next sunrise."""
         return get_crossing_time(
             SOLAR_ELEVATION_AT_SUNSET,
             going_up=True,
         )
 
     async def start(self) -> None:
-        """Starts the timers and begins notifying for the conditions."""
+        """Start the timers and begin notifying for the conditions."""
         if self.is_running:
             return
 
@@ -326,7 +326,7 @@ class DiurnalTimer:
         )
 
     async def stop(self) -> None:
-        """Stops the timers and discontinues notifications."""
+        """Stop the timers and discontinue notifications."""
         if not self.is_running:
             return
         self.is_running = False
@@ -356,7 +356,7 @@ class DiurnalTimer:
             self.sunrise_condition.notify_all()
 
     def get_twilight_time(self, after: Time) -> Time:
-        """Returns the time of next end of twilight for the given time.
+        """Return the time of next end of twilight for the given time.
 
         Parameters
         ----------
@@ -367,7 +367,7 @@ class DiurnalTimer:
         return get_crossing_time(self.sun_altitude, going_up=False, search_from=after)
 
     def sun_altitude_at(self, t_utc: float) -> float:
-        """Returns the sun altitude in degrees at the specified time.
+        """Return the sun altitude in degrees at the specified time.
 
         Parameters
         ----------
@@ -384,7 +384,7 @@ class DiurnalTimer:
         return get_sun_altitude_deg(Time(t_utc, format="unix"))
 
     def seconds_until_twilight(self, time: Time) -> float:
-        """Returns the number of seconds remaining until twilight.
+        """Return the number of seconds remaining until twilight.
 
         Parameters
         ----------
@@ -408,7 +408,7 @@ class DiurnalTimer:
         return t
 
     def seconds_until_sunrise(self, time: Time) -> float:
-        """Returns the number of seconds remaining until sunrise.
+        """Return the number of seconds remaining until sunrise.
 
         Parameters
         ----------
