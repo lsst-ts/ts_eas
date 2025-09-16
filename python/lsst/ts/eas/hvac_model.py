@@ -47,7 +47,7 @@ class HvacModel:
     log : `~logging.Logger`
         A logger for log messages.
     diurnal_timer : `DiurnalTimer`
-        A timer that signals at noon and at the end of evening twilight.
+        A timer that signals at noon, sunrise, and at the end of twilight.
     dome_model : `DomeModel`
         A model representing the dome state.
     weather_model : `WeatherModel`
@@ -102,7 +102,7 @@ class HvacModel:
         self.features_to_disable = features_to_disable
 
     async def monitor(self) -> None:
-        """Monitors the dome status and windspeed to control the HVAC.
+        """Monitor the dome status and windspeed to control the HVAC.
 
         This monitor does the following:
          * If the dome is open, it turns on the four AHUs.
@@ -124,7 +124,7 @@ class HvacModel:
             if "room_setpoint" not in self.features_to_disable:
                 tasks.extend(
                     [
-                        self.wait_for_noon(hvac_remote=hvac_remote),
+                        self.wait_for_sunrise(hvac_remote=hvac_remote),
                         self.apply_setpoint_at_night(hvac_remote=hvac_remote),
                     ]
                 )
@@ -211,12 +211,12 @@ class HvacModel:
 
             await asyncio.sleep(HVAC_SLEEP_TIME)
 
-    async def wait_for_noon(self, *, hvac_remote: salobj.Remote) -> None:
-        """Waits for noon and then sets the room temperature.
+    async def wait_for_sunrise(self, *, hvac_remote: salobj.Remote) -> None:
+        """Wait for sunrise and then set the room temperature.
 
-        Waits for the timer to signal noon, and then obtains the
+        Wait for the timer to signal sunrise, and then obtain the
         temperature that was reported last night at the end
-        of twilight, and then applies that temperature as at AHU
+        of twilight, and then apply that temperature as at AHU
         setpoint.
 
         Parameters
@@ -225,10 +225,10 @@ class HvacModel:
             A SALobj remote representing the HVAC.
         """
         while self.diurnal_timer.is_running:
-            async with self.diurnal_timer.noon_condition:
+            async with self.diurnal_timer.sunrise_condition:
                 self.monitor_start_event.set()
 
-                await self.diurnal_timer.noon_condition.wait()
+                await self.diurnal_timer.sunrise_condition.wait()
                 last_twilight_temperature = (
                     await self.weather_model.get_last_twilight_temperature()
                 )
@@ -258,7 +258,7 @@ class HvacModel:
                             )
 
     async def apply_setpoint_at_night(self, *, hvac_remote: salobj.Remote) -> None:
-        """Controls the HVAC setpoint during the night.
+        """Control the HVAC setpoint during the night.
 
         At night time (defined by `DiurnalTimer.is_night`) the HVAC
         AHU setpoint should be applied based on the outside temperature,

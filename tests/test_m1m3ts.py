@@ -142,7 +142,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
     async def run_with_parameters(
         self,
         ess112_temperature: float | None,
-        signal_noon: bool = False,
+        signal_sunrise: bool = False,
         **model_args: typing.Any,
     ) -> tuple[float | None, float | None, float | None, list[float] | None]:
         self.diurnal_timer = eas.diurnal_timer.DiurnalTimer()
@@ -177,9 +177,9 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
 
             await asyncio.sleep(15)
 
-            if signal_noon:
-                async with self.diurnal_timer.noon_condition:
-                    self.diurnal_timer.noon_condition.notify_all()
+            if signal_sunrise:
+                async with self.diurnal_timer.sunrise_condition:
+                    self.diurnal_timer.sunrise_condition.notify_all()
                 await asyncio.sleep(1)
             else:
                 await asyncio.sleep(20)
@@ -201,7 +201,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             )
 
     async def test_m1m3ts_applysetpoints(self) -> None:
-        """M1M3TS.applySetpoint should be called at noon."""
+        """M1M3TS.applySetpoint should be called at sunrise."""
         ess112_temperature = 10
         glycol_setpoint_delta = -2
         heater_setpoint_delta = -1
@@ -213,7 +213,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 glycol_setpoint_delta=glycol_setpoint_delta,
                 heater_setpoint_delta=heater_setpoint_delta,
                 top_end_setpoint_delta=top_end_setpoint_delta,
-                signal_noon=True,
+                signal_sunrise=True,
                 features_to_disable=[],
             )
         )
