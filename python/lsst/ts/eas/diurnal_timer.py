@@ -46,11 +46,20 @@ OBSERVATORY_TIME_ZONE = ZoneInfo("America/Santiago")
 # Standard definition of sunrise / sunset with solar elevation -0.833 degrees.
 SOLAR_ELEVATION_AT_SUNSET = -0.833
 
+HOURS_PER_DAY = 24
+SECONDS_PER_HOUR = 3600
+
+CIVIL_TWILIGHT = -6.0
+NAUTICAL_TWILIGHT = -12.0
+ASTRONOMICAL_TWILIGHT = -18.0
+
+TIME_EPSILON = 1 * u.s  # A small increment of time
+
 
 def get_local_noon_time() -> Time:
-    """Returns the next local noon as an astropy.time.Time object.
+    """Return the next local noon as an astropy.time.Time object.
 
-    If the current time is past local noon today, returns noon tomorrow.
+    If the current time is past local noon today, return noon tomorrow.
     The difference from noon to noon is 24 hours except when there's
     a time change because of daylight saving time.
 
@@ -61,7 +70,7 @@ def get_local_noon_time() -> Time:
     """
 
     now = Time.now()
-    now += 1 * u.min
+    now += TIME_EPSILON
 
     # Convert current time to local datetime with correct DST info
     local_now = now.to_datetime(timezone=OBSERVATORY_TIME_ZONE)
@@ -85,7 +94,7 @@ def get_local_noon_time() -> Time:
 
 
 def get_sun_altitude_deg(t: Time) -> float:
-    """Returns the sun's altitude at the given time.
+    """Return the sun's altitude at the given time.
 
     The altitude is based on the specified observatory
     location and does not account for atmospheric
@@ -97,24 +106,26 @@ def get_sun_altitude_deg(t: Time) -> float:
         The sun's altitude (deg) above the horizon at time t.
     """
     sun = get_sun(t)
-    altaz = sun.transform_to(AltAz(obstime=t, location=OBSERVATORY_LOCATION))
+    altaz = sun.transform_to(
+        AltAz(obstime=t, location=OBSERVATORY_LOCATION, pressure=0)
+    )
     return altaz.alt.deg
 
 
 def get_crossing_time(
     target_alt: float, going_up: bool = False, search_from: Time | None = None
 ) -> Time:
-    """Computes the time when the sun will reach target_alt.
+    """Compute the time when the sun will reach target_alt.
 
     Parameters
     ----------
-    target_alt : float
+    target_alt : `float`
         The sun altitude at the twilight time to search for, in degrees.
     search_from : `~astropy.time.Time` | None
         The time to start searching from. The returned value will be
         the first instance of the sun crossing the target altitude
         after this time.
-    going_up : bool
+    going_up : `bool`
         True if searching for the crossing of the target altitude
         while the sun altitude is increasing ("sun is rising"),
         of False if the sun should be decreasing in altitude at the
@@ -132,11 +143,15 @@ def get_crossing_time(
 
     # Start by searching for a good window for the root finder.
     if search_from is None:
-        search_from = Time.now() + 1 * u.min
-    t0 = search_from + 1 * u.s
+        search_from = Time.now()
+    t0 = search_from + TIME_EPSILON
     sun_altitude_before = get_sun_altitude_deg(t0)
-    for i in range(25):  # Start by searching the next 25 hours.
-        t1 = t0 + 1 * u.hour
+
+    # Start by searching the next 25 hours. The time between sunrises, sunsets,
+    # twilights can be more than 24 hours when days are getting longer, but
+    # (at least for Cerro Pachón) will never be more than 25 hours.
+    search_range = HOURS_PER_DAY + 1
+    for t1 in [t0 + i * u.hour for i in range(search_range + 1)]:
         sun_altitude_after = get_sun_altitude_deg(t1)
 
         if going_up:
@@ -148,11 +163,9 @@ def get_crossing_time(
 
         # Nope, keep looking
         sun_altitude_before = sun_altitude_after
-        t0 = t1
 
-    t0 = t0.unix
     t1 = t1.unix
-
+    t0 = t1 - SECONDS_PER_HOUR
     t_cross = brentq(f, t0, t1)
     return Time(t_cross, format="unix")
 
@@ -162,20 +175,20 @@ class DiurnalTimer:
 
     Parameters
     ----------
-    sun_altitude : str | float
+    sun_altitude : `str` | `float`
         The sun altitude (degrees) below the horizon that is considered the
         end of twilight. This can be a number between 0 and -90 or it can
         be one of "civil" (-6 degrees), "nautical" (-12 degrees), or
         "astronomical"(-18 degrees).
     """
 
-    def __init__(self, sun_altitude: str | float = -18.0):
+    def __init__(self, sun_altitude: str | float = NAUTICAL_TWILIGHT):
         if sun_altitude == "civil":
-            sun_altitude = -6.0
+            sun_altitude = CIVIL_TWILIGHT
         elif sun_altitude == "nautical":
-            sun_altitude = -12.0
+            sun_altitude = NAUTICAL_TWILIGHT
         elif sun_altitude == "astronomical":
-            sun_altitude = -18.0
+            sun_altitude = ASTRONOMICAL_TWILIGHT
         elif isinstance(sun_altitude, str):
             raise RuntimeError(
                 "Allowed string values for "
@@ -366,12 +379,25 @@ class DiurnalTimer:
         """
         return get_crossing_time(self.sun_altitude, going_up=False, search_from=after)
 
+    def get_sunrise_time(self, after: Time) -> Time:
+        """Return the time of next end of twilight for the given time.
+
+        Parameters
+        ----------
+        after : `~astropy.time.Time`
+            Time returned will be time corresponding to the
+            end of twilight on or after this time.
+        """
+        return get_crossing_time(
+            SOLAR_ELEVATION_AT_SUNSET, going_up=True, search_from=after
+        )
+
     def sun_altitude_at(self, t_utc: float) -> float:
         """Return the sun altitude in degrees at the specified time.
 
         Parameters
         ----------
-        t_utc : float
+        t_utc : `float`
             The time of interest to look up sun altitude, specified
             in UTC seconds in the UNIX epoch.
 
@@ -403,7 +429,7 @@ class DiurnalTimer:
             )
 
         t = (self.twilight_time - time).sec
-        if t < 0 or t > 25 * 3600:
+        if t < 0 or t > (HOURS_PER_DAY + 1) * SECONDS_PER_HOUR:
             raise ValueError(f"Time until twilight unexpectedly out of range: {t}")
         return t
 
@@ -427,12 +453,12 @@ class DiurnalTimer:
             )
 
         t = (self.sunrise_time - time).sec
-        if t < 0 or t > 25 * 3600:
+        if t < 0 or t > (HOURS_PER_DAY + 1) * SECONDS_PER_HOUR:
             raise ValueError(f"Time until sunrise unexpectedly out of range: {t}")
         return t
 
     def is_night(self, time: Time) -> bool:
-        """Returns True if `time` is in the EAS-defined night.
+        """Return True if `time` is in the EAS-defined night.
 
         If the time is after twilight and before sunrise, it is
         considered to be night.

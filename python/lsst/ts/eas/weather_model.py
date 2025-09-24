@@ -29,12 +29,26 @@ from collections import deque
 
 import astropy.units as u
 import lsst_efd_client
+import yaml
 from astropy.time import Time
 from lsst.ts import salobj, utils
 
 from .diurnal_timer import DiurnalTimer
 
 SAL_TIMEOUT = 60  # SAL timeout time. (seconds)
+TEMPERATURE_CUTOFF_TIME = (
+    5 * 60
+)  # Maximum age of temperature data to continue. (seconds)
+MAX_TEMPERATURE_SAMPLES = 20  # The maximum number of temperature samples to retain.
+
+NIGHT_SEARCH_WINDOW = 18 * u.hour
+DAY_SEARCH_WINDOW = 25 * u.hour
+
+DAY = 86400 * u.s
+
+DAYS_TO_SEARCH_FOR_TWILIGHT_TEMPERATURE = 10
+
+TWILIGHT_SAMPLE_WINDOW = 1 * u.min
 
 
 class WeatherModel:
@@ -46,9 +60,17 @@ class WeatherModel:
         A SAL domain object for obtaining remotes.
     log : `~logging.Logger`
         A logger for log messages.
-    wind_average_window : float
+    diurnal_timer : `DiurnalTimer`
+        A timekeeping class to track day/night, twilight time, etc.
+    efd_name : `str`
+        The EFD instance name to use for historical queries.
+    ess_index : `int`
+        The SAL index for the outdoor weather ESS.
+    indoor_ess_index : `int`
+        The SAL index for the indoor conditions ESS.
+    wind_average_window : `float`
         Time over which to average windspeed for threshold determination. (s)
-    wind_minimum_window : float
+    wind_minimum_window : `float`
         Minimum amount of time to collect wind data before acting on it. (s)
     """
 
@@ -59,9 +81,10 @@ class WeatherModel:
         log: logging.Logger,
         diurnal_timer: DiurnalTimer,
         efd_name: str,
-        ess_index: int = 301,
-        wind_average_window: float = 30 * 60,
-        wind_minimum_window: float = 10 * 60,
+        ess_index: int,
+        indoor_ess_index: int,
+        wind_average_window: float,
+        wind_minimum_window: float,
     ) -> None:
         self.domain = domain
         self.log = log
@@ -69,6 +92,7 @@ class WeatherModel:
 
         self.efd_name = efd_name
         self.ess_index = ess_index
+        self.indoor_ess_index = indoor_ess_index
 
         self.monitor_start_event = asyncio.Event()
 
@@ -79,21 +103,143 @@ class WeatherModel:
         self.wind_history: deque = deque()
 
         # A deque containing tuples of timestamp, temperature
-        self.temperature_history: deque = deque(maxlen=20)
+        self.temperature_history: deque[tuple[float, float]] = deque(
+            maxlen=MAX_TEMPERATURE_SAMPLES
+        )
+
+        # A deque containing tuples of timestamp, temperature for indoor ESS
+        self.indoor_temperature_history: deque[tuple[float, float]] = deque(
+            maxlen=MAX_TEMPERATURE_SAMPLES
+        )
 
         # The last observed temperature at the end of twilight
         self.last_twilight_temperature: float | None = None
+
+        # True if the next valid dew point sample represents
+        # the beginning of the night.
+        self.need_to_reset_dew_point = True
+
+        # Maximum reported dew point temperature (°C)
+        # for last night (if it is daytime) or the current
+        # night (if it is nighttime).
+        self.nightly_maximum_indoor_dew_point: float | None = None
+
+        # True if the next valid temperature sample represents
+        # the beginning of the night.
+        self.need_to_reset_temperature = True
+
+        # Minimum reported outdoor temperature (°C)
+        # for last night (if it is daytime) or the current
+        # night (if it is nighttime).
+        self.nightly_minimum_temperature: float | None = None
+
+    @classmethod
+    def get_config_schema(cls) -> str:
+        return yaml.safe_load(
+            """
+$schema: http://json-schema.org/draft-07/schema#
+description: Schema for EAS weather configuration.
+type: object
+properties:
+  efd_name:
+    description: The name of the EFD deployment to use.
+    type: string
+    default: test
+  ess_index:
+    description: The SAL index to use for outdoor weather information.
+    type: integer
+    default: 301
+  indoor_ess_index:
+    description: The SAL index to use for indoor weather information.
+    type: integer
+    default: 112
+  wind_average_window:
+    description: Time window (s) of past windspeed telemetry to use in calculating an average.
+    type: number
+    default: 1800.0
+  wind_minimum_window:
+    description: >-
+      Minimum required baseline time (s) of past windspeed data needed to calculate a reliable
+      average. If this baseline is not available, the VEC-04 fan will be turned off.
+    type: number
+    default: 600.0
+required:
+  - efd_name
+  - ess_index
+  - indoor_ess_index
+  - wind_average_window
+  - wind_minimum_window
+additionalProperties: false
+"""
+        )
+
+    async def initialize_nightly_minimum(self) -> None:
+        """Compute and store the nightly minimum temperature.
+
+        Determine the relevant night window (current or previous) using
+        the diurnal timer, query the EFD for ESS temperature data within
+        that window, and save the minimum value to
+        `self.nightly_minimum_temperature`. Also update
+        `self.need_to_reset_temperature` depending on whether it is
+        currently day or night. This function is used for initialization
+        when the CSC starts, so that it has the needed data without having
+        to be left running.
+        """
+        self.log.debug("initialize_nightly_minimum")
+
+        time_now = Time.now()
+        it_is_night = self.diurnal_timer.is_night(time_now)
+        self.need_to_reset_temperature = not it_is_night
+
+        # Find the time window of the current night (if it is night)
+        # or the previous night (if it is day)
+        if it_is_night:
+            time_window_begin = time_now - NIGHT_SEARCH_WINDOW
+        else:
+            time_window_begin = time_now - DAY_SEARCH_WINDOW
+
+        time_window_begin = self.diurnal_timer.get_twilight_time(
+            after=time_window_begin
+        )
+        time_window_end = self.diurnal_timer.get_sunrise_time(after=time_window_begin)
+
+        efd_client = lsst_efd_client.EfdClient(self.efd_name)
+        time_series = await efd_client.select_time_series(
+            "lsst.sal.ESS.temperature",
+            ["temperatureItem0"],
+            time_window_begin,
+            time_window_end,
+            index=self.indoor_ess_index,
+        )
+        self.nightly_minimum_temperature = time_series["temperatureItem0"].min()
+
+        time_series = await efd_client.select_time_series(
+            "lsst.sal.ESS.dewPoint",
+            ["dewPointItem"],
+            time_window_begin,
+            time_window_end,
+            index=self.indoor_ess_index,
+        )
+        self.nightly_maximum_indoor_dew_point = time_series["dewPointItem"].max()
+
+        self.log.debug(
+            f"Found nightly minimum temperature was {self.nightly_minimum_temperature}°C, "
+            f"maximum dew point was was {self.nightly_maximum_indoor_dew_point}°C "
+            f"for window {time_window_begin.isot} to {time_window_end.isot}"
+        )
 
     async def get_last_twilight_temperature(self) -> float | None:
         """Retrieve the most recent twilight temperature from the EFD.
 
         This method searches for the temperature at the twilight time of
-        interest, going back up to 10 days from the current time. It queries
-        the EFD for a one-minute interval starting at the twilight time for
-        each day until a valid median temperature is found. The result is
-        cached in `self.last_twilight_temperature` for future calls.
+        interest, going back up to DAYS_TO_SEARCH_FOR_TWILIGHT_TEMPERATURE
+        days from the current time. It queries the EFD for a one-minute
+        interval starting at the twilight time for each day until a valid
+        median temperature is found. The result is cached in
+        `self.last_twilight_temperature` for future calls.
 
-        If no valid data is found within the last 10 days, returns None.
+        If no valid data is found within the last
+        DAYS_TO_SEARCH_FOR_TWILIGHT_TEMPERATURE days, returns None.
 
         Returns
         -------
@@ -106,9 +252,9 @@ class WeatherModel:
 
         of_date = Time.now()
         efd_client = lsst_efd_client.EfdClient(self.efd_name)
-        for days_ago in range(10):
+        for days_ago in range(DAYS_TO_SEARCH_FOR_TWILIGHT_TEMPERATURE):
             # Get time of twilight of interest.
-            of_date -= 86400 * u.s
+            of_date -= DAY
 
             twilight_time = self.diurnal_timer.get_twilight_time(of_date)
 
@@ -116,7 +262,7 @@ class WeatherModel:
                 "lsst.sal.ESS.temperature",
                 ["temperatureItem0"],
                 twilight_time,
-                twilight_time + 60 * u.s,
+                twilight_time + TWILIGHT_SAMPLE_WINDOW,
                 index=self.ess_index,
             )
             if len(time_series) == 0:
@@ -169,6 +315,56 @@ class WeatherModel:
         now = temperature.private_sndStamp
         self.temperature_history.append((temperature.temperatureItem[0], now))
 
+    async def indoor_temperature_callback(
+        self, temperature: salobj.BaseMsgType
+    ) -> None:
+        """Callback for ESS.tel_temperature for the indoor ESS.
+
+        This function appends new temperature data to the existing table.
+
+        Parameters
+        ----------
+        temperature : `~lsst.ts.salobj.BaseMsgType`
+           A newly received temperature telemetry item.
+        """
+        now = temperature.private_sndStamp
+        self.indoor_temperature_history.append((temperature.temperatureItem[0], now))
+
+        # Record the nightly minimum temperature...
+        if self.diurnal_timer.is_night(Time.now()):
+            if self.need_to_reset_temperature:
+                self.nightly_minimum_temperature = temperature.temperatureItem[0]
+                self.need_to_reset_temperature = False
+            else:
+                self.nightly_minimum_temperature = min(
+                    temperature.temperatureItem[0], self.nightly_minimum_temperature
+                )
+        else:
+            self.need_to_reset_temperature = True
+
+    async def indoor_dew_point_callback(self, dew_point: salobj.BaseMsgType) -> None:
+        """Callback for ESS.tel_dewPoint.
+
+        This function appends new temperature data to the existing table,
+        but only if it is night. If it is the first sample first the night,
+        the table is cleared and restarted.
+
+        Parameters
+        ----------
+        dew_point : `~lsst.ts.salobj.BaseMsgType`
+           A newly received dew point telemetry item.
+        """
+        if self.diurnal_timer.is_night(Time.now()):
+            if self.need_to_reset_dew_point:
+                self.nightly_maximum_indoor_dew_point = dew_point.dewPointItem
+                self.need_to_reset_dew_point = False
+            else:
+                self.nightly_maximum_indoor_dew_point = max(
+                    dew_point.dewpointItem, self.nightly_maximum_indoor_dew_point
+                )
+        else:
+            self.need_to_reset_dew_point = True
+
     @property
     def average_windspeed(self) -> float:
         """Average windspeed in m/s.
@@ -213,18 +409,54 @@ class WeatherModel:
         Returns
         -------
         float
-            The average of the last 10 temperature samples from
-            the ESS, or NaN if there are no temperature samples
-            in the last 5 minutes.
+            The average of the last MAX_TEMPERATURE_SAMPLES temperature
+            samples from the ESS, or NaN if there are no temperature samples
+            in the last TEMPERATURE_CUTOFF_TIME seconds.
         """
-        cutoff = utils.current_tai() - 5 * 60
+        return self.calculate_current_temperature(self.temperature_history)
+
+    @property
+    def current_indoor_temperature(self) -> float:
+        """Current temperature in °C.
+
+        Returns
+        -------
+        float
+            The average of the last MAX_TEMPERATURE_SAMPLES temperature
+            samples from the ESS, or NaN if there are no temperature samples
+            in the last TEMPERATURE_CUTOFF_TIME minutes.
+        """
+        return self.calculate_current_temperature(self.indoor_temperature_history)
+
+    def calculate_current_temperature(
+        self, temperature_history: deque[tuple[float, float]]
+    ) -> float:
+        """Calculates a current temperature for the given collection.
+
+        Finds a median over the last 5 minutes for the specfied
+        collection, which can be for either the indoor or outdoor
+        ESS.
+
+        Parameters
+        ----------
+        temperature_history: deque[tuple[float, float]]
+            Collected temperature samples from either the indoor or outdoor
+            ESS remote.
+
+        Returns
+        -------
+        float
+            The average of the last MAX_TEMPERATURE_SAMPLES temperature samples
+            from the ESS, or NaN if there are no temperature samples in the
+            last 5 minutes.
+        """
+        cutoff = utils.current_tai() - TEMPERATURE_CUTOFF_TIME
         recent_samples = [
-            temperature
-            for temperature, time in self.temperature_history
-            if time >= cutoff
+            temperature for temperature, time in temperature_history if time >= cutoff
         ]
 
         if not recent_samples:
+            self.log.warning("No temperature samples collected.")
             return math.nan
 
         return statistics.median(recent_samples)
@@ -238,14 +470,24 @@ class WeatherModel:
         """
         self.log.debug("WeatherModel.monitor")
 
+        try:
+            await self.initialize_nightly_minimum()
+        except Exception:
+            self.log.exception("initialize_nightly_minimum failed")
+
         async with salobj.Remote(
             domain=self.domain,
             name="ESS",
             index=self.ess_index,
-            include=("airFlow", "temperature"),
-        ) as weather_remote:
+        ) as weather_remote, salobj.Remote(
+            domain=self.domain,
+            name="ESS",
+            index=self.indoor_ess_index,
+        ) as indoor_remote:
             weather_remote.tel_airFlow.callback = self.air_flow_callback
             weather_remote.tel_temperature.callback = self.temperature_callback
+            indoor_remote.tel_dewPoint.callback = self.indoor_dew_point_callback
+            indoor_remote.tel_temperature.callback = self.indoor_temperature_callback
 
             while self.diurnal_timer.is_running:
                 async with self.diurnal_timer.twilight_condition:

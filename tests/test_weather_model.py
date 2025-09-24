@@ -56,6 +56,10 @@ class TestGetLastTwilightTemperature(
             log=log,
             diurnal_timer=self.diurnal_timer,
             efd_name="mocked",
+            ess_index=301,
+            indoor_ess_index=112,
+            wind_average_window=1800,
+            wind_minimum_window=600,
         )
         await super().asyncSetUp()
 

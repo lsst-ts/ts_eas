@@ -59,13 +59,13 @@ class EasCsc(salobj.ConfigurableCsc):
 
     Parameters
     ----------
-    config_dir : str
+    config_dir : `str`
         The configuration directory
     initial_state : `~lsst.ts.salobj.State`
         The initial state of the CSC
-    simulation_mode : int
+    simulation_mode : `int`
         Simulation mode (1) or not (0)
-    override : str, optional
+    override : `str`, optional
         Override of settings if `initial_state` is `State.DISABLED`
         or `State.ENABLED`.
     """
@@ -114,7 +114,7 @@ class EasCsc(salobj.ConfigurableCsc):
             await self.shutdown_health_monitor()
 
     async def shutdown_health_monitor(self) -> None:
-        """Cancels the health monitor task and waits for completion."""
+        """Cancel the health monitor task and waits for completion."""
         tasks_to_cancel = self.subtasks
         self.subtasks = []
         tasks_to_cancel.append(self.health_monitor_task)
@@ -142,14 +142,22 @@ class EasCsc(salobj.ConfigurableCsc):
             domain=self.domain,
             log=self.log,
         )
+
+        # Validate the sub-schemas and update with defaults.
+        for object_type, attr in (
+            (WeatherModel, "weather"),
+            (HvacModel, "hvac"),
+            (TmaModel, "tma"),
+        ):
+            schema = object_type.get_config_schema()
+            validator = salobj.DefaultingValidator(schema)
+            setattr(config, attr, validator.validate(getattr(config, attr)))
+
         self.weather_model = WeatherModel(
             domain=self.domain,
             log=self.log,
             diurnal_timer=self.diurnal_timer,
-            efd_name=self.config.efd_name,
-            ess_index=self.config.weather_ess_index,
-            wind_average_window=self.config.wind_average_window,
-            wind_minimum_window=self.config.wind_minimum_window,
+            **self.config.weather,
         )
         self.hvac_model = HvacModel(
             domain=self.domain,
@@ -157,10 +165,8 @@ class EasCsc(salobj.ConfigurableCsc):
             diurnal_timer=self.diurnal_timer,
             dome_model=self.dome_model,
             weather_model=self.weather_model,
-            setpoint_lower_limit=self.config.setpoint_lower_limit,
-            wind_threshold=self.config.wind_threshold,
-            vec04_hold_time=self.config.vec04_hold_time,
             features_to_disable=self.config.features_to_disable,
+            **self.config.hvac,
         )
         self.tma_model = TmaModel(
             domain=self.domain,
@@ -169,24 +175,14 @@ class EasCsc(salobj.ConfigurableCsc):
             dome_model=self.dome_model,
             glass_temperature_model=self.glass_temperature_model,
             weather_model=self.weather_model,
-            indoor_ess_index=self.config.indoor_ess_index,
-            ess_timeout=self.config.ess_timeout,
-            glycol_setpoint_delta=self.config.glycol_setpoint_delta,
-            heater_setpoint_delta=self.config.heater_setpoint_delta,
-            top_end_setpoint_delta=self.config.top_end_setpoint_delta,
-            m1m3_setpoint_cadence=self.config.m1m3_setpoint_cadence,
-            setpoint_deadband_heating=self.config.setpoint_deadband_heating,
-            setpoint_deadband_cooling=self.config.setpoint_deadband_cooling,
-            maximum_heating_rate=self.config.maximum_heating_rate,
-            slow_cooling_rate=self.config.slow_cooling_rate,
-            fast_cooling_rate=self.config.fast_cooling_rate,
             features_to_disable=self.config.features_to_disable,
+            **self.config.tma,
         )
 
     async def monitor_health(self) -> None:
-        """Manages the `monitor_dome_shutter` control loop.
+        """Manage the `monitor_dome_shutter` control loop.
 
-        Manages the `monitor_dome_shutter` control loop with backoff and
+        Manage the `monitor_dome_shutter` control loop with backoff and
         time-based failure reset, which is (hopefully) robust against
         disconnects of the remotes, as well as any other form of
         recoverable failure.
