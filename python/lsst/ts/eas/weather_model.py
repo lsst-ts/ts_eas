@@ -131,7 +131,7 @@ class WeatherModel:
         # Minimum reported outdoor temperature (°C)
         # for last night (if it is daytime) or the current
         # night (if it is nighttime).
-        self.nightly_minimum_temperature: float | None = None
+        self.nightly_minimum_temperature: float = math.nan
 
     @classmethod
     def get_config_schema(cls) -> str:

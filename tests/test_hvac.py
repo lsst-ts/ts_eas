@@ -42,7 +42,7 @@ class WeatherModelMock:
         average_windspeed: float | None = None,
         current_temperature: float | None = None,
         current_indoor_temperature: float | None = None,
-        nightly_minimum_temperature: float | None = None,
+        nightly_minimum_temperature: float = math.nan,
         nightly_maximum_indoor_dew_point: float | None = None,
     ) -> None:
         self.last_twilight_temperature = last_twilight_temperature
@@ -295,7 +295,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
 
     async def test_missing_nightly_minimum(self) -> None:
         """Signal noon without a nightly minimum temperature."""
-        self.weather.nightly_minimum_temperature = None
+        self.weather.nightly_minimum_temperature = math.nan
         model = self.make_model()
 
         signal_task = asyncio.create_task(signal_noon(self.diurnal))
