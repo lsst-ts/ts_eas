@@ -29,7 +29,9 @@ from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
+import pandas as pd
 from astropy.table import Table
+from astropy.time import Time
 from lsst.ts import eas, salobj, utils
 from lsst.ts.xml.enums.HVAC import DeviceId
 
@@ -75,6 +77,27 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         )
         self.mock_current_tai = self.current_tai_patcher.start()
         self.addCleanup(self.current_tai_patcher.stop)
+
+        patcher = mock.patch("lsst_efd_client.EfdClient", autospec=True)
+        self.MockEfdClient = patcher.start()
+        self.addCleanup(patcher.stop)
+
+        mock_instance = self.MockEfdClient.return_value
+
+        async def fake_select_time_series(
+            topic: str,
+            fields: list[str],
+            start: Time,
+            end: Time,
+            index: int,
+        ) -> pd.DataFrame:
+            """Always return a minimal single-row DataFrame."""
+            return pd.DataFrame({"temperatureItem0": [0.0], "dewPointItem": [-10.0]})
+
+        mock_instance.select_time_series = mock.AsyncMock(
+            side_effect=fake_select_time_series
+        )
+        self.mock_efd_client = mock_instance
 
     def offset_clock(self, offset: float) -> None:
         """Applies an offset to current_tai clock mock.
@@ -232,6 +255,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
 
     async def test_standard_state_transitions(self) -> None:
         async with (
+            self.mock_extra_cscs(),
             self.make_csc(
                 initial_state=salobj.State.STANDBY,
                 config_dir=TEST_CONFIG_DIR,

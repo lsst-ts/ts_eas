@@ -542,7 +542,7 @@ additionalProperties: false
                 nightly_minimum_temperature = (
                     self.weather_model.nightly_minimum_temperature
                 )
-                if nightly_minimum_temperature is None:
+                if math.isnan(nightly_minimum_temperature):
                     self.log.error("Nightly minimum temperature was not available.")
                     continue
 

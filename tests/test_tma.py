@@ -215,7 +215,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         self.assertTrue(heater_setpoint is None)
         self.assertTrue(top_end_setpoint is not None)
         assert fan_rpm is not None
-        expected_fan_rpm = int(0.1 * eas.tma_model.MAX_FAN_RPM)
+        expected_fan_rpm = int(0.1 * eas.tma_model.FAN_SPEED_MAX)
         self.assertAlmostEqual(fan_rpm[0], expected_fan_rpm, 3)
 
     async def test_disabled_top_end(self) -> None:
@@ -240,7 +240,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         self.assertTrue(top_end_setpoint is None)
         assert fan_rpm is not None
         expected_fan_rpm = int(
-            0.1 * 0.5 * (eas.tma_model.MIN_FAN_RPM + eas.tma_model.MAX_FAN_RPM)
+            0.1 * 0.5 * (eas.tma_model.FAN_SPEED_MIN + eas.tma_model.FAN_SPEED_MAX)
         )
         self.assertAlmostEqual(fan_rpm[0], expected_fan_rpm, 3)
 
@@ -267,6 +267,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         """Compare behavior with specifications in OSW-820."""
         diurnal_timer = eas.diurnal_timer.DiurnalTimer()
         diurnal_timer.is_running = True
+        heater_setpoint_delta = -1
 
         weather_model = WeatherModelMock(self.last_twilight_temperature)
         weather_model.current_indoor_temperature = 10
@@ -286,7 +287,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 glass_temperature_model=SimpleNamespace(median_temperature=0.0),
                 weather_model=weather_model,
                 glycol_setpoint_delta=-2,
-                heater_setpoint_delta=-1,
+                heater_setpoint_delta=heater_setpoint_delta,
                 top_end_setpoint_delta=-1,
                 m1m3_setpoint_cadence=10,
                 setpoint_deadband_heating=0,
@@ -297,8 +298,8 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 features_to_disable=[],
             )
 
-            fan_minimum = int(0.1 * eas.tma_model.MIN_FAN_RPM)
-            fan_maximum = int(0.1 * eas.tma_model.MAX_FAN_RPM)
+            fan_minimum = int(0.1 * eas.tma_model.FAN_SPEED_MIN)
+            fan_maximum = int(0.1 * eas.tma_model.FAN_SPEED_MAX)
 
             # No difference between glass and setpoint (with offset):
             #    * fan at minimum RPM (700)
@@ -306,7 +307,8 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             await tma_model.set_fan_speed(m1m3ts_remote=mtm1m3ts_remote, setpoint=1.0)
             self.assertEqual(mock_m1m3ts.fan_rpm, [fan_minimum] * 96)
             self.assertEqual(
-                tma_model.glycol_setpoint_delta, eas.tma_model.OFFSET_AT_MIN_RPM
+                tma_model.glycol_setpoint_delta,
+                eas.tma_model.FAN_GLYCOL_HEATER_OFFSET_MIN + heater_setpoint_delta,
             )
 
             # Difference of +1°C between glass and setpoint (with offset):
@@ -316,7 +318,8 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             await tma_model.set_fan_speed(m1m3ts_remote=mtm1m3ts_remote, setpoint=2.0)
             self.assertEqual(mock_m1m3ts.fan_rpm, [fan_maximum] * 96)
             self.assertEqual(
-                tma_model.glycol_setpoint_delta, eas.tma_model.OFFSET_AT_MIN_RPM
+                tma_model.glycol_setpoint_delta,
+                eas.tma_model.FAN_GLYCOL_HEATER_OFFSET_MIN + heater_setpoint_delta,
             )
 
             # Difference of -1°C between glass and setpoint (with offset):
@@ -326,7 +329,8 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             await tma_model.set_fan_speed(m1m3ts_remote=mtm1m3ts_remote, setpoint=0.0)
             self.assertEqual(mock_m1m3ts.fan_rpm, [fan_maximum] * 96)
             self.assertEqual(
-                tma_model.glycol_setpoint_delta, eas.tma_model.OFFSET_AT_MAX_RPM
+                tma_model.glycol_setpoint_delta,
+                eas.tma_model.FAN_GLYCOL_HEATER_OFFSET_MAX + heater_setpoint_delta,
             )
 
     def basic_make_csc(

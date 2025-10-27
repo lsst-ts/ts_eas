@@ -113,7 +113,7 @@ class TestGlassTemperatureModel(
         for i in range(4):
             self.temperatures[i][0] = 1_000_000_000
 
-        await asyncio.sleep(2)  # Give time for the telemetry to get through
+        await asyncio.sleep(4)  # Give time for the telemetry to get through
         median_temperature = self.glass_temperature_model.median_temperature
 
         self.assertFalse(median_temperature is None)
