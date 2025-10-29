@@ -360,7 +360,7 @@ additionalProperties: false
                 self.need_to_reset_dew_point = False
             else:
                 self.nightly_maximum_indoor_dew_point = max(
-                    dew_point.dewpointItem, self.nightly_maximum_indoor_dew_point
+                    dew_point.dewPointItem, self.nightly_maximum_indoor_dew_point
                 )
         else:
             self.need_to_reset_dew_point = True
