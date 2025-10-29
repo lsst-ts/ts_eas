@@ -265,10 +265,11 @@ additionalProperties: false
                 # Check windspeed threshold
                 average_windspeed = self.weather_model.average_windspeed
                 wind_threshold = average_windspeed < self.wind_threshold
-                self.log.debug(
-                    f"VEC-04 operation demanded: {average_windspeed} m/s -> {wind_threshold}"
-                )
                 if wind_threshold != cached_wind_threshold:
+                    self.log.debug(
+                        f"VEC-04 operation demanded: {average_windspeed:.2f} m/s -> {wind_threshold:.2f}"
+                    )
+
                     cached_wind_threshold = wind_threshold
                     self.last_vec04_time = utils.current_tai()
                     if wind_threshold:
@@ -468,9 +469,9 @@ additionalProperties: false
         hvac_remote : `~lsst.ts.salobj.Remote`
             A SALobj remote representing the HVAC.
         """
+        self.log.debug("monitor_glycol_chillers")
         while self.diurnal_timer.is_running:
             try:
-                self.log.debug("monitor_glycol_chillers")
 
                 # At night, reset the setpoints and do not control
                 # the glycol.

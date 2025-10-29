@@ -223,8 +223,8 @@ additionalProperties: false
         self.nightly_maximum_indoor_dew_point = time_series["dewPointItem"].max()
 
         self.log.debug(
-            f"Found nightly minimum temperature was {self.nightly_minimum_temperature}°C, "
-            f"maximum dew point was was {self.nightly_maximum_indoor_dew_point}°C "
+            f"Found nightly minimum temperature was {self.nightly_minimum_temperature:.2f}°C, "
+            f"maximum dew point was was {self.nightly_maximum_indoor_dew_point:.2f}°C "
             f"for window {time_window_begin.isot} to {time_window_end.isot}"
         )
 
@@ -277,7 +277,7 @@ additionalProperties: false
 
             self.log.info(
                 "Obtained twilight temperature from EFD for "
-                f"{twilight_time.isot}: {self.last_twilight_temperature}"
+                f"{twilight_time.isot}: {self.last_twilight_temperature:.2f}"
             )
             return self.last_twilight_temperature
         else:
@@ -340,6 +340,10 @@ additionalProperties: false
                     temperature.temperatureItem[0], self.nightly_minimum_temperature
                 )
         else:
+            if not self.need_to_reset_temperature:
+                self.log.info(
+                    f"Nightly minimum temperature recorded: {self.nightly_minimum_temperature:.2f}°C"
+                )
             self.need_to_reset_temperature = True
 
     async def indoor_dew_point_callback(self, dew_point: salobj.BaseMsgType) -> None:
@@ -363,6 +367,11 @@ additionalProperties: false
                     dew_point.dewPointItem, self.nightly_maximum_indoor_dew_point
                 )
         else:
+            if not self.need_to_reset_dew_point:
+                self.log.info(
+                    "Nightly maximum dewpoint recorded: "
+                    f"{self.nightly_maximum_indoor_dew_point:.2f}°C"
+                )
             self.need_to_reset_dew_point = True
 
     @property
@@ -382,6 +391,7 @@ additionalProperties: false
             NaN is returned. Units are m/s.
         """
         if not self.wind_history:
+            self.log.error("No windspeed history")
             return math.nan
 
         current_time = utils.current_tai()
@@ -396,6 +406,7 @@ additionalProperties: false
             not self.wind_history
             or current_time - self.wind_history[0][1] < self.wind_minimum_window
         ):
+            self.log.error("All wind history was stale")
             return math.nan
 
         # Compute average directly
@@ -511,6 +522,9 @@ additionalProperties: false
     async def measure_twilight_temperature(self) -> float:
         """Refreshes the twilight temperature with a new measurement."""
         # Store the current temperature for future use.
+        self.log.debug("measure_twilight_temperature")
         last_twilight_temperature = self.current_temperature
-        self.log.info(f"Collected twilight temperature: {last_twilight_temperature}°C")
+        self.log.info(
+            f"Collected twilight temperature: {last_twilight_temperature:.2f}°C"
+        )
         return last_twilight_temperature
