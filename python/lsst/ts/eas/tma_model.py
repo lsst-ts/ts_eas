@@ -19,15 +19,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-__all__ = [
-    "TmaModel",
-    "FAN_SPEED_MIN",
-    "FAN_SPEED_MAX",
-    "FAN_GLYCOL_HEATER_OFFSET_MIN",
-    "FAN_GLYCOL_HEATER_OFFSET_MAX",
-    "FAN_THROTTLE_TURN_ON_TEMP_DIFF",
-    "FAN_THROTTLE_MAX_TEMP_DIFF",
-]
+__all__ = ["TmaModel"]
 
 import asyncio
 import logging
@@ -50,17 +42,6 @@ from .weather_model import WeatherModel
 
 STD_TIMEOUT = 10  # seconds
 DORMANT_TIME = 100  # Time to wait while sleeping, seconds
-
-FAN_SPEED_MIN = 700  # Minimum allowed M1M3TS fan speed
-FAN_SPEED_MAX = 2000  # Maximum allowed fan speed
-FAN_GLYCOL_HEATER_OFFSET_MIN = -1.0  # at 700 rpm
-FAN_GLYCOL_HEATER_OFFSET_MAX = -4.0  # at 2000 rpm
-FAN_THROTTLE_TURN_ON_TEMP_DIFF = (
-    0.0  # Temperature difference at which we begin to increase fan speed
-)
-FAN_THROTTLE_MAX_TEMP_DIFF = (
-    1.0  # Temperature difference at which we command FAN_SPEED_MAX
-)
 
 MAX_TEMPERATURE_FAILURES = 10
 
@@ -145,6 +126,7 @@ class TmaModel:
         maximum_heating_rate: float,
         slow_cooling_rate: float,
         fast_cooling_rate: float,
+        fan_speed: dict[str, float],
         features_to_disable: list[str],
     ) -> None:
         self.domain = domain
@@ -175,6 +157,20 @@ class TmaModel:
 
         self.top_end_task = utils.make_done_future()
         self.top_end_task_warned: bool = False
+
+        # Fan speed configuration
+        self.fan_speed_min: float = fan_speed["fan_speed_min"]
+        self.fan_speed_max: float = fan_speed["fan_speed_max"]
+        self.fan_glycol_heater_offset_min: float = fan_speed[
+            "fan_glycol_heater_offset_min"
+        ]
+        self.fan_glycol_heater_offset_max: float = fan_speed[
+            "fan_glycol_heater_offset_max"
+        ]
+        self.fan_throttle_turn_on_temp_diff: float = fan_speed[
+            "fan_throttle_turn_on_temp_diff"
+        ]
+        self.fan_throttle_max_temp_diff: float = fan_speed["fan_throttle_max_temp_diff"]
 
     @asynccontextmanager
     async def last_setpoint_getter(
@@ -259,6 +255,42 @@ properties:
         while observing.
     type: number
     default: 10.0
+  fan_speed:
+    description: Parameters controlling the M1M3TS fan speed response.
+    type: object
+    properties:
+      fan_speed_min:
+        description: Minimum allowed M1M3TS fan speed (RPM).
+        type: number
+        default: 700.0
+      fan_speed_max:
+        description: Maximum allowed M1M3TS fan speed (RPM).
+        type: number
+        default: 2000.0
+      fan_glycol_heater_offset_min:
+        description: Glycol–heater temperature offset (°C) at fan_speed_min.
+        type: number
+        default: -1.0
+      fan_glycol_heater_offset_max:
+        description: Glycol–heater temperature offset (°C) at fan_speed_max.
+        type: number
+        default: -4.0
+      fan_throttle_turn_on_temp_diff:
+        description: Temperature difference (°C) at which fan speed begins to increase.
+        type: number
+        default: 0.0
+      fan_throttle_max_temp_diff:
+        description: Temperature difference (°C) at which fan_speed_max is commanded.
+        type: number
+        default: 1.0
+    required:
+      - fan_speed_min
+      - fan_speed_max
+      - fan_glycol_heater_offset_min
+      - fan_glycol_heater_offset_max
+      - fan_throttle_turn_on_temp_diff
+      - fan_throttle_max_temp_diff
+    additionalProperties: false
 required:
   - glycol_setpoint_delta
   - heater_setpoint_delta
@@ -269,6 +301,7 @@ required:
   - maximum_heating_rate
   - slow_cooling_rate
   - fast_cooling_rate
+  - fan_speed
 additionalProperties: false
 """
         )
@@ -368,9 +401,10 @@ additionalProperties: false
         The commanded fan speed is determined by the absolute difference
         between the median bulk glass temperature and the target setpoint
         (including the heater setpoint delta). The speed scales linearly
-        from `FAN_SPEED_MIN` at or below `FAN_THROTTLE_TURN_ON_TEMP_DIFF`
-        to `FAN_SPEED_MAX` at `FAN_THROTTLE_MAX_TEMP_DIFF` degrees difference,
-        with any larger differences clamped at maximum.
+        from `self.fan_speed_min` at or below
+        `self.fan_throttle_turn_on_temp_diff` to `self.fan_speed_max` at
+        `self.fan_throttle_max_temp_diff` degrees difference, with any
+        larger differences clamped at maximum.
 
         The computed speed is scaled as required by the
         heaterFanDemand command and applied to all 96 fans.
@@ -392,15 +426,15 @@ additionalProperties: false
             return
 
         setpoint += self.heater_setpoint_delta
-        slope = (FAN_SPEED_MAX - FAN_SPEED_MIN) / (
-            FAN_THROTTLE_MAX_TEMP_DIFF - FAN_THROTTLE_TURN_ON_TEMP_DIFF
+        slope = (self.fan_speed_max - self.fan_speed_min) / (
+            self.fan_throttle_max_temp_diff - self.fan_throttle_turn_on_temp_diff
         )
         temperature_difference = abs(glass_temperature - setpoint)
 
-        fan_speed = FAN_SPEED_MIN + slope * (
-            temperature_difference - FAN_THROTTLE_TURN_ON_TEMP_DIFF
+        fan_speed = self.fan_speed_min + slope * (
+            temperature_difference - self.fan_throttle_turn_on_temp_diff
         )
-        fan_speed = max(min(fan_speed, FAN_SPEED_MAX), FAN_SPEED_MIN)
+        fan_speed = max(min(fan_speed, self.fan_speed_max), self.fan_speed_min)
 
         fan_rpm = int(round(0.1 * fan_speed))
         await m1m3ts_remote.cmd_heaterFanDemand.set_start(
@@ -411,16 +445,16 @@ additionalProperties: false
         if glass_temperature > setpoint:
             # Adjust glycol offset based on fan speed:
             #   Fan speed of 700 (minimum) -> glycol offset of -1 from heater
-            #   Fan speed of 2000 (maximum) -> glycol offset of -5 from heater
+            #   Fan speed of 2000 (maximum) -> glycol offset of -4 from heater
             glycol_offset_slope = (
-                FAN_GLYCOL_HEATER_OFFSET_MAX - FAN_GLYCOL_HEATER_OFFSET_MIN
-            ) / (FAN_SPEED_MAX - FAN_SPEED_MIN)
-            glycol_offset = glycol_offset_slope * (fan_speed - FAN_SPEED_MIN)
-            glycol_offset += FAN_GLYCOL_HEATER_OFFSET_MIN
+                self.fan_glycol_heater_offset_max - self.fan_glycol_heater_offset_min
+            ) / (self.fan_speed_max - self.fan_speed_min)
+            glycol_offset = glycol_offset_slope * (fan_speed - self.fan_speed_min)
+            glycol_offset += self.fan_glycol_heater_offset_min
             self.glycol_setpoint_delta = self.heater_setpoint_delta + glycol_offset
         else:
             self.glycol_setpoint_delta = (
-                self.heater_setpoint_delta + FAN_GLYCOL_HEATER_OFFSET_MIN
+                self.heater_setpoint_delta + self.fan_glycol_heater_offset_min
             )
 
         self.m1m3_setpoints_are_stale = True

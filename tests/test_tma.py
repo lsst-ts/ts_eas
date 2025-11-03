@@ -135,6 +135,14 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 maximum_heating_rate=100,
                 slow_cooling_rate=1,
                 fast_cooling_rate=10,
+                fan_speed={
+                    "fan_speed_min": 700.0,
+                    "fan_speed_max": 2000.0,
+                    "fan_glycol_heater_offset_min": -1.0,
+                    "fan_glycol_heater_offset_max": -4.0,
+                    "fan_throttle_turn_on_temp_diff": 0.0,
+                    "fan_throttle_max_temp_diff": 1.0,
+                },
                 features_to_disable=model_args["features_to_disable"],
             )
             monitor_task = asyncio.create_task(self.tma_model.monitor())
@@ -215,7 +223,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         self.assertTrue(heater_setpoint is None)
         self.assertTrue(top_end_setpoint is not None)
         assert fan_rpm is not None
-        expected_fan_rpm = int(0.1 * eas.tma_model.FAN_SPEED_MAX)
+        expected_fan_rpm = int(0.1 * self.tma_model.fan_speed_max)
         self.assertAlmostEqual(fan_rpm[0], expected_fan_rpm, 3)
 
     async def test_disabled_top_end(self) -> None:
@@ -240,7 +248,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         self.assertTrue(top_end_setpoint is None)
         assert fan_rpm is not None
         expected_fan_rpm = int(
-            0.1 * 0.5 * (eas.tma_model.FAN_SPEED_MIN + eas.tma_model.FAN_SPEED_MAX)
+            0.1 * 0.5 * (self.tma_model.fan_speed_min + self.tma_model.fan_speed_max)
         )
         self.assertAlmostEqual(fan_rpm[0], expected_fan_rpm, 3)
 
@@ -295,11 +303,19 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 maximum_heating_rate=100,
                 slow_cooling_rate=1,
                 fast_cooling_rate=10,
+                fan_speed={
+                    "fan_speed_min": 700.0,
+                    "fan_speed_max": 2000.0,
+                    "fan_glycol_heater_offset_min": -1.0,
+                    "fan_glycol_heater_offset_max": -4.0,
+                    "fan_throttle_turn_on_temp_diff": 0.0,
+                    "fan_throttle_max_temp_diff": 1.0,
+                },
                 features_to_disable=[],
             )
 
-            fan_minimum = int(0.1 * eas.tma_model.FAN_SPEED_MIN)
-            fan_maximum = int(0.1 * eas.tma_model.FAN_SPEED_MAX)
+            fan_minimum = int(0.1 * tma_model.fan_speed_min)
+            fan_maximum = int(0.1 * tma_model.fan_speed_max)
 
             # No difference between glass and setpoint (with offset):
             #    * fan at minimum RPM (700)
@@ -308,7 +324,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             self.assertEqual(mock_m1m3ts.fan_rpm, [fan_minimum] * 96)
             self.assertEqual(
                 tma_model.glycol_setpoint_delta,
-                eas.tma_model.FAN_GLYCOL_HEATER_OFFSET_MIN + heater_setpoint_delta,
+                tma_model.fan_glycol_heater_offset_min + heater_setpoint_delta,
             )
 
             # Difference of +1°C between glass and setpoint (with offset):
@@ -319,7 +335,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             self.assertEqual(mock_m1m3ts.fan_rpm, [fan_maximum] * 96)
             self.assertEqual(
                 tma_model.glycol_setpoint_delta,
-                eas.tma_model.FAN_GLYCOL_HEATER_OFFSET_MIN + heater_setpoint_delta,
+                tma_model.fan_glycol_heater_offset_min + heater_setpoint_delta,
             )
 
             # Difference of -1°C between glass and setpoint (with offset):
@@ -330,7 +346,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             self.assertEqual(mock_m1m3ts.fan_rpm, [fan_maximum] * 96)
             self.assertEqual(
                 tma_model.glycol_setpoint_delta,
-                eas.tma_model.FAN_GLYCOL_HEATER_OFFSET_MAX + heater_setpoint_delta,
+                tma_model.fan_glycol_heater_offset_max + heater_setpoint_delta,
             )
 
     def basic_make_csc(
