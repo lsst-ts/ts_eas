@@ -277,7 +277,7 @@ additionalProperties: false
 
             self.log.info(
                 "Obtained twilight temperature from EFD for "
-                f"{twilight_time.isot}: {self.last_twilight_temperature:.2f}"
+                f"{twilight_time.isot}: {self.last_twilight_temperature:.2f}°C"
             )
             return self.last_twilight_temperature
         else:

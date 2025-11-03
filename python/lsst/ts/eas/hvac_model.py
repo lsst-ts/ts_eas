@@ -266,19 +266,17 @@ additionalProperties: false
                 average_windspeed = self.weather_model.average_windspeed
                 wind_threshold = average_windspeed < self.wind_threshold
                 if wind_threshold != cached_wind_threshold:
-                    self.log.debug(
-                        f"VEC-04 operation demanded: {average_windspeed:.2f} m/s -> {wind_threshold:.2f}"
-                    )
+                    change_message = f"VEC-04 operation demanded: {average_windspeed} m/s -> {wind_threshold}"
 
                     cached_wind_threshold = wind_threshold
                     self.last_vec04_time = utils.current_tai()
                     if wind_threshold:
-                        self.log.info("Turning on VEC-04 fan!")
+                        self.log.info(f"Turning on VEC-04 fan! {change_message}")
                         await hvac_remote.cmd_enableDevice.set_start(
                             device_id=DeviceId.lowerDamperFan03P04
                         )
                     else:
-                        self.log.info("Turning off VEC-04 fan!")
+                        self.log.info("Turning off VEC-04 fan! {change_message}")
                         await hvac_remote.cmd_disableDevice.set_start(
                             device_id=DeviceId.lowerDamperFan03P04
                         )
