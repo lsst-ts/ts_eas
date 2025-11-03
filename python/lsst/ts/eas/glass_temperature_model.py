@@ -138,7 +138,6 @@ class GlassTemperatureModel:
             samples, or None if no temperature samples are
             available.
         """
-        self.log.debug("median_temperature")
         cutoff_time = utils.current_tai() - MAX_TIMESTAMP_AGE
         valid_temperatures = [
             sample.temperature

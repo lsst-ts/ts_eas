@@ -381,7 +381,7 @@ additionalProperties: false
             glycol_setpoint = setpoint + self.glycol_setpoint_delta
             heaters_setpoint = setpoint + self.heater_setpoint_delta
             self.log.info(
-                f"Setting MTM1MTS: {glycol_setpoint=}°C {heaters_setpoint=}°C"
+                f"Setting MTM1MTS: {glycol_setpoint=:.2f}°C {heaters_setpoint=:.2f}°C"
             )
             await m1m3ts_remote.cmd_applySetpoints.set_start(
                 glycolSetpoint=glycol_setpoint,
