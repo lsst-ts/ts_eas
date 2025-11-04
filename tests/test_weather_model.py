@@ -39,6 +39,9 @@ class MockDiurnalTimer:
     def get_twilight_time(self, of_date: Time) -> Time:
         return Time("2025-01-01T00:00:00")  # Not important
 
+    def is_night(self, time: Time) -> bool:
+        return True
+
 
 class TestGetLastTwilightTemperature(
     salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase
@@ -48,22 +51,31 @@ class TestGetLastTwilightTemperature(
         log = logging.getLogger()
         self.domain = salobj.Domain()
         self.ess = salobj.Controller("ESS", 301)
+        self.indoor_ess = salobj.Controller("ESS", 112)
         self.diurnal_timer = MockDiurnalTimer()
         await self.ess.start_task
+        await self.indoor_ess.start_task
 
         self.weather_model = eas.weather_model.WeatherModel(
             domain=self.domain,
             log=log,
             diurnal_timer=self.diurnal_timer,
             efd_name="mocked",
+            ess_index=301,
+            indoor_ess_index=112,
+            wind_average_window=1800,
+            wind_minimum_window=600,
         )
         await super().asyncSetUp()
 
     async def asyncTearDown(self) -> None:
-        await self.ess.close()
-        await self.domain.close()
+        try:
+            await self.ess.close()
+            await self.indoor_ess.close()
+            await self.domain.close()
 
-        await super().asyncTearDown()
+        finally:
+            await super().asyncTearDown()
 
     async def test_returns_cached_value_when_present(self) -> None:
         """The model should not use EFD if a value is cached."""
@@ -132,13 +144,20 @@ class TestGetLastTwilightTemperature(
             self.weather_model.monitor_start_event.wait(), timeout=STD_TIMEOUT
         )
 
-        await self.ess.tel_temperature.set_write(
-            sensorName="",
-            timestamp=utils.current_tai(),
-            numChannels=1,
-            temperatureItem=[12.0] + [0.0] * 15,
-            location="",
-        )
+        for i in range(2):
+            await self.ess.tel_temperature.set_write(
+                sensorName="",
+                timestamp=utils.current_tai(),
+                numChannels=1,
+                temperatureItem=[12.0] + [0.0] * 15,
+                location="",
+            )
+            await self.indoor_ess.tel_dewPoint.set_write(
+                sensorName="",
+                timestamp=utils.current_tai(),
+                dewPointItem=-10.0 + i,
+                location="",
+            )
 
         await asyncio.sleep(1)  # Give the telemetry time to get through
         async with self.diurnal_timer.twilight_condition:
@@ -150,6 +169,9 @@ class TestGetLastTwilightTemperature(
         with mock.patch("lsst_efd_client.EfdClient") as EfdClient:
             result = await self.weather_model.get_last_twilight_temperature()
         self.assertEqual(result, 12.0)
+
+        # Dewpoint from first sample is -10., second sample is -9.
+        self.assertEqual(self.weather_model.nightly_maximum_indoor_dew_point, -9.0)
         EfdClient.assert_not_called()
 
         monitor_task.cancel()

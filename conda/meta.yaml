@@ -9,12 +9,13 @@ source:
 build:
   noarch: generic
   script: {{ PYTHON }} -m pip install --no-deps --ignore-installed .
+  string: "py{{ PY_VER | replace('.', '') }}{{ PKG_HASH }}_{{ PKG_BUILDNUM }}"
   entry_points:
     - run_eas = lsst.ts.eas.eas_csc:run_eas
 
 test:
   requires:
-    - ts-conda-build =0.4
+    - ts-conda-build =0.5
     - ts-xml {{ xml_version }}
     - ts-salobj {{ salobj_version }}
     - backoff

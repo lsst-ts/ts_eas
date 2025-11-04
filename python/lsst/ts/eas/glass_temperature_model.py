@@ -124,7 +124,7 @@ class GlassTemperatureModel:
 
     @property
     def median_temperature(self) -> float | None:
-        """Computes median glass temperature.
+        """Compute median glass temperature.
 
         This getter finds all temperature samples
         that are less than 5 minutes old, and
@@ -138,7 +138,6 @@ class GlassTemperatureModel:
             samples, or None if no temperature samples are
             available.
         """
-        self.log.debug("median_temperature")
         cutoff_time = utils.current_tai() - MAX_TIMESTAMP_AGE
         valid_temperatures = [
             sample.temperature
@@ -155,10 +154,10 @@ class GlassTemperatureModel:
         return statistics.median(valid_temperatures)
 
     async def monitor(self) -> None:
-        """Starts the monitor for this model.
+        """Start the monitor for this model.
 
-        Connects to the four thermal scanner ESS controllers,
-        sets up callbacks, and idles.
+        Connect to the four thermal scanner ESS controllers,
+        set up callbacks, and idle.
         """
         self.log.debug("GlassTemperatureModel.monitor")
 

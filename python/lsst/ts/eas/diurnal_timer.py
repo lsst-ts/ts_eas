@@ -21,7 +21,7 @@
 
 import asyncio
 import datetime
-from typing import Any, Optional, Type
+from typing import Any, Callable, Optional, Type
 from zoneinfo import ZoneInfo
 
 import astropy.units as u
@@ -43,17 +43,23 @@ OBSERVATORY_LOCATION = EarthLocation(
 )
 OBSERVATORY_TIME_ZONE = ZoneInfo("America/Santiago")
 
-# Accounting for the diameter of the solar disk, average atmospheric
-# refraction at the horizon, and horizon dip at the elevation of
-# Rubin Observatory, the average elevation of the sun at the moment
-# of sunset should be roughly 2.22 degrees below horizon.
-SOLAR_ELEVATION_AT_SUNSET = -2.22
+# Standard definition of sunrise / sunset with solar elevation -0.833 degrees.
+SOLAR_ELEVATION_AT_SUNSET = -0.833
+
+HOURS_PER_DAY = 24
+SECONDS_PER_HOUR = 3600
+
+CIVIL_TWILIGHT = -6.0
+NAUTICAL_TWILIGHT = -12.0
+ASTRONOMICAL_TWILIGHT = -18.0
+
+TIME_EPSILON = 1 * u.s  # A small increment of time
 
 
 def get_local_noon_time() -> Time:
-    """Returns the next local noon as an astropy.time.Time object.
+    """Return the next local noon as an astropy.time.Time object.
 
-    If the current time is past local noon today, returns noon tomorrow.
+    If the current time is past local noon today, return noon tomorrow.
     The difference from noon to noon is 24 hours except when there's
     a time change because of daylight saving time.
 
@@ -64,6 +70,7 @@ def get_local_noon_time() -> Time:
     """
 
     now = Time.now()
+    now += TIME_EPSILON
 
     # Convert current time to local datetime with correct DST info
     local_now = now.to_datetime(timezone=OBSERVATORY_TIME_ZONE)
@@ -87,7 +94,7 @@ def get_local_noon_time() -> Time:
 
 
 def get_sun_altitude_deg(t: Time) -> float:
-    """Returns the sun's altitude at the given time.
+    """Return the sun's altitude at the given time.
 
     The altitude is based on the specified observatory
     location and does not account for atmospheric
@@ -99,24 +106,26 @@ def get_sun_altitude_deg(t: Time) -> float:
         The sun's altitude (deg) above the horizon at time t.
     """
     sun = get_sun(t)
-    altaz = sun.transform_to(AltAz(obstime=t, location=OBSERVATORY_LOCATION))
+    altaz = sun.transform_to(
+        AltAz(obstime=t, location=OBSERVATORY_LOCATION, pressure=0)
+    )
     return altaz.alt.deg
 
 
 def get_crossing_time(
     target_alt: float, going_up: bool = False, search_from: Time | None = None
 ) -> Time:
-    """Computes the time when the sun will reach target_alt.
+    """Compute the time when the sun will reach target_alt.
 
     Parameters
     ----------
-    target_alt : float
+    target_alt : `float`
         The sun altitude at the twilight time to search for, in degrees.
     search_from : `~astropy.time.Time` | None
         The time to start searching from. The returned value will be
         the first instance of the sun crossing the target altitude
         after this time.
-    going_up : bool
+    going_up : `bool`
         True if searching for the crossing of the target altitude
         while the sun altitude is increasing ("sun is rising"),
         of False if the sun should be decreasing in altitude at the
@@ -135,10 +144,14 @@ def get_crossing_time(
     # Start by searching for a good window for the root finder.
     if search_from is None:
         search_from = Time.now()
-    t0 = search_from + 1 * u.s
+    t0 = search_from + TIME_EPSILON
     sun_altitude_before = get_sun_altitude_deg(t0)
-    for i in range(25):  # Start by searching the next 25 hours.
-        t1 = t0 + 1 * u.hour
+
+    # Start by searching the next 25 hours. The time between sunrises, sunsets,
+    # twilights can be more than 24 hours when days are getting longer, but
+    # (at least for Cerro Pachón) will never be more than 25 hours.
+    search_range = HOURS_PER_DAY + 1
+    for t1 in [t0 + i * u.hour for i in range(search_range + 1)]:
         sun_altitude_after = get_sun_altitude_deg(t1)
 
         if going_up:
@@ -150,33 +163,32 @@ def get_crossing_time(
 
         # Nope, keep looking
         sun_altitude_before = sun_altitude_after
-        t0 = t1
 
-    t0 = t0.unix
     t1 = t1.unix
+    t0 = t1 - SECONDS_PER_HOUR
     t_cross = brentq(f, t0, t1)
     return Time(t_cross, format="unix")
 
 
 class DiurnalTimer:
-    """A class representing a timer to wait for noon and for evening twilight.
+    """A class representing a timer for noon, evening twilight, and sunrise.
 
     Parameters
     ----------
-    sun_altitude : str | float
+    sun_altitude : `str` | `float`
         The sun altitude (degrees) below the horizon that is considered the
         end of twilight. This can be a number between 0 and -90 or it can
         be one of "civil" (-6 degrees), "nautical" (-12 degrees), or
         "astronomical"(-18 degrees).
     """
 
-    def __init__(self, sun_altitude: str | float = -18.0):
+    def __init__(self, sun_altitude: str | float = NAUTICAL_TWILIGHT):
         if sun_altitude == "civil":
-            sun_altitude = -6.0
+            sun_altitude = CIVIL_TWILIGHT
         elif sun_altitude == "nautical":
-            sun_altitude = -12.0
+            sun_altitude = NAUTICAL_TWILIGHT
         elif sun_altitude == "astronomical":
-            sun_altitude = -18.0
+            sun_altitude = ASTRONOMICAL_TWILIGHT
         elif isinstance(sun_altitude, str):
             raise RuntimeError(
                 "Allowed string values for "
@@ -188,85 +200,153 @@ class DiurnalTimer:
 
         self.sun_altitude = sun_altitude
         self.twilight_time: Time | None = None
+        self.sunrise_time: Time | None = None
 
         self._noon_loop_ready = asyncio.Event()
         self._twilight_loop_ready = asyncio.Event()
+        self._sunrise_loop_ready = asyncio.Event()
 
         self.noon_condition = asyncio.Condition()
         self.twilight_condition = asyncio.Condition()
+        self.sunrise_condition = asyncio.Condition()
 
         self.is_running = False
         self._tasks: list[asyncio.Task] = []
 
-    async def _run_noon_loop(self) -> None:
-        """Notifies noon_condition whenever it's noon.
+    @staticmethod
+    def _seconds_until(target: Time, now: Time | None = None) -> float:
+        """Return time from `now` until `target` in seconds.
 
-        This method loops, notifying for noon_condition each day.
-        """
-        while self.is_running:
-            local_noon = get_local_noon_time()
-            wait_seconds = (local_noon - Time.now()).sec
-            self._noon_loop_ready.set()
-
-            await asyncio.sleep(wait_seconds)
-
-            async with self.noon_condition:
-                self.noon_condition.notify_all()
-
-    def get_twilight_time(self, after: Time) -> Time:
-        """Returns the time of next end of twilight for the given time.
+        If the target has already passed, return zero to avoid
+        passing a negative value to `sleep`.
 
         Parameters
         ----------
-        after : `~astropy.time.Time`
-            Time returned will be time corresponding to the
-            end of twilight on or after this time.
+        target: `~astropy.time.Time`
+            The future event that is to be timed.
+
+        now: `~astropy.time.Time`
+            The starting time, or None if `Time.now()` should be used.
+
+        Returns
+        -------
+        float
+            Number of seconds from `now` until `target`.
         """
-        return get_crossing_time(self.sun_altitude, going_up=False, search_from=after)
+        now = now or Time.now()
+        dt = (target - now).sec
+        return max(60.0, dt)
 
-    async def _run_twilight_loop(self) -> None:
-        """Notifies twilight_condition whenever it's noon.
+    async def _run_loop(
+        self,
+        *,
+        name: str,
+        compute_next: Callable[[], Time],
+        set_time_attr: Callable[[Time], None],
+        condition: asyncio.Condition,
+        ready_event: asyncio.Event,
+    ) -> None:
+        """
+        Background loop to schedule and notify a diurnal event.
 
-        This method loops, notifying for twilight_condition each day.
+        Compute the next occurrence of an event (e.g., noon, twilight,
+        sunrise), wait until that time, and then notify all tasks waiting
+        on the associated condition. Continues the loop until the timer is
+        stopped or the task is cancelled.
+
+        Parameters
+        ----------
+        name : str
+            A human-readable label for the loop.
+        compute_next : Callable[[], `~astropy.time.Time`]
+            Function that computes the next scheduled time for this event.
+            Must return a `Time` strictly after the current time.
+        set_time_attr : Callable[[`~astropy.time.Time`], None]
+            Callback invoked with the computed time, to update the attribute.
+        condition : asyncio.Condition
+            Condition variable that is notified whenever the event occurs.
+        ready_event : asyncio.Event
+            Event set after the first successful computation.
         """
         while self.is_running:
-            # Search for time of twilight and sunrise in the next 25 hours.
-            # Not necessarily valid in the polar regions, but fine for Rubin.
-            self.twilight_time = get_crossing_time(self.sun_altitude, going_up=False)
-            self.sunrise_time = get_crossing_time(
-                SOLAR_ELEVATION_AT_SUNSET, going_up=True
-            )
-            wait_seconds = self.seconds_until_twilight(Time.now())
-            self._twilight_loop_ready.set()
+            next_time = compute_next()
+            set_time_attr(next_time)
+            wait_seconds = self._seconds_until(next_time, Time.now())
+
+            if not ready_event.is_set():
+                ready_event.set()
 
             await asyncio.sleep(wait_seconds)
 
-            async with self.twilight_condition:
-                self.twilight_condition.notify_all()
+            async with condition:
+                condition.notify_all()
+
+    def _next_noon(self) -> Time:
+        """Return time of next noon."""
+        return get_local_noon_time()
+
+    def _next_twilight(self) -> Time:
+        """Return time of next end of evening twilight."""
+        return get_crossing_time(self.sun_altitude, going_up=False)
+
+    def _next_sunrise(self) -> Time:
+        """Return time of next sunrise."""
+        return get_crossing_time(
+            SOLAR_ELEVATION_AT_SUNSET,
+            going_up=True,
+        )
 
     async def start(self) -> None:
-        """Starts the timers and begins notifying for the conditions."""
+        """Start the timers and begin notifying for the conditions."""
         if self.is_running:
             return
+
         self.is_running = True
         self._tasks = [
-            asyncio.create_task(self._run_noon_loop()),
-            asyncio.create_task(self._run_twilight_loop()),
+            asyncio.create_task(
+                self._run_loop(
+                    name="noon",
+                    compute_next=self._next_noon,
+                    set_time_attr=lambda t: None,  # no public noon attr
+                    condition=self.noon_condition,
+                    ready_event=self._noon_loop_ready,
+                )
+            ),
+            asyncio.create_task(
+                self._run_loop(
+                    name="twilight",
+                    compute_next=self._next_twilight,
+                    set_time_attr=lambda t: setattr(self, "twilight_time", t),
+                    condition=self.twilight_condition,
+                    ready_event=self._twilight_loop_ready,
+                )
+            ),
+            asyncio.create_task(
+                self._run_loop(
+                    name="sunrise",
+                    compute_next=self._next_sunrise,
+                    set_time_attr=lambda t: setattr(self, "sunrise_time", t),
+                    condition=self.sunrise_condition,
+                    ready_event=self._sunrise_loop_ready,
+                )
+            ),
         ]
 
         await asyncio.gather(
             self._noon_loop_ready.wait(),
             self._twilight_loop_ready.wait(),
+            self._sunrise_loop_ready.wait(),
         )
 
     async def stop(self) -> None:
-        """Stops the timers and discontinues notificaitons."""
+        """Stop the timers and discontinue notifications."""
         if not self.is_running:
             return
         self.is_running = False
 
         self._noon_loop_ready.clear()
         self._twilight_loop_ready.clear()
+        self._sunrise_loop_ready.clear()
 
         # End tasks
         for task in self._tasks:
@@ -285,12 +365,39 @@ class DiurnalTimer:
         async with self.twilight_condition:
             self.twilight_condition.notify_all()
 
-    def sun_altitude_at(self, t_utc: float) -> float:
-        """Returns the sun altitude in degrees at the specified time.
+        async with self.sunrise_condition:
+            self.sunrise_condition.notify_all()
+
+    def get_twilight_time(self, after: Time) -> Time:
+        """Return the time of next end of twilight for the given time.
 
         Parameters
         ----------
-        t_utc : float
+        after : `~astropy.time.Time`
+            Time returned will be time corresponding to the
+            end of twilight on or after this time.
+        """
+        return get_crossing_time(self.sun_altitude, going_up=False, search_from=after)
+
+    def get_sunrise_time(self, after: Time) -> Time:
+        """Return the time of next end of twilight for the given time.
+
+        Parameters
+        ----------
+        after : `~astropy.time.Time`
+            Time returned will be time corresponding to the
+            end of twilight on or after this time.
+        """
+        return get_crossing_time(
+            SOLAR_ELEVATION_AT_SUNSET, going_up=True, search_from=after
+        )
+
+    def sun_altitude_at(self, t_utc: float) -> float:
+        """Return the sun altitude in degrees at the specified time.
+
+        Parameters
+        ----------
+        t_utc : `float`
             The time of interest to look up sun altitude, specified
             in UTC seconds in the UNIX epoch.
 
@@ -303,7 +410,7 @@ class DiurnalTimer:
         return get_sun_altitude_deg(Time(t_utc, format="unix"))
 
     def seconds_until_twilight(self, time: Time) -> float:
-        """Returns the number of seconds remaining until twilight.
+        """Return the number of seconds remaining until twilight.
 
         Parameters
         ----------
@@ -316,13 +423,42 @@ class DiurnalTimer:
             If the time calculated is negative, or is greater than
             (a little more than) one day.
         """
+        if self.twilight_time is None:
+            raise RuntimeError(
+                "seconds_until_twilight called before initialization finished."
+            )
+
         t = (self.twilight_time - time).sec
-        if t < 0 or t > 25 * 3600:
-            raise ValueError("Time until twilight unexpectedly out of range: {t}")
+        if t < 0 or t > (HOURS_PER_DAY + 1) * SECONDS_PER_HOUR:
+            raise ValueError(f"Time until twilight unexpectedly out of range: {t}")
+        return t
+
+    def seconds_until_sunrise(self, time: Time) -> float:
+        """Return the number of seconds remaining until sunrise.
+
+        Parameters
+        ----------
+        time : `~astropy.time.Time`
+            The time from which to calculate the time until sunrise.
+
+        Raises
+        ------
+        `ValueError`
+            If the time calculated is negative, or is greater than
+            (a little more than) one day.
+        """
+        if self.sunrise_time is None:
+            raise RuntimeError(
+                "seconds_until_sunrise called before initialization finished."
+            )
+
+        t = (self.sunrise_time - time).sec
+        if t < 0 or t > (HOURS_PER_DAY + 1) * SECONDS_PER_HOUR:
+            raise ValueError(f"Time until sunrise unexpectedly out of range: {t}")
         return t
 
     def is_night(self, time: Time) -> bool:
-        """Returns True if `time` is in the EAS-defined night.
+        """Return True if `time` is in the EAS-defined night.
 
         If the time is after twilight and before sunrise, it is
         considered to be night.
@@ -338,6 +474,9 @@ class DiurnalTimer:
             True if and only if `time` is between the next twilight and
             sunrise.
         """
+        if self.sunrise_time is None or self.twilight_time is None:
+            raise RuntimeError("is_night called before initialization finished.")
+
         if self.sunrise_time > self.twilight_time:
             return self.twilight_time <= time <= self.sunrise_time
         else:
