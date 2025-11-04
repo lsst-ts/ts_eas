@@ -1,1 +1,0 @@
-Made fan speed parameters configurable.

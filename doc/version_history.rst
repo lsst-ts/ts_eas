@@ -1,3 +1,18 @@
+v0.9.2 (2025-11-04)
+===================
+
+New Features
+------------
+
+- Made fan speed parameters configurable. (`OSW-1147 <https://rubinobs.atlassian.net//browse/OSW-1147>`_)
+
+
+Performance Enhancement
+-----------------------
+
+- Updated ts-conda-build dependency version and conda build string. (`OSW-1207 <https://rubinobs.atlassian.net//browse/OSW-1207>`_)
+
+
 v0.9.1 (2025-09-04)
 ===================
 
