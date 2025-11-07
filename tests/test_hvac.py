@@ -293,6 +293,22 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             model.glycol_setpoint2,
         )
 
+    async def test_disable_glycol_chiller(self) -> None:
+        model = self.make_model(features_to_disable=["glycol_chillers"])
+
+        monitor_task = asyncio.create_task(model.monitor())
+        await asyncio.sleep(STD_SLEEP)
+        await signal_noon(self.diurnal)
+
+        monitor_task.cancel()
+        try:
+            await monitor_task
+        except asyncio.CancelledError:
+            pass  # expected
+
+        self.assertIsNone(model.glycol_setpoint1)
+        self.assertIsNone(model.glycol_setpoint2)
+
     async def test_missing_nightly_minimum(self) -> None:
         """Signal noon without a nightly minimum temperature."""
         self.weather.nightly_minimum_temperature = math.nan

@@ -47,6 +47,7 @@ CONFIG_SCHEMA = yaml.safe_load(
             * `room_setpoint`: HVAC setpoints will not be applied.
             * `ahu`: HVAC AHUs will not be enabled / disabled.
             * `vec04`: VEC-04 exhaust fan will not be enabled / disabled.
+            * `glycol_chillers`: Glycol chillers will not be controlled in HVAC.
             * `fanspeed`: MTM1M3TS fans will not be controlled.
             * `m1m3ts`: MTM1M3TS setpoints will not be applied.
             * `require_dome_open`: functionality will operate even when the dome is closed.
@@ -57,6 +58,7 @@ CONFIG_SCHEMA = yaml.safe_load(
             - room_setpoint
             - ahu
             - vec04
+            - glycol_chillers
             - fanspeed
             - m1m3ts
             - require_dome_open
