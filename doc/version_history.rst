@@ -1,3 +1,12 @@
+v0.9.3 (2025-11-07)
+===================
+
+New Features
+------------
+
+- Added glycol_chillers as a features_to_disable option. (`OSW-1391 <https://rubinobs.atlassian.net//browse/OSW-1391>`_)
+
+
 v0.9.2 (2025-11-04)
 ===================
 
