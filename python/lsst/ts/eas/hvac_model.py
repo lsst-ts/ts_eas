@@ -91,6 +91,7 @@ class HvacModel:
          * vec04
          * ahu
          * room_setpoint
+         * glycol_chillers
         Any other values are ignored.
     """
 
@@ -230,8 +231,14 @@ additionalProperties: false
                 tasks.extend(
                     [
                         self.wait_for_sunrise(hvac_remote=hvac_remote),
-                        self.adjust_glycol_chillers_at_noon(hvac_remote=hvac_remote),
                         self.apply_setpoint_at_night(hvac_remote=hvac_remote),
+                    ]
+                )
+
+            if "glycol_chillers" not in self.features_to_disable:
+                tasks.extend(
+                    [
+                        self.adjust_glycol_chillers_at_noon(hvac_remote=hvac_remote),
                         self.monitor_glycol_chillers(hvac_remote=hvac_remote),
                     ]
                 )
