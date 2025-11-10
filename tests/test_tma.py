@@ -98,6 +98,12 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         self.last_twilight_temperature = 20
         super().setUp()
 
+    async def asyncTearDown(self) -> None:
+        try:
+            await eas.utils.RemoteManager.reset()
+        finally:
+            await super().asyncTearDown()
+
     async def run_with_parameters(
         self,
         indoor_temperature: float | None = 10,
@@ -115,6 +121,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             M1M3TSMock() as mock_m1m3ts,
             MTMountMock() as mock_mtmount,
         ):
+            eas.utils.RemoteManager.initialize(mock_m1m3ts.domain)
             await mock_mtmount.evt_summaryState.set_write(
                 summaryState=salobj.State.ENABLED
             )
@@ -287,6 +294,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 name="MTM1M3TS", domain=mock_m1m3ts.domain
             ) as mtm1m3ts_remote,
         ):
+            eas.utils.RemoteManager.initialize(mock_m1m3ts.domain)
             tma_model = eas.tma_model.TmaModel(
                 domain=mock_m1m3ts.domain,
                 log=mock_m1m3ts.log,

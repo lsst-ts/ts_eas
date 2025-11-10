@@ -34,6 +34,7 @@ from astropy.time import Time
 from lsst.ts import salobj, utils
 
 from .diurnal_timer import DiurnalTimer
+from .utils import RemoteManager
 
 SAL_TIMEOUT = 60  # SAL timeout time. (seconds)
 TEMPERATURE_CUTOFF_TIME = (
@@ -56,8 +57,6 @@ class WeatherModel:
 
     Parameters
     ----------
-    domain : `~lsst.ts.salobj.Domain`
-        A SAL domain object for obtaining remotes.
     log : `~logging.Logger`
         A logger for log messages.
     diurnal_timer : `DiurnalTimer`
@@ -77,7 +76,6 @@ class WeatherModel:
     def __init__(
         self,
         *,
-        domain: salobj.Domain,
         log: logging.Logger,
         diurnal_timer: DiurnalTimer,
         efd_name: str,
@@ -86,7 +84,6 @@ class WeatherModel:
         wind_average_window: float,
         wind_minimum_window: float,
     ) -> None:
-        self.domain = domain
         self.log = log
         self.diurnal_timer = diurnal_timer
 
@@ -486,15 +483,10 @@ additionalProperties: false
         except Exception:
             self.log.exception("initialize_nightly_minimum failed")
 
-        async with salobj.Remote(
-            domain=self.domain,
-            name="ESS",
-            index=self.ess_index,
-        ) as weather_remote, salobj.Remote(
-            domain=self.domain,
-            name="ESS",
-            index=self.indoor_ess_index,
-        ) as indoor_remote:
+        weather_remote = await RemoteManager.get_remote("ESS", self.ess_index)
+        indoor_remote = await RemoteManager.get_remote("ESS", self.indoor_ess_index)
+
+        try:
             weather_remote.tel_airFlow.callback = self.air_flow_callback
             weather_remote.tel_temperature.callback = self.temperature_callback
             indoor_remote.tel_dewPoint.callback = self.indoor_dew_point_callback
@@ -516,6 +508,11 @@ additionalProperties: false
                             self.last_twilight_temperature = None
                             self.monitor_start_event.clear()
                             raise
+        finally:
+            weather_remote.tel_airFlow.callback = None
+            weather_remote.tel_temperature.callback = None
+            indoor_remote.tel_dewPoint.callback = None
+            indoor_remote.tel_temperature.callback = None
 
         self.monitor_start_event.clear()
 

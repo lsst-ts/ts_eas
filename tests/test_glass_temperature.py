@@ -38,10 +38,10 @@ class TestGlassTemperatureModel(
         self.temperatures: list[list[float]] | None = None
         self.timestamp: float | None = None
 
+        eas.utils.RemoteManager.initialize(self.domain)
+
         self.glass_temperature_model = (
-            eas.glass_temperature_model.GlassTemperatureModel(
-                domain=self.domain, log=self.log
-            )
+            eas.glass_temperature_model.GlassTemperatureModel(log=self.log)
         )
         self.monitor_task = asyncio.create_task(self.glass_temperature_model.monitor())
         await asyncio.wait_for(
@@ -75,6 +75,7 @@ class TestGlassTemperatureModel(
         await self.kill_task(self.thermal_scanner_task)
         await self.kill_task(self.monitor_task)
 
+        await eas.utils.RemoteManager.reset()
         await super().asyncTearDown()
 
     async def run_thermal_scanners(self) -> None:

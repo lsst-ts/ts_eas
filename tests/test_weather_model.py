@@ -53,11 +53,11 @@ class TestGetLastTwilightTemperature(
         self.ess = salobj.Controller("ESS", 301)
         self.indoor_ess = salobj.Controller("ESS", 112)
         self.diurnal_timer = MockDiurnalTimer()
+        eas.utils.RemoteManager.initialize(self.domain)
         await self.ess.start_task
         await self.indoor_ess.start_task
 
         self.weather_model = eas.weather_model.WeatherModel(
-            domain=self.domain,
             log=log,
             diurnal_timer=self.diurnal_timer,
             efd_name="mocked",
@@ -73,6 +73,7 @@ class TestGetLastTwilightTemperature(
             await self.ess.close()
             await self.indoor_ess.close()
             await self.domain.close()
+            await eas.utils.RemoteManager.reset()
 
         finally:
             await super().asyncTearDown()

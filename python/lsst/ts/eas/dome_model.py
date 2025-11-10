@@ -26,6 +26,8 @@ from collections import deque
 
 from lsst.ts import salobj, utils
 
+from .utils import RemoteManager
+
 DORMANT_TIME = 300  # Time to wait while sleeping, seconds
 MAX_TELEMETRY_AGE = 300  # Time at which apertureShutter telemetry expires, seconds
 DOME_OPEN_THRESHOLD = 50  # Dome open percentage at which the dome is considered "open"
@@ -38,19 +40,12 @@ class DomeModel:
 
     Parameters
     ---------
-    domain : `~lsst.ts.salobj.Domain`
-        A SAL domain object for obtaining remotes.
     log : `~logging.Logger`
         A logger for log messages.
 
     """
 
-    def __init__(
-        self,
-        *,
-        domain: salobj.Domain,
-    ) -> None:
-        self.domain = domain
+    def __init__(self) -> None:
         self.monitor_start_event = asyncio.Event()
 
         # Most recent tel_apertureShutter
@@ -83,16 +78,16 @@ class DomeModel:
         self.was_closed = is_closed
 
     async def monitor(self) -> None:
-        async with salobj.Remote(
-            domain=self.domain,
-            name="MTDome",
-            include=("apertureShutter",),
-        ) as dome_remote:
+        dome_remote = await RemoteManager.get_remote("MTDome")
+        try:
+
             dome_remote.tel_apertureShutter.callback = self.aperture_shutter_callback
             self.monitor_start_event.set()
 
             while True:
                 await asyncio.sleep(DORMANT_TIME)
+        finally:
+            dome_remote.tel_apertureShutter.callback = None
 
     @property
     def is_closed(self) -> bool | None:

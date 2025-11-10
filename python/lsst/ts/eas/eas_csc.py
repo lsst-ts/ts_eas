@@ -35,6 +35,7 @@ from .dome_model import DomeModel
 from .glass_temperature_model import GlassTemperatureModel
 from .hvac_model import HvacModel
 from .tma_model import TmaModel
+from .utils import RemoteManager
 from .weather_model import WeatherModel
 
 # Constants for the health monitor:
@@ -100,6 +101,8 @@ class EasCsc(salobj.ConfigurableCsc):
         self.hvac_model: HvacModel | None = None
         self.tma_model: TmaModel | None = None
 
+        RemoteManager.initialize(self.domain)
+
     async def handle_summary_state(self) -> None:
         """Override of the handle_summary_state function to
         set up the control loop.
@@ -136,10 +139,13 @@ class EasCsc(salobj.ConfigurableCsc):
 
     async def configure(self, config: SimpleNamespace) -> None:
         self.config = config
+        if self.diurnal_timer is not None:
+            await self.diurnal_timer.stop()
         self.diurnal_timer = DiurnalTimer(sun_altitude=self.config.twilight_definition)
-        self.dome_model = DomeModel(domain=self.domain)
+        await self.diurnal_timer.start()
+
+        self.dome_model = DomeModel()
         self.glass_temperature_model = GlassTemperatureModel(
-            domain=self.domain,
             log=self.log,
         )
 
@@ -154,13 +160,11 @@ class EasCsc(salobj.ConfigurableCsc):
             setattr(config, attr, validator.validate(getattr(config, attr)))
 
         self.weather_model = WeatherModel(
-            domain=self.domain,
             log=self.log,
             diurnal_timer=self.diurnal_timer,
             **self.config.weather,
         )
         self.hvac_model = HvacModel(
-            domain=self.domain,
             log=self.log,
             diurnal_timer=self.diurnal_timer,
             dome_model=self.dome_model,
@@ -195,8 +199,6 @@ class EasCsc(salobj.ConfigurableCsc):
         self.log.debug("monitor_health")
 
         while self.disabled_or_enabled:
-            await self.diurnal_timer.start()
-
             self.subtasks = [
                 asyncio.create_task(coro())
                 for coro in (

@@ -25,11 +25,12 @@ import asyncio
 import logging
 import re
 import statistics
-from contextlib import AsyncExitStack
 from dataclasses import dataclass
 
 from lsst.ts import salobj, utils
 from lsst.ts.xml.tables.m1m3 import find_thermocouple
+
+from .utils import RemoteManager
 
 SAL_INDICES = (114, 115, 116, 117)
 N_THERMOCOUPLES = 146
@@ -58,14 +59,11 @@ class GlassTemperatureModel:
 
     Parameters
     ----------
-    domain : `~lsst.ts.salobj.Domain`
-        A SAL domain object for obtaining remotes.
     log : `~logging.Logger`
         A logger for log messages.
     """
 
-    def __init__(self, *, domain: salobj.Domain, log: logging.Logger) -> None:
-        self.domain = domain
+    def __init__(self, *, log: logging.Logger) -> None:
         self.log = log
 
         self.monitor_start_event = asyncio.Event()
@@ -161,22 +159,19 @@ class GlassTemperatureModel:
         """
         self.log.debug("GlassTemperatureModel.monitor")
 
-        async with AsyncExitStack() as stack:
-            remotes = []
+        try:
+            # Set up a callback for each of the ESS indices to monitor.
             for index in SAL_INDICES:
-                remote = await stack.enter_async_context(
-                    salobj.Remote(
-                        domain=self.domain,
-                        name="ESS",
-                        index=index,
-                        include=("temperature",),
-                    )
-                )
+                remote = await RemoteManager.get_remote("ESS", index)
                 remote.tel_temperature.callback = self.temperature_callback
-                remotes.append(remote)
 
             self.monitor_start_event.set()
-
             await self.monitor_stop.wait()
+
+        finally:
+            # Clear the callbacks.
+            for index in SAL_INDICES:
+                remote = await RemoteManager.get_remote("ESS", index)
+                remote.tel_temperature.callback = None
 
         self.log.debug("GlassTemperatureModel monitor stops.")

@@ -25,9 +25,6 @@ import asyncio
 import logging
 import math
 import time
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
-from typing import Callable
 
 import yaml
 from astropy.time import Time
@@ -38,6 +35,7 @@ from lsst.ts.xml.sal_enums import State
 from .diurnal_timer import DiurnalTimer
 from .dome_model import DomeModel
 from .glass_temperature_model import GlassTemperatureModel
+from .utils import RemoteManager
 from .weather_model import WeatherModel
 
 STD_TIMEOUT = 10  # seconds
@@ -49,8 +47,6 @@ SECONDS_PER_HOUR = 3600.0  # Number of seconds in one hour
 SLOW_COOLING_START_TIME = (
     2  # Time (in hours) before twilight to begin using the slow cooling rate.
 )
-
-LastSetpointGetter = Callable[[], float | None]
 
 
 class TmaModel:
@@ -172,41 +168,6 @@ class TmaModel:
         ]
         self.fan_throttle_max_temp_diff: float = fan_speed["fan_throttle_max_temp_diff"]
 
-    @asynccontextmanager
-    async def last_setpoint_getter(
-        self, mtm1m3ts_remote: salobj.Remote
-    ) -> AsyncIterator[LastSetpointGetter]:
-        """Handle context for a function getting the last MTM1M3TS setpoint.
-
-        Parameters
-        ----------
-        mtm1m3ts_remote: salobj.Remote
-            The MTM1M3TS remote
-
-        Returns
-        -------
-        AsyncIterator[LastSetpointGetter]
-            An asynchronous iterator that yields a function. The yielded
-            function, when called, gets the most recently received MTM1M3TS
-            setpoint value as a float, or `None` if no setpoint is available.
-        """
-        salinfo_copy = salobj.SalInfo(self.domain, mtm1m3ts_remote.salinfo.name)
-        topic = salobj.topics.ReadTopic(
-            salinfo=salinfo_copy, attr_name="cmd_applySetpoints", max_history=1
-        )
-        await salinfo_copy.start()
-
-        def get_last_setpoint() -> float | None:
-            msg = topic.get()
-            if msg is None:
-                return None
-            return msg.heatersSetpoint - self.heater_setpoint_delta
-
-        try:
-            yield get_last_setpoint
-        finally:
-            await salinfo_copy.close()
-
     @classmethod
     def get_config_schema(cls) -> str:
         return yaml.safe_load(
@@ -309,67 +270,56 @@ additionalProperties: false
     async def monitor(self) -> None:
         self.log.debug("TmaModel.monitor")
 
-        async with (
-            salobj.Remote(
-                domain=self.domain,
-                name="MTM1M3TS",
-            ) as m1m3ts_remote,
-            salobj.Remote(
-                domain=self.domain,
-                name="MTMount",
-            ) as mtmount_remote,
-            self.last_setpoint_getter(m1m3ts_remote) as get_last_setpoint,
+        m1m3ts_remote = await RemoteManager.get_remote("MTM1M3TS")
+        mtmount_remote = await RemoteManager.get_remote("MTMount")
+
+        if (
+            "m1m3ts" not in self.features_to_disable
+            or "top_end" not in self.features_to_disable
         ):
-            if (
-                "m1m3ts" not in self.features_to_disable
-                or "top_end" not in self.features_to_disable
-            ):
-                ready_futures: list[asyncio.Future] = [
-                    asyncio.Future() for _ in range(2)
-                ]
-                m1m3ts_future = asyncio.gather(
-                    self.follow_ess_indoor(
-                        m1m3ts_remote=m1m3ts_remote,
-                        mtmount_remote=mtmount_remote,
-                        get_last_setpoint=get_last_setpoint,
-                        future=ready_futures[0],
-                    ),
-                    self.wait_for_sunrise(
-                        m1m3ts_remote=m1m3ts_remote,
-                        mtmount_remote=mtmount_remote,
-                        future=ready_futures[1],
-                    ),
-                )
-                await asyncio.gather(*ready_futures)
-                self.log.debug("TmaModel.monitor started")
-                self.monitor_start_event.set()
+            ready_futures: list[asyncio.Future] = [asyncio.Future() for _ in range(2)]
+            m1m3ts_future = asyncio.gather(
+                self.follow_ess_indoor(
+                    m1m3ts_remote=m1m3ts_remote,
+                    mtmount_remote=mtmount_remote,
+                    future=ready_futures[0],
+                ),
+                self.wait_for_sunrise(
+                    m1m3ts_remote=m1m3ts_remote,
+                    mtmount_remote=mtmount_remote,
+                    future=ready_futures[1],
+                ),
+            )
+            await asyncio.gather(*ready_futures)
+            self.log.debug("TmaModel.monitor started")
+            self.monitor_start_event.set()
 
-                try:
-                    await m1m3ts_future
-                except asyncio.CancelledError:
-                    m1m3ts_future.cancel()
-                    await asyncio.gather(m1m3ts_future, return_exceptions=True)
-                    raise
-                finally:
-                    if not self.top_end_task.done():
-                        self.top_end_task.cancel()
-                        try:
-                            await self.top_end_task
-                        except asyncio.CancelledError:
-                            pass  # Expected
-
-                    self.monitor_start_event.clear()
-
-                self.log.debug("TmaModel.monitor closing...")
-
-            else:
-                # If m1m3ts is disabled, just sleep.
-                while True:
+            try:
+                await m1m3ts_future
+            except asyncio.CancelledError:
+                m1m3ts_future.cancel()
+                await asyncio.gather(m1m3ts_future, return_exceptions=True)
+                raise
+            finally:
+                if not self.top_end_task.done():
+                    self.top_end_task.cancel()
                     try:
-                        await asyncio.sleep(DORMANT_TIME)
+                        await self.top_end_task
                     except asyncio.CancelledError:
-                        self.log.debug("monitor cancelled")
-                        raise
+                        pass  # Expected
+
+                self.monitor_start_event.clear()
+
+            self.log.debug("TmaModel.monitor closing...")
+
+        else:
+            # If m1m3ts is disabled, just sleep.
+            while True:
+                try:
+                    await asyncio.sleep(DORMANT_TIME)
+                except asyncio.CancelledError:
+                    self.log.debug("monitor cancelled")
+                    raise
 
     async def apply_setpoints(
         self,
@@ -537,7 +487,6 @@ additionalProperties: false
         *,
         m1m3ts_remote: salobj.Remote,
         mtmount_remote: salobj.Remote,
-        get_last_setpoint: LastSetpointGetter,
         future: asyncio.Future,
     ) -> None:
         self.log.debug("follow_ess_indoor")
@@ -573,7 +522,11 @@ additionalProperties: false
 
             await self.start_top_end_task(mtmount_remote, indoor_temperature)
 
-            last_m1m3ts_setpoint = get_last_setpoint()
+            msg = (await RemoteManager.apply_setpoints_topic()).get()
+            if msg is None:
+                last_m1m3ts_setpoint = None
+            else:
+                last_m1m3ts_setpoint = msg.heatersSetpoint - self.heater_setpoint_delta
 
             # Apply the new setpoint to change fan speed.
             if "fanspeed" not in self.features_to_disable and not math.isnan(

@@ -32,6 +32,7 @@ from lsst.ts.xml.enums.HVAC import DeviceId
 
 from .diurnal_timer import DiurnalTimer
 from .dome_model import DomeModel
+from .utils import RemoteManager
 from .weather_model import WeatherModel
 
 HVAC_SLEEP_TIME = 60.0  # How often to check the HVAC state (seconds)
@@ -44,8 +45,6 @@ class HvacModel:
 
     Parameters
     ----------
-    domain : `~lsst.ts.salobj.Domain`
-        A SAL domain object for obtaining remotes.
     log : `~logging.Logger`
         A logger for log messages.
     diurnal_timer : `DiurnalTimer`
@@ -98,7 +97,6 @@ class HvacModel:
     def __init__(
         self,
         *,
-        domain: salobj.Domain,
         log: logging.Logger,
         diurnal_timer: DiurnalTimer,
         dome_model: DomeModel,
@@ -114,7 +112,6 @@ class HvacModel:
         glycol_absolute_minimum: float,
         features_to_disable: list[str],
     ) -> None:
-        self.domain = domain
         self.log = log
         self.diurnal_timer = diurnal_timer
 
@@ -220,38 +217,36 @@ additionalProperties: false
         # Give the dome model an opportunity to collect some telemetry...
         await asyncio.sleep(STD_TIMEOUT)
 
-        async with salobj.Remote(
-            domain=self.domain,
-            name="HVAC",
-            include=("enableDevice", "disableDevice", "configAhu"),
-        ) as hvac_remote:
-            tasks = [self.control_ahus_and_vec04(hvac_remote=hvac_remote)]
+        hvac_remote = await RemoteManager.get_remote("HVAC")
+        tasks = [self.control_ahus_and_vec04(hvac_remote=hvac_remote)]
 
-            if "room_setpoint" not in self.features_to_disable:
-                tasks.extend(
-                    [
-                        self.wait_for_sunrise(hvac_remote=hvac_remote),
-                        self.apply_setpoint_at_night(hvac_remote=hvac_remote),
-                    ]
-                )
+        if "room_setpoint" not in self.features_to_disable:
+            tasks.extend(
+                [
+                    self.wait_for_sunrise(hvac_remote=hvac_remote),
+                    self.apply_setpoint_at_night(hvac_remote=hvac_remote),
+                ]
+            )
 
-            if "glycol_chillers" not in self.features_to_disable:
-                tasks.extend(
-                    [
-                        self.adjust_glycol_chillers_at_noon(hvac_remote=hvac_remote),
-                        self.monitor_glycol_chillers(hvac_remote=hvac_remote),
-                    ]
-                )
+        if "glycol_chillers" not in self.features_to_disable:
+            tasks.extend(
+                [
+                    self.adjust_glycol_chillers_at_noon(hvac_remote=hvac_remote),
+                    self.monitor_glycol_chillers(hvac_remote=hvac_remote),
+                ]
+            )
 
-            hvac_future = asyncio.gather(*tasks)
+        hvac_future = asyncio.gather(*tasks)
+        self.monitor_start_event.set()
+
+        try:
+            await hvac_future
+        except asyncio.CancelledError:
+            hvac_future.cancel()
+            await asyncio.gather(hvac_future, return_exceptions=True)
+            raise
+        finally:
             self.monitor_start_event.clear()
-
-            try:
-                await hvac_future
-            except asyncio.CancelledError:
-                hvac_future.cancel()
-                await asyncio.gather(hvac_future, return_exceptions=True)
-                raise
 
     async def control_ahus_and_vec04(self, *, hvac_remote: salobj.Remote) -> None:
         cached_shutter_closed = None
@@ -339,8 +334,6 @@ additionalProperties: false
         """
         while self.diurnal_timer.is_running:
             async with self.diurnal_timer.sunrise_condition:
-                self.monitor_start_event.set()
-
                 await self.diurnal_timer.sunrise_condition.wait()
                 last_twilight_temperature = (
                     await self.weather_model.get_last_twilight_temperature()
@@ -539,8 +532,6 @@ additionalProperties: false
         """
         while self.diurnal_timer.is_running:
             async with self.diurnal_timer.noon_condition:
-                self.monitor_start_event.set()
-
                 await self.diurnal_timer.noon_condition.wait()
                 if not self.diurnal_timer.is_running:
                     return

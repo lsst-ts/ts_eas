@@ -27,7 +27,7 @@ from typing import TypedDict
 
 import astropy
 from lsst.ts import salobj
-from lsst.ts.eas import hvac_model
+from lsst.ts.eas import hvac_model, utils
 from lsst.ts.xml.enums.HVAC import DeviceId
 
 STD_TIMEOUT = 10
@@ -144,6 +144,8 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         self.hvac = HvacMock()
         await self.hvac.start_task
 
+        utils.RemoteManager.initialize(self.hvac.domain)
+
         self.remote = salobj.Remote(name="HVAC", domain=self.hvac.domain)
         await self.remote.start_task
 
@@ -174,7 +176,6 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         params.update(overrides)
 
         return hvac_model.HvacModel(
-            domain=self.hvac.domain,
             log=self.log,
             diurnal_timer=self.diurnal,
             dome_model=self.dome,
@@ -186,6 +187,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         try:
             await self.remote.close()
             await self.hvac.close()
+            await utils.RemoteManager.reset()
         finally:
             await super().asyncTearDown()
 
