@@ -49,6 +49,11 @@ STD_TIMEOUT = 10  # seconds
 # Error codes
 DOME_MONITOR_FAILED = 101
 
+THERMAL_SCANNER_1_INDEX = 114
+THERMAL_SCANNER_2_INDEX = 115
+THERMAL_SCANNER_3_INDEX = 116
+THERMAL_SCANNER_4_INDEX = 117
+
 
 def run_eas() -> None:
     asyncio.run(EasCsc.amain(index=None))
@@ -100,6 +105,61 @@ class EasCsc(salobj.ConfigurableCsc):
         self.hvac_model: HvacModel | None = None
         self.tma_model: TmaModel | None = None
 
+        self.dome_remote = salobj.Remote(
+            domain=self.domain,
+            name="MTDome",
+            readonly=True,
+            include=["apertureShutter"],
+        )
+        self.ess_ts1_remote = salobj.Remote(
+            domain=self.domain,
+            name="ESS",
+            index=THERMAL_SCANNER_1_INDEX,
+            readonly=True,
+            include=["temperature"],
+        )
+        self.ess_ts2_remote = salobj.Remote(
+            domain=self.domain,
+            name="ESS",
+            index=THERMAL_SCANNER_2_INDEX,
+            include=["temperature"],
+        )
+        self.ess_ts3_remote = salobj.Remote(
+            domain=self.domain,
+            name="ESS",
+            index=THERMAL_SCANNER_3_INDEX,
+            include=["temperature"],
+        )
+        self.ess_ts4_remote = salobj.Remote(
+            domain=self.domain,
+            name="ESS",
+            index=THERMAL_SCANNER_4_INDEX,
+            include=["temperature"],
+        )
+        self.mtm1m3ts_remote = salobj.Remote(
+            domain=self.domain,
+            name="MTM1M3TS",
+            include=["applySetpoints", "appliedSetpoints", "heaterFanDemand"],
+        )
+        self.mtmount_remote = salobj.Remote(
+            domain=self.domain,
+            name="MTMount",
+            include=["summaryState", "setThermal"],
+        )
+        self.hvac_remote = salobj.Remote(
+            domain=self.domain,
+            name="HVAC",
+            include=[
+                "enableDevice",
+                "disableDevice",
+                "configLowerAhu",
+                "configChiller",
+            ],
+        )
+
+        self.ess_indoor_remote: salobj.Remote | None = None
+        self.ess_outdoor_remote: salobj.Remote | None = None
+
     async def handle_summary_state(self) -> None:
         """Override of the handle_summary_state function to
         set up the control loop.
@@ -134,14 +194,66 @@ class EasCsc(salobj.ConfigurableCsc):
             await self.diurnal_timer.stop()
         await super().close_tasks()
 
+    async def construct_ess_remotes(
+        self, *, indoor_ess_index: int, outdoor_ess_index: int
+    ) -> None:
+        if (
+            self.ess_indoor_remote is None
+            or self.ess_indoor_remote.index != indoor_ess_index
+        ):
+            if self.ess_indoor_remote is not None:
+                await self.ess_indoor_remote.close()
+            self.ess_indoor_remote = salobj.Remote(
+                domain=self.domain,
+                name="ESS",
+                index=indoor_ess_index,
+                readonly=True,
+                include=["temperature", "dewPoint"],
+            )
+
+        if (
+            self.ess_outdoor_remote is None
+            or self.ess_outdoor_remote.index != outdoor_ess_index
+        ):
+            if self.ess_outdoor_remote is not None:
+                await self.ess_outdoor_remote.close()
+            self.ess_outdoor_remote = salobj.Remote(
+                domain=self.domain,
+                name="ESS",
+                index=outdoor_ess_index,
+                readonly=True,
+                include=["temperature", "airFlow"],
+            )
+
     async def configure(self, config: SimpleNamespace) -> None:
         self.config = config
-        self.diurnal_timer = DiurnalTimer(sun_altitude=self.config.twilight_definition)
-        self.dome_model = DomeModel(domain=self.domain)
-        self.glass_temperature_model = GlassTemperatureModel(
-            domain=self.domain,
-            log=self.log,
+
+        await self.construct_ess_remotes(
+            indoor_ess_index=config.weather["indoor_ess_index"],
+            outdoor_ess_index=config.weather["ess_index"],
         )
+
+        if self.ess_indoor_remote is None or self.ess_outdoor_remote is None:
+            raise RuntimeError(
+                "The ESS indoor and outdoor temperature remotes did not "
+                "initialize. This is likely caused by an incorrectly "
+                "specified SAL index in the configuration file. Check "
+                "the configuration file and try again."
+            )
+
+        # Make sure temperature probe Remotes have started.
+        await asyncio.gather(
+            self.ess_indoor_remote.start_task,
+            self.ess_outdoor_remote.start_task,
+        )
+
+        if self.diurnal_timer is not None:
+            await self.diurnal_timer.stop()
+        self.diurnal_timer = DiurnalTimer(sun_altitude=self.config.twilight_definition)
+        await self.diurnal_timer.start()
+
+        self.dome_model = DomeModel()
+        self.glass_temperature_model = GlassTemperatureModel(log=self.log)
 
         # Validate the sub-schemas and update with defaults.
         for object_type, attr in (
@@ -154,30 +266,88 @@ class EasCsc(salobj.ConfigurableCsc):
             setattr(config, attr, validator.validate(getattr(config, attr)))
 
         self.weather_model = WeatherModel(
-            domain=self.domain,
             log=self.log,
             diurnal_timer=self.diurnal_timer,
             **self.config.weather,
         )
         self.hvac_model = HvacModel(
-            domain=self.domain,
             log=self.log,
             diurnal_timer=self.diurnal_timer,
             dome_model=self.dome_model,
             weather_model=self.weather_model,
+            hvac_remote=self.hvac_remote,
             features_to_disable=self.config.features_to_disable,
             **self.config.hvac,
         )
         self.tma_model = TmaModel(
-            domain=self.domain,
             log=self.log,
             diurnal_timer=self.diurnal_timer,
             dome_model=self.dome_model,
             glass_temperature_model=self.glass_temperature_model,
             weather_model=self.weather_model,
+            m1m3ts_remote=self.mtm1m3ts_remote,
+            mtmount_remote=self.mtmount_remote,
             features_to_disable=self.config.features_to_disable,
             **self.config.tma,
         )
+
+    def connect_callbacks(self) -> None:
+        """Connects callbacks to their remotes."""
+        if self.ess_indoor_remote is None or self.ess_outdoor_remote is None:
+            raise RuntimeError(
+                "The ESS indoor and outdoor temperature remotes did not "
+                "initialize. This is likely caused by an incorrectly "
+                "specified SAL index in the configuration file. Check "
+                "the configuration file and try again."
+            )
+
+        self.dome_remote.tel_apertureShutter.callback = (
+            self.dome_model.aperture_shutter_callback
+        )
+        self.ess_ts1_remote.tel_temperature.callback = (
+            self.glass_temperature_model.temperature_callback
+        )
+        self.ess_ts2_remote.tel_temperature.callback = (
+            self.glass_temperature_model.temperature_callback
+        )
+        self.ess_ts3_remote.tel_temperature.callback = (
+            self.glass_temperature_model.temperature_callback
+        )
+        self.ess_ts4_remote.tel_temperature.callback = (
+            self.glass_temperature_model.temperature_callback
+        )
+        self.ess_outdoor_remote.tel_airFlow.callback = (
+            self.weather_model.air_flow_callback
+        )
+        self.ess_outdoor_remote.tel_temperature.callback = (
+            self.weather_model.temperature_callback
+        )
+        self.ess_indoor_remote.tel_dewPoint.callback = (
+            self.weather_model.indoor_dew_point_callback
+        )
+        self.ess_indoor_remote.tel_temperature.callback = (
+            self.weather_model.indoor_temperature_callback
+        )
+
+    def disconnect_callbacks(self) -> None:
+        """Disconnects callbacks from their remotes."""
+        if self.ess_indoor_remote is None or self.ess_outdoor_remote is None:
+            raise RuntimeError(
+                "The ESS indoor and outdoor temperature remotes did not "
+                "initialize. This is likely caused by an incorrectly "
+                "specified SAL index in the configuration file. Check "
+                "the configuration file and try again."
+            )
+
+        self.dome_remote.tel_apertureShutter.callback = None
+        self.ess_ts1_remote.tel_temperature.callback = None
+        self.ess_ts2_remote.tel_temperature.callback = None
+        self.ess_ts3_remote.tel_temperature.callback = None
+        self.ess_ts4_remote.tel_temperature.callback = None
+        self.ess_outdoor_remote.tel_airFlow.callback = None
+        self.ess_outdoor_remote.tel_temperature.callback = None
+        self.ess_indoor_remote.tel_dewPoint.callback = None
+        self.ess_indoor_remote.tel_temperature.callback = None
 
     async def monitor_health(self) -> None:
         """Manage the `monitor_dome_shutter` control loop.
@@ -195,24 +365,19 @@ class EasCsc(salobj.ConfigurableCsc):
         self.log.debug("monitor_health")
 
         while self.disabled_or_enabled:
-            await self.diurnal_timer.start()
-
             self.subtasks = [
                 asyncio.create_task(coro())
                 for coro in (
-                    self.dome_model.monitor,
                     self.weather_model.monitor,
-                    self.glass_temperature_model.monitor,
                     self.hvac_model.monitor,
                     self.tma_model.monitor,
                 )
             ]
 
             # Wait for start and then signal
+            self.connect_callbacks()
             await asyncio.gather(
-                self.dome_model.monitor_start_event.wait(),
                 self.weather_model.monitor_start_event.wait(),
-                self.glass_temperature_model.monitor_start_event.wait(),
                 self.hvac_model.monitor_start_event.wait(),
                 self.tma_model.monitor_start_event.wait(),
             )
@@ -223,6 +388,7 @@ class EasCsc(salobj.ConfigurableCsc):
                 self.subtasks, return_when=asyncio.FIRST_COMPLETED
             )
             self.subtasks = []
+            self.disconnect_callbacks()
             self.monitor_start_event.clear()
 
             self.log.debug("At least one monitor task ended.")
