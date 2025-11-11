@@ -129,7 +129,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             DeviceId.lowerAHU02P05: asyncio.Event(),
             DeviceId.lowerAHU03P05: asyncio.Event(),
             DeviceId.lowerAHU04P05: asyncio.Event(),
-            DeviceId.lowerDamperFan03P04: asyncio.Event(),
+            DeviceId.loadingBayFan04P04: asyncio.Event(),
         }
 
         self.mtdome = salobj.Controller("MTDome")
@@ -208,7 +208,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 self.ahu3_state = True
             case DeviceId.lowerAHU04P05:
                 self.ahu4_state = True
-            case DeviceId.lowerDamperFan03P04:
+            case DeviceId.loadingBayFan04P04:
                 self.vec04_state = True
 
         self.hvac_events[message.device_id].set()
@@ -225,7 +225,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 self.ahu3_state = False
             case DeviceId.lowerAHU04P05:
                 self.ahu4_state = False
-            case DeviceId.lowerDamperFan03P04:
+            case DeviceId.loadingBayFan04P04:
                 self.vec04_state = False
 
         self.hvac_events[message.device_id].set()
@@ -443,7 +443,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             # And in the next run of the control loop, the
             # VEC-04 fan is enabled.
             await asyncio.wait_for(
-                self.hvac_events[DeviceId.lowerDamperFan03P04].wait(),
+                self.hvac_events[DeviceId.loadingBayFan04P04].wait(),
                 timeout=STD_TIMEOUT,
             )
 

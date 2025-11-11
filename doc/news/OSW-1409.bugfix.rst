@@ -1,0 +1,1 @@
+Changed control of VEC-04 to device ID 802.
