@@ -396,8 +396,8 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             pass  # expected
 
         # VEC-04 was enabled
-        self.assertIn(DeviceId.lowerDamperFan03P04, self.hvac.enable_called)
-        self.assertNotIn(DeviceId.lowerDamperFan03P04, self.hvac.disable_called)
+        self.assertIn(DeviceId.loadingBayFan04P04, self.hvac.enable_called)
+        self.assertNotIn(DeviceId.loadingBayFan04P04, self.hvac.disable_called)
 
         for ahu in (
             DeviceId.lowerAHU01P05,
@@ -424,13 +424,13 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
 
         # Let it enable VEC-04
         await asyncio.sleep(STD_SLEEP)
-        self.assertIn(DeviceId.lowerDamperFan03P04, self.hvac.enable_called)
-        self.assertNotIn(DeviceId.lowerDamperFan03P04, self.hvac.disable_called)
+        self.assertIn(DeviceId.loadingBayFan04P04, self.hvac.enable_called)
+        self.assertNotIn(DeviceId.loadingBayFan04P04, self.hvac.disable_called)
 
         # Wind rises above threshold --> should disable VEC-04
         self.weather.average_windspeed = 12.0
         await asyncio.sleep(STD_SLEEP)
-        self.assertIn(DeviceId.lowerDamperFan03P04, self.hvac.disable_called)
+        self.assertIn(DeviceId.loadingBayFan04P04, self.hvac.disable_called)
 
         task.cancel()
         try:
@@ -472,7 +472,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             pass  # expected
 
         # VEC-04 forced OFF on close
-        self.assertIn(DeviceId.lowerDamperFan03P04, self.hvac.disable_called)
+        self.assertIn(DeviceId.loadingBayFan04P04, self.hvac.disable_called)
 
         for ahu in (
             DeviceId.lowerAHU01P05,
@@ -501,8 +501,8 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         except asyncio.CancelledError:
             pass  # expected
 
-        self.assertNotIn(DeviceId.lowerDamperFan03P04, self.hvac.enable_called)
-        self.assertNotIn(DeviceId.lowerDamperFan03P04, self.hvac.disable_called)
+        self.assertNotIn(DeviceId.loadingBayFan04P04, self.hvac.enable_called)
+        self.assertNotIn(DeviceId.loadingBayFan04P04, self.hvac.disable_called)
 
     async def test_ahu_disabled(self) -> None:
         """AHU commands are not sent if 'ahu' in `features_to_disable`."""

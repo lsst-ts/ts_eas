@@ -280,12 +280,12 @@ additionalProperties: false
                     if wind_threshold:
                         self.log.info(f"Turning on VEC-04 fan! {change_message}")
                         await hvac_remote.cmd_enableDevice.set_start(
-                            device_id=DeviceId.lowerDamperFan03P04
+                            device_id=DeviceId.loadingBayFan04P04
                         )
                     else:
                         self.log.info("Turning off VEC-04 fan! {change_message}")
                         await hvac_remote.cmd_disableDevice.set_start(
-                            device_id=DeviceId.lowerDamperFan03P04
+                            device_id=DeviceId.loadingBayFan04P04
                         )
 
             if shutter_closed != cached_shutter_closed:
@@ -310,7 +310,7 @@ additionalProperties: false
                         # Disable the VEC-04 fan
                         self.log.info("Turning off VEC-04 fan!")
                         await hvac_remote.cmd_disableDevice.set_start(
-                            device_id=DeviceId.lowerDamperFan03P04
+                            device_id=DeviceId.loadingBayFan04P04
                         )
                         self.last_vec04_time = utils.current_tai()
                 else:
