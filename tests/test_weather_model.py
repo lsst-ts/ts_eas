@@ -36,7 +36,10 @@ class MockDiurnalTimer:
     is_running = True
     twilight_condition = asyncio.Condition()
 
-    def get_twilight_time(self, of_date: Time) -> Time:
+    def get_sunrise_time(self, after: Time) -> Time:
+        return Time("2025-01-01T00:00:00")  # Not important
+
+    def get_twilight_time(self, after: Time) -> Time:
         return Time("2025-01-01T00:00:00")  # Not important
 
     def is_night(self, time: Time) -> bool:
@@ -53,14 +56,23 @@ class TestGetLastTwilightTemperature(
         self.ess = salobj.Controller("ESS", 301)
         self.indoor_ess = salobj.Controller("ESS", 112)
         self.diurnal_timer = MockDiurnalTimer()
-        eas.utils.RemoteManager.initialize(self.domain)
+
+        self.ess_remote = salobj.Remote(domain=self.domain, name="ESS", index=301)
+        self.indoor_ess_remote = salobj.Remote(
+            domain=self.domain, name="ESS", index=112
+        )
+
         await self.ess.start_task
         await self.indoor_ess.start_task
+        await self.ess_remote.start_task
+        await self.indoor_ess_remote.start_task
 
         self.weather_model = eas.weather_model.WeatherModel(
             log=log,
             diurnal_timer=self.diurnal_timer,
             efd_name="mocked",
+            ess_indoor_remote=self.indoor_ess_remote,
+            ess_outdoor_remote=self.ess_remote,
             ess_index=301,
             indoor_ess_index=112,
             wind_average_window=1800,
@@ -73,7 +85,6 @@ class TestGetLastTwilightTemperature(
             await self.ess.close()
             await self.indoor_ess.close()
             await self.domain.close()
-            await eas.utils.RemoteManager.reset()
 
         finally:
             await super().asyncTearDown()

@@ -30,9 +30,6 @@ from dataclasses import dataclass
 from lsst.ts import salobj, utils
 from lsst.ts.xml.tables.m1m3 import find_thermocouple
 
-from .utils import RemoteManager
-
-SAL_INDICES = (114, 115, 116, 117)
 N_THERMOCOUPLES = 146
 MAX_TIMESTAMP_AGE = 300
 
@@ -61,9 +58,25 @@ class GlassTemperatureModel:
     ----------
     log : `~logging.Logger`
         A logger for log messages.
+    ess_ts1_remote : `~salobj.Remote`
+        The Remote for M1M3 thermal scanner 1.
+    ess_ts2_remote : `~salobj.Remote`
+        The Remote for M1M3 thermal scanner 2.
+    ess_ts3_remote : `~salobj.Remote`
+        The Remote for M1M3 thermal scanner 3.
+    ess_ts4_remote : `~salobj.Remote`
+        The Remote for M1M3 thermal scanner 4.
     """
 
-    def __init__(self, *, log: logging.Logger) -> None:
+    def __init__(
+        self,
+        *,
+        log: logging.Logger,
+        ess_ts1_remote: salobj.Remote,
+        ess_ts2_remote: salobj.Remote,
+        ess_ts3_remote: salobj.Remote,
+        ess_ts4_remote: salobj.Remote,
+    ) -> None:
         self.log = log
 
         self.monitor_start_event = asyncio.Event()
@@ -75,6 +88,11 @@ class GlassTemperatureModel:
         ] * N_THERMOCOUPLES
 
         self.compiled_regex = re.compile(r"m1m3-ts-\d+ (\d+)/\d+")
+
+        self.ess_ts1_remote = ess_ts1_remote
+        self.ess_ts2_remote = ess_ts2_remote
+        self.ess_ts3_remote = ess_ts3_remote
+        self.ess_ts4_remote = ess_ts4_remote
 
     async def temperature_callback(self, temperature: salobj.BaseMsgType) -> None:
         """Callback for ESS.tel_temperature.
@@ -161,17 +179,19 @@ class GlassTemperatureModel:
 
         try:
             # Set up a callback for each of the ESS indices to monitor.
-            for index in SAL_INDICES:
-                remote = await RemoteManager.get_remote("ESS", index)
-                remote.tel_temperature.callback = self.temperature_callback
+            self.ess_ts1_remote.tel_temperature.callback = self.temperature_callback
+            self.ess_ts2_remote.tel_temperature.callback = self.temperature_callback
+            self.ess_ts3_remote.tel_temperature.callback = self.temperature_callback
+            self.ess_ts4_remote.tel_temperature.callback = self.temperature_callback
 
             self.monitor_start_event.set()
             await self.monitor_stop.wait()
 
         finally:
             # Clear the callbacks.
-            for index in SAL_INDICES:
-                remote = await RemoteManager.get_remote("ESS", index)
-                remote.tel_temperature.callback = None
+            self.ess_ts1_remote.tel_temperature.callback = None
+            self.ess_ts2_remote.tel_temperature.callback = None
+            self.ess_ts3_remote.tel_temperature.callback = None
+            self.ess_ts4_remote.tel_temperature.callback = None
 
         self.log.debug("GlassTemperatureModel monitor stops.")

@@ -99,12 +99,6 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         )
         self.mock_efd_client = mock_instance
 
-    async def asyncTearDown(self) -> None:
-        try:
-            await eas.utils.RemoteManager.reset()
-        finally:
-            await super().asyncTearDown()
-
     def offset_clock(self, offset: float) -> None:
         """Applies an offset to current_tai clock mock.
 

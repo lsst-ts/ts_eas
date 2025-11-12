@@ -38,10 +38,24 @@ class TestGlassTemperatureModel(
         self.temperatures: list[list[float]] | None = None
         self.timestamp: float | None = None
 
-        eas.utils.RemoteManager.initialize(self.domain)
+        self.ess_ts1_remote = salobj.Remote(domain=self.domain, name="ESS", index=114)
+        self.ess_ts2_remote = salobj.Remote(domain=self.domain, name="ESS", index=115)
+        self.ess_ts3_remote = salobj.Remote(domain=self.domain, name="ESS", index=116)
+        self.ess_ts4_remote = salobj.Remote(domain=self.domain, name="ESS", index=117)
+
+        await self.ess_ts1_remote.start_task
+        await self.ess_ts2_remote.start_task
+        await self.ess_ts3_remote.start_task
+        await self.ess_ts4_remote.start_task
 
         self.glass_temperature_model = (
-            eas.glass_temperature_model.GlassTemperatureModel(log=self.log)
+            eas.glass_temperature_model.GlassTemperatureModel(
+                log=self.log,
+                ess_ts1_remote=self.ess_ts1_remote,
+                ess_ts2_remote=self.ess_ts2_remote,
+                ess_ts3_remote=self.ess_ts3_remote,
+                ess_ts4_remote=self.ess_ts4_remote,
+            )
         )
         self.monitor_task = asyncio.create_task(self.glass_temperature_model.monitor())
         await asyncio.wait_for(
@@ -75,7 +89,11 @@ class TestGlassTemperatureModel(
         await self.kill_task(self.thermal_scanner_task)
         await self.kill_task(self.monitor_task)
 
-        await eas.utils.RemoteManager.reset()
+        await self.ess_ts1_remote.close()
+        await self.ess_ts2_remote.close()
+        await self.ess_ts3_remote.close()
+        await self.ess_ts4_remote.close()
+
         await super().asyncTearDown()
 
     async def run_thermal_scanners(self) -> None:

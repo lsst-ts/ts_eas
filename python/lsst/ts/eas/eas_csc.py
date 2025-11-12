@@ -35,7 +35,6 @@ from .dome_model import DomeModel
 from .glass_temperature_model import GlassTemperatureModel
 from .hvac_model import HvacModel
 from .tma_model import TmaModel
-from .utils import RemoteManager
 from .weather_model import WeatherModel
 
 # Constants for the health monitor:
@@ -49,6 +48,11 @@ STD_TIMEOUT = 10  # seconds
 
 # Error codes
 DOME_MONITOR_FAILED = 101
+
+THERMAL_SCANNER_1_INDEX = 114
+THERMAL_SCANNER_2_INDEX = 115
+THERMAL_SCANNER_3_INDEX = 116
+THERMAL_SCANNER_4_INDEX = 117
 
 
 def run_eas() -> None:
@@ -101,7 +105,30 @@ class EasCsc(salobj.ConfigurableCsc):
         self.hvac_model: HvacModel | None = None
         self.tma_model: TmaModel | None = None
 
-        RemoteManager.initialize(self.domain)
+        self.dome_remote = salobj.Remote(domain=self.domain, name="MTDome")
+        self.ess_ts1_remote = salobj.Remote(
+            domain=self.domain, name="ESS", index=THERMAL_SCANNER_1_INDEX
+        )
+        self.ess_ts2_remote = salobj.Remote(
+            domain=self.domain, name="ESS", index=THERMAL_SCANNER_2_INDEX
+        )
+        self.ess_ts3_remote = salobj.Remote(
+            domain=self.domain, name="ESS", index=THERMAL_SCANNER_3_INDEX
+        )
+        self.ess_ts4_remote = salobj.Remote(
+            domain=self.domain, name="ESS", index=THERMAL_SCANNER_4_INDEX
+        )
+        self.mtm1m3ts_remote = salobj.Remote(domain=self.domain, name="MTM1M3TS")
+        self.mtmount_remote = salobj.Remote(domain=self.domain, name="MTMount")
+        self.hvac_remote = salobj.Remote(domain=self.domain, name="HVAC")
+
+        self.salinfo_copy = salobj.SalInfo(self.domain, "MTM1M3TS")
+        self.apply_setpoints_topic = salobj.topics.ReadTopic(
+            salinfo=self.salinfo_copy, attr_name="cmd_applySetpoints", max_history=1
+        )
+        self.ess_indoor_remote: salobj.Remote | None = None
+        self.ess_outdoor_remote: salobj.Remote | None = None
+        self.salinfo_start_task = asyncio.create_task(self.salinfo_copy.start())
 
     async def handle_summary_state(self) -> None:
         """Override of the handle_summary_state function to
@@ -135,18 +162,74 @@ class EasCsc(salobj.ConfigurableCsc):
         await self.shutdown_health_monitor()
         if self.diurnal_timer is not None:
             await self.diurnal_timer.stop()
+        await self.salinfo_copy.close()
         await super().close_tasks()
+
+    async def construct_ess_remotes(
+        self, *, indoor_ess_index: int, outdoor_ess_index: int
+    ) -> None:
+        if (
+            self.ess_indoor_remote is None
+            or self.ess_indoor_remote.index != indoor_ess_index
+        ):
+            if self.ess_indoor_remote is not None:
+                await self.ess_indoor_remote.close()
+            self.ess_indoor_remote = salobj.Remote(
+                domain=self.domain,
+                name="ESS",
+                index=indoor_ess_index,
+            )
+
+        if (
+            self.ess_outdoor_remote is None
+            or self.ess_outdoor_remote.index != outdoor_ess_index
+        ):
+            if self.ess_outdoor_remote is not None:
+                await self.ess_outdoor_remote.close()
+            self.ess_outdoor_remote = salobj.Remote(
+                domain=self.domain,
+                name="ESS",
+                index=outdoor_ess_index,
+            )
 
     async def configure(self, config: SimpleNamespace) -> None:
         self.config = config
+
+        await self.construct_ess_remotes(
+            indoor_ess_index=config.weather["indoor_ess_index"],
+            outdoor_ess_index=config.weather["ess_index"],
+        )
+
+        if self.ess_indoor_remote is None or self.ess_outdoor_remote is None:
+            raise RuntimeError("Incorrect remote initialization.")
+
+        # Make sure all Remotes have started.
+        await asyncio.gather(
+            self.ess_indoor_remote.start_task,
+            self.ess_outdoor_remote.start_task,
+            self.dome_remote.start_task,
+            self.ess_ts1_remote.start_task,
+            self.ess_ts2_remote.start_task,
+            self.ess_ts3_remote.start_task,
+            self.ess_ts4_remote.start_task,
+            self.mtm1m3ts_remote.start_task,
+            self.mtmount_remote.start_task,
+            self.hvac_remote.start_task,
+            self.salinfo_start_task,
+        )
+
         if self.diurnal_timer is not None:
             await self.diurnal_timer.stop()
         self.diurnal_timer = DiurnalTimer(sun_altitude=self.config.twilight_definition)
         await self.diurnal_timer.start()
 
-        self.dome_model = DomeModel()
+        self.dome_model = DomeModel(dome_remote=self.dome_remote)
         self.glass_temperature_model = GlassTemperatureModel(
             log=self.log,
+            ess_ts1_remote=self.ess_ts1_remote,
+            ess_ts2_remote=self.ess_ts2_remote,
+            ess_ts3_remote=self.ess_ts3_remote,
+            ess_ts4_remote=self.ess_ts4_remote,
         )
 
         # Validate the sub-schemas and update with defaults.
@@ -162,6 +245,8 @@ class EasCsc(salobj.ConfigurableCsc):
         self.weather_model = WeatherModel(
             log=self.log,
             diurnal_timer=self.diurnal_timer,
+            ess_indoor_remote=self.ess_indoor_remote,
+            ess_outdoor_remote=self.ess_outdoor_remote,
             **self.config.weather,
         )
         self.hvac_model = HvacModel(
@@ -169,16 +254,19 @@ class EasCsc(salobj.ConfigurableCsc):
             diurnal_timer=self.diurnal_timer,
             dome_model=self.dome_model,
             weather_model=self.weather_model,
+            hvac_remote=self.hvac_remote,
             features_to_disable=self.config.features_to_disable,
             **self.config.hvac,
         )
         self.tma_model = TmaModel(
-            domain=self.domain,
             log=self.log,
             diurnal_timer=self.diurnal_timer,
             dome_model=self.dome_model,
             glass_temperature_model=self.glass_temperature_model,
             weather_model=self.weather_model,
+            m1m3ts_remote=self.mtm1m3ts_remote,
+            mtmount_remote=self.mtmount_remote,
+            apply_setpoints_topic=self.apply_setpoints_topic,
             features_to_disable=self.config.features_to_disable,
             **self.config.tma,
         )
