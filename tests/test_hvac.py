@@ -174,11 +174,11 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         params.update(overrides)
 
         return hvac_model.HvacModel(
-            domain=self.hvac.domain,
             log=self.log,
             diurnal_timer=self.diurnal,
             dome_model=self.dome,
             weather_model=self.weather,
+            hvac_remote=self.remote,
             **params,
         )
 
@@ -263,7 +263,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         model = self.make_model()
 
         signal_task = asyncio.create_task(signal_noon(self.diurnal))
-        await model.adjust_glycol_chillers_at_noon(hvac_remote=self.remote)
+        await model.adjust_glycol_chillers_at_noon()
 
         await signal_task
 
@@ -315,7 +315,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         model = self.make_model()
 
         signal_task = asyncio.create_task(signal_noon(self.diurnal))
-        await model.adjust_glycol_chillers_at_noon(hvac_remote=self.remote)
+        await model.adjust_glycol_chillers_at_noon()
         await signal_task
 
         self.assertEqual(len(self.hvac.chiller_setpoints), 0)
@@ -331,7 +331,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         model.glycol_setpoint2 = -11
 
         signal_task = asyncio.create_task(signal_noon(self.diurnal))
-        await model.monitor_glycol_chillers(hvac_remote=self.remote)
+        await model.monitor_glycol_chillers()
         await signal_task
 
         # Setpoints should be recalculated based on
@@ -360,7 +360,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         model.glycol_setpoint2 = initial_setpoint2
 
         signal_task = asyncio.create_task(signal_noon(self.diurnal))
-        await model.monitor_glycol_chillers(hvac_remote=self.remote)
+        await model.monitor_glycol_chillers()
         await signal_task
 
         # Setpoints should NOT be recalculated
@@ -383,9 +383,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         self.weather.average_windspeed = 3.0  # below threshold 10.0
 
         model = self.make_model()
-        task = asyncio.create_task(
-            model.control_ahus_and_vec04(hvac_remote=self.remote)
-        )
+        task = asyncio.create_task(model.control_ahus_and_vec04())
 
         await asyncio.sleep(STD_SLEEP)  # Allow enough time for 5 SAL commands.
 
@@ -418,9 +416,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         self.weather.average_windspeed = 3.0
 
         model = self.make_model()
-        task = asyncio.create_task(
-            model.control_ahus_and_vec04(hvac_remote=self.remote)
-        )
+        task = asyncio.create_task(model.control_ahus_and_vec04())
 
         # Let it enable VEC-04
         await asyncio.sleep(STD_SLEEP)
@@ -445,9 +441,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         self.weather.average_windspeed = 3.0
 
         model = self.make_model()
-        task = asyncio.create_task(
-            model.control_ahus_and_vec04(hvac_remote=self.remote)
-        )
+        task = asyncio.create_task(model.control_ahus_and_vec04())
 
         # First iteration: VEC-04 ON
         await asyncio.sleep(STD_SLEEP)
@@ -489,9 +483,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         self.weather.average_windspeed = 3.0
 
         model = self.make_model(features_to_disable=["vec04"])
-        task = asyncio.create_task(
-            model.control_ahus_and_vec04(hvac_remote=self.remote)
-        )
+        task = asyncio.create_task(model.control_ahus_and_vec04())
 
         await asyncio.sleep(STD_SLEEP)
 
@@ -509,9 +501,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         self.dome.is_closed = False
 
         model = self.make_model(features_to_disable=["ahu"])
-        task = asyncio.create_task(
-            model.control_ahus_and_vec04(hvac_remote=self.remote)
-        )
+        task = asyncio.create_task(model.control_ahus_and_vec04())
 
         await asyncio.sleep(STD_SLEEP)
         self.dome.is_closed = True  # transition to open
@@ -581,9 +571,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                     features_to_disable=case.get("features_to_disable"),
                 )
 
-                task = asyncio.create_task(
-                    model.wait_for_sunrise(hvac_remote=self.remote)
-                )
+                task = asyncio.create_task(model.wait_for_sunrise())
                 await signal_sunrise(self.diurnal)
                 await asyncio.sleep(STD_SLEEP)  # let it apply
                 await self.diurnal.stop()
@@ -652,9 +640,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 self.weather.current_temperature = case["temp"]
 
                 model = self.make_model()
-                task = asyncio.create_task(
-                    model.apply_setpoint_at_night(hvac_remote=self.remote)
-                )
+                task = asyncio.create_task(model.apply_setpoint_at_night())
 
                 await asyncio.sleep(STD_SLEEP)
                 await self.diurnal.stop()

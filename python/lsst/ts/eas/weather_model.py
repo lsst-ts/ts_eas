@@ -56,12 +56,14 @@ class WeatherModel:
 
     Parameters
     ----------
-    domain : `~lsst.ts.salobj.Domain`
-        A SAL domain object for obtaining remotes.
     log : `~logging.Logger`
         A logger for log messages.
     diurnal_timer : `DiurnalTimer`
         A timekeeping class to track day/night, twilight time, etc.
+    ess_indoor_remote : `salobj.Remote`
+        A Remote for the ESS interface for the device for indoor conditions.
+    ess_outdoor_remote : `salobj.Remote`
+        A Remote for the ESS interface for the device for outdoor conditions.
     efd_name : `str`
         The EFD instance name to use for historical queries.
     ess_index : `int`
@@ -77,16 +79,16 @@ class WeatherModel:
     def __init__(
         self,
         *,
-        domain: salobj.Domain,
         log: logging.Logger,
         diurnal_timer: DiurnalTimer,
+        ess_indoor_remote: salobj.Remote,
+        ess_outdoor_remote: salobj.Remote,
         efd_name: str,
         ess_index: int,
         indoor_ess_index: int,
         wind_average_window: float,
         wind_minimum_window: float,
     ) -> None:
-        self.domain = domain
         self.log = log
         self.diurnal_timer = diurnal_timer
 
@@ -132,6 +134,10 @@ class WeatherModel:
         # for last night (if it is daytime) or the current
         # night (if it is nighttime).
         self.nightly_minimum_temperature: float = math.nan
+
+        # Remotes:
+        self.ess_outdoor_remote = ess_outdoor_remote
+        self.ess_indoor_remote = ess_indoor_remote
 
     @classmethod
     def get_config_schema(cls) -> str:
@@ -486,19 +492,15 @@ additionalProperties: false
         except Exception:
             self.log.exception("initialize_nightly_minimum failed")
 
-        async with salobj.Remote(
-            domain=self.domain,
-            name="ESS",
-            index=self.ess_index,
-        ) as weather_remote, salobj.Remote(
-            domain=self.domain,
-            name="ESS",
-            index=self.indoor_ess_index,
-        ) as indoor_remote:
-            weather_remote.tel_airFlow.callback = self.air_flow_callback
-            weather_remote.tel_temperature.callback = self.temperature_callback
-            indoor_remote.tel_dewPoint.callback = self.indoor_dew_point_callback
-            indoor_remote.tel_temperature.callback = self.indoor_temperature_callback
+        try:
+            self.ess_outdoor_remote.tel_airFlow.callback = self.air_flow_callback
+            self.ess_outdoor_remote.tel_temperature.callback = self.temperature_callback
+            self.ess_indoor_remote.tel_dewPoint.callback = (
+                self.indoor_dew_point_callback
+            )
+            self.ess_indoor_remote.tel_temperature.callback = (
+                self.indoor_temperature_callback
+            )
 
             while self.diurnal_timer.is_running:
                 async with self.diurnal_timer.twilight_condition:
@@ -516,6 +518,11 @@ additionalProperties: false
                             self.last_twilight_temperature = None
                             self.monitor_start_event.clear()
                             raise
+        finally:
+            self.ess_outdoor_remote.tel_airFlow.callback = None
+            self.ess_outdoor_remote.tel_temperature.callback = None
+            self.ess_indoor_remote.tel_dewPoint.callback = None
+            self.ess_indoor_remote.tel_temperature.callback = None
 
         self.monitor_start_event.clear()
 

@@ -44,8 +44,6 @@ class HvacModel:
 
     Parameters
     ----------
-    domain : `~lsst.ts.salobj.Domain`
-        A SAL domain object for obtaining remotes.
     log : `~logging.Logger`
         A logger for log messages.
     diurnal_timer : `DiurnalTimer`
@@ -98,11 +96,11 @@ class HvacModel:
     def __init__(
         self,
         *,
-        domain: salobj.Domain,
         log: logging.Logger,
         diurnal_timer: DiurnalTimer,
         dome_model: DomeModel,
         weather_model: WeatherModel,
+        hvac_remote: salobj.Remote,
         setpoint_lower_limit: float,
         wind_threshold: float,
         vec04_hold_time: float,
@@ -114,7 +112,6 @@ class HvacModel:
         glycol_absolute_minimum: float,
         features_to_disable: list[str],
     ) -> None:
-        self.domain = domain
         self.log = log
         self.diurnal_timer = diurnal_timer
 
@@ -143,6 +140,9 @@ class HvacModel:
         # Glycol setpoints
         self.glycol_setpoint1: float | None = None
         self.glycol_setpoint2: float | None = None
+
+        # The remote
+        self.hvac_remote = hvac_remote
 
     @classmethod
     def get_config_schema(cls) -> str:
@@ -220,40 +220,37 @@ additionalProperties: false
         # Give the dome model an opportunity to collect some telemetry...
         await asyncio.sleep(STD_TIMEOUT)
 
-        async with salobj.Remote(
-            domain=self.domain,
-            name="HVAC",
-            include=("enableDevice", "disableDevice", "configAhu"),
-        ) as hvac_remote:
-            tasks = [self.control_ahus_and_vec04(hvac_remote=hvac_remote)]
+        tasks = [self.control_ahus_and_vec04()]
 
-            if "room_setpoint" not in self.features_to_disable:
-                tasks.extend(
-                    [
-                        self.wait_for_sunrise(hvac_remote=hvac_remote),
-                        self.apply_setpoint_at_night(hvac_remote=hvac_remote),
-                    ]
-                )
+        if "room_setpoint" not in self.features_to_disable:
+            tasks.extend(
+                [
+                    self.wait_for_sunrise(),
+                    self.apply_setpoint_at_night(),
+                ]
+            )
 
-            if "glycol_chillers" not in self.features_to_disable:
-                tasks.extend(
-                    [
-                        self.adjust_glycol_chillers_at_noon(hvac_remote=hvac_remote),
-                        self.monitor_glycol_chillers(hvac_remote=hvac_remote),
-                    ]
-                )
+        if "glycol_chillers" not in self.features_to_disable:
+            tasks.extend(
+                [
+                    self.adjust_glycol_chillers_at_noon(),
+                    self.monitor_glycol_chillers(),
+                ]
+            )
 
-            hvac_future = asyncio.gather(*tasks)
+        hvac_future = asyncio.gather(*tasks)
+        self.monitor_start_event.set()
+
+        try:
+            await hvac_future
+        except asyncio.CancelledError:
+            hvac_future.cancel()
+            await asyncio.gather(hvac_future, return_exceptions=True)
+            raise
+        finally:
             self.monitor_start_event.clear()
 
-            try:
-                await hvac_future
-            except asyncio.CancelledError:
-                hvac_future.cancel()
-                await asyncio.gather(hvac_future, return_exceptions=True)
-                raise
-
-    async def control_ahus_and_vec04(self, *, hvac_remote: salobj.Remote) -> None:
+    async def control_ahus_and_vec04(self) -> None:
         cached_shutter_closed = None
         cached_wind_threshold = None
 
@@ -279,12 +276,12 @@ additionalProperties: false
                     self.last_vec04_time = utils.current_tai()
                     if wind_threshold:
                         self.log.info(f"Turning on VEC-04 fan! {change_message}")
-                        await hvac_remote.cmd_enableDevice.set_start(
+                        await self.hvac_remote.cmd_enableDevice.set_start(
                             device_id=DeviceId.loadingBayFan04P04
                         )
                     else:
-                        self.log.info("Turning off VEC-04 fan! {change_message}")
-                        await hvac_remote.cmd_disableDevice.set_start(
+                        self.log.info(f"Turning off VEC-04 fan! {change_message}")
+                        await self.hvac_remote.cmd_disableDevice.set_start(
                             device_id=DeviceId.loadingBayFan04P04
                         )
 
@@ -301,7 +298,7 @@ additionalProperties: false
                         # Enable the four AHUs
                         self.log.info("Enabling HVAC AHUs!")
                         for device in ahus:
-                            await hvac_remote.cmd_enableDevice.set_start(
+                            await self.hvac_remote.cmd_enableDevice.set_start(
                                 device_id=device
                             )
                             await asyncio.sleep(0.1)
@@ -309,7 +306,7 @@ additionalProperties: false
                     if "vec04" not in self.features_to_disable:
                         # Disable the VEC-04 fan
                         self.log.info("Turning off VEC-04 fan!")
-                        await hvac_remote.cmd_disableDevice.set_start(
+                        await self.hvac_remote.cmd_disableDevice.set_start(
                             device_id=DeviceId.loadingBayFan04P04
                         )
                         self.last_vec04_time = utils.current_tai()
@@ -317,30 +314,23 @@ additionalProperties: false
                     if "ahu" not in self.features_to_disable:
                         self.log.info("Disabling HVAC AHUs!")
                         for device in ahus:
-                            await hvac_remote.cmd_disableDevice.set_start(
+                            await self.hvac_remote.cmd_disableDevice.set_start(
                                 device_id=device
                             )
                             await asyncio.sleep(0.1)
 
             await asyncio.sleep(HVAC_SLEEP_TIME)
 
-    async def wait_for_sunrise(self, *, hvac_remote: salobj.Remote) -> None:
+    async def wait_for_sunrise(self) -> None:
         """Wait for sunrise and then set the room temperature.
 
         Wait for the timer to signal sunrise, and then obtain the
         temperature that was reported last night at the end
         of twilight, and then apply that temperature as at AHU
         setpoint.
-
-        Parameters
-        ----------
-        hvac_remote : `~lsst.ts.salobj.Remote`
-            A SALobj remote representing the HVAC.
         """
         while self.diurnal_timer.is_running:
             async with self.diurnal_timer.sunrise_condition:
-                self.monitor_start_event.set()
-
                 await self.diurnal_timer.sunrise_condition.wait()
                 last_twilight_temperature = (
                     await self.weather_model.get_last_twilight_temperature()
@@ -362,7 +352,7 @@ additionalProperties: false
                             DeviceId.lowerAHU03P05,
                             DeviceId.lowerAHU04P05,
                         ):
-                            await hvac_remote.cmd_configLowerAhu.set_start(
+                            await self.hvac_remote.cmd_configLowerAhu.set_start(
                                 device_id=device_id,
                                 workingSetpoint=setpoint,
                                 maxFanSetpoint=math.nan,
@@ -460,7 +450,7 @@ additionalProperties: false
             <= self.glycol_band_high
         )
 
-    async def monitor_glycol_chillers(self, *, hvac_remote: salobj.Remote) -> None:
+    async def monitor_glycol_chillers(self) -> None:
         """Continuously monitor and enforce glycol chiller setpoints.
 
         This coroutine runs while the diurnal timer is active. On each cycle it
@@ -468,11 +458,6 @@ additionalProperties: false
         band relative to the ambient indoor temperature. If the setpoints are
         outside of the band, new setpoints are computed and applied to the
         HVAC CSC.
-
-        Parameters
-        ----------
-        hvac_remote : `~lsst.ts.salobj.Remote`
-            A SALobj remote representing the HVAC.
         """
         self.log.debug("monitor_glycol_chillers")
         while self.diurnal_timer.is_running:
@@ -509,12 +494,12 @@ additionalProperties: false
                         self.glycol_setpoint2 = glycol_setpoint2
 
                 if self.glycol_setpoint1 is not None:
-                    await hvac_remote.cmd_configChiller.set_start(
+                    await self.hvac_remote.cmd_configChiller.set_start(
                         device_id=DeviceId.chiller01P01,
                         activeSetpoint=self.glycol_setpoint1,
                     )
                 if self.glycol_setpoint2 is not None:
-                    await hvac_remote.cmd_configChiller.set_start(
+                    await self.hvac_remote.cmd_configChiller.set_start(
                         device_id=DeviceId.chiller02P01,
                         activeSetpoint=self.glycol_setpoint2,
                     )
@@ -523,24 +508,15 @@ additionalProperties: false
 
             await asyncio.sleep(HVAC_SLEEP_TIME)
 
-    async def adjust_glycol_chillers_at_noon(
-        self, *, hvac_remote: salobj.Remote
-    ) -> None:
+    async def adjust_glycol_chillers_at_noon(self) -> None:
         """Wait for noon and then sets the glycol chillers.
 
         Wait for the timer to signal noon, and then obtain the minimum
         temperature that was reported last night, and then apply an
         appropriate temperature as the glycol setpoint.
-
-        Parameters
-        ----------
-        hvac_remote : `~lsst.ts.salobj.Remote`
-            A SALobj remote representing the HVAC.
         """
         while self.diurnal_timer.is_running:
             async with self.diurnal_timer.noon_condition:
-                self.monitor_start_event.set()
-
                 await self.diurnal_timer.noon_condition.wait()
                 if not self.diurnal_timer.is_running:
                     return
@@ -560,27 +536,22 @@ additionalProperties: false
                     self.log.error("Failed to calculate noon glycol setpoints.")
                     continue
 
-                await hvac_remote.cmd_configChiller.set_start(
+                await self.hvac_remote.cmd_configChiller.set_start(
                     device_id=DeviceId.chiller01P01,
                     activeSetpoint=self.glycol_setpoint1,
                 )
-                await hvac_remote.cmd_configChiller.set_start(
+                await self.hvac_remote.cmd_configChiller.set_start(
                     device_id=DeviceId.chiller02P01,
                     activeSetpoint=self.glycol_setpoint2,
                 )
 
-    async def apply_setpoint_at_night(self, *, hvac_remote: salobj.Remote) -> None:
+    async def apply_setpoint_at_night(self) -> None:
         """Control the HVAC setpoint during the night.
 
         At night time (defined by `DiurnalTimer.is_night`) the HVAC
         AHU setpoint should be applied based on the outside temperature,
         if the dome is closed. If the dome is open, the HVAC AHUs
         should not be enabled, and the setpoint should not matter.
-
-        Parameters
-        ----------
-        hvac_remote : `~lsst.ts.salobj.Remote`
-            A SALobj remote representing the HVAC.
         """
         warned_no_temperature = False
 
@@ -605,7 +576,7 @@ additionalProperties: false
                         DeviceId.lowerAHU03P05,
                         DeviceId.lowerAHU04P05,
                     ):
-                        await hvac_remote.cmd_configLowerAhu.set_start(
+                        await self.hvac_remote.cmd_configLowerAhu.set_start(
                             device_id=device_id,
                             workingSetpoint=setpoint,
                             maxFanSetpoint=math.nan,
