@@ -1,3 +1,12 @@
+v0.9.4 (2025-11-13)
+===================
+
+Bug Fixes
+---------
+
+- Changed control of VEC-04 to device ID 802. (`OSW-1409 <https://rubinobs.atlassian.net//browse/OSW-1409>`_)
+
+
 v0.9.3 (2025-11-07)
 ===================
 
