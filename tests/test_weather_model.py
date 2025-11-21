@@ -36,7 +36,10 @@ class MockDiurnalTimer:
     is_running = True
     twilight_condition = asyncio.Condition()
 
-    def get_twilight_time(self, of_date: Time) -> Time:
+    def get_sunrise_time(self, after: Time) -> Time:
+        return Time("2025-01-01T00:00:00")  # Not important
+
+    def get_twilight_time(self, after: Time) -> Time:
         return Time("2025-01-01T00:00:00")  # Not important
 
     def is_night(self, time: Time) -> bool:
@@ -53,11 +56,18 @@ class TestGetLastTwilightTemperature(
         self.ess = salobj.Controller("ESS", 301)
         self.indoor_ess = salobj.Controller("ESS", 112)
         self.diurnal_timer = MockDiurnalTimer()
+
+        self.ess_remote = salobj.Remote(domain=self.domain, name="ESS", index=301)
+        self.indoor_ess_remote = salobj.Remote(
+            domain=self.domain, name="ESS", index=112
+        )
+
         await self.ess.start_task
         await self.indoor_ess.start_task
+        await self.ess_remote.start_task
+        await self.indoor_ess_remote.start_task
 
         self.weather_model = eas.weather_model.WeatherModel(
-            domain=self.domain,
             log=log,
             diurnal_timer=self.diurnal_timer,
             efd_name="mocked",
@@ -66,6 +76,17 @@ class TestGetLastTwilightTemperature(
             wind_average_window=1800,
             wind_minimum_window=600,
         )
+        self.ess_remote.tel_airFlow.callback = self.weather_model.air_flow_callback
+        self.ess_remote.tel_temperature.callback = (
+            self.weather_model.temperature_callback
+        )
+        self.indoor_ess_remote.tel_dewPoint.callback = (
+            self.weather_model.indoor_dew_point_callback
+        )
+        self.indoor_ess_remote.tel_temperature.callback = (
+            self.weather_model.indoor_temperature_callback
+        )
+
         await super().asyncSetUp()
 
     async def asyncTearDown(self) -> None:

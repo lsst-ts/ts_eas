@@ -25,9 +25,6 @@ import asyncio
 import logging
 import math
 import time
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
-from typing import Callable
 
 import yaml
 from astropy.time import Time
@@ -50,16 +47,12 @@ SLOW_COOLING_START_TIME = (
     2  # Time (in hours) before twilight to begin using the slow cooling rate.
 )
 
-LastSetpointGetter = Callable[[], float | None]
-
 
 class TmaModel:
     """A model for the MTMount and M1M3TS system automation.
 
     Parameters
     ----------
-    domain : `~lsst.ts.salobj.Domain`
-        A SAL domain object for obtaining remotes.
     log : `~logging.Logger`
         A logger for log messages.
     diurnal_timer : `DiurnalTimer`
@@ -68,6 +61,10 @@ class TmaModel:
     weather_model : `WeatherModel`
         A model for the outdoor weather station, which records the last
         twilight temperature observed while the dome was opened.
+    m1m3ts_remote : `~salobj.Remote`
+        The Remote for the MTM1M3TS interface.
+    mtmount_remote : `~salobj.Remote`
+        The Remote for the MTMount interface.
     glycol_setpoint_delta : `float`
         The difference between the twilight ambient temperature and the
         setpoint to apply for the glycol, e.g., -2 if the glycol should
@@ -111,12 +108,13 @@ class TmaModel:
     def __init__(
         self,
         *,
-        domain: salobj.Domain,
         log: logging.Logger,
         diurnal_timer: DiurnalTimer,
         dome_model: DomeModel,
         weather_model: WeatherModel,
         glass_temperature_model: GlassTemperatureModel,
+        m1m3ts_remote: salobj.Remote,
+        mtmount_remote: salobj.Remote,
         glycol_setpoint_delta: float,
         heater_setpoint_delta: float,
         top_end_setpoint_delta: float,
@@ -129,7 +127,6 @@ class TmaModel:
         fan_speed: dict[str, float],
         features_to_disable: list[str],
     ) -> None:
-        self.domain = domain
         self.log = log
 
         self.monitor_start_event = asyncio.Event()
@@ -138,6 +135,10 @@ class TmaModel:
         self.dome_model = dome_model
         self.weather_model = weather_model
         self.glass_temperature_model = glass_temperature_model
+
+        # Remotes and duplicated topic:
+        self.m1m3ts_remote = m1m3ts_remote
+        self.mtmount_remote = mtmount_remote
 
         # Configuration parameters:
         self.glycol_setpoint_delta = glycol_setpoint_delta
@@ -171,41 +172,6 @@ class TmaModel:
             "fan_throttle_turn_on_temp_diff"
         ]
         self.fan_throttle_max_temp_diff: float = fan_speed["fan_throttle_max_temp_diff"]
-
-    @asynccontextmanager
-    async def last_setpoint_getter(
-        self, mtm1m3ts_remote: salobj.Remote
-    ) -> AsyncIterator[LastSetpointGetter]:
-        """Handle context for a function getting the last MTM1M3TS setpoint.
-
-        Parameters
-        ----------
-        mtm1m3ts_remote: salobj.Remote
-            The MTM1M3TS remote
-
-        Returns
-        -------
-        AsyncIterator[LastSetpointGetter]
-            An asynchronous iterator that yields a function. The yielded
-            function, when called, gets the most recently received MTM1M3TS
-            setpoint value as a float, or `None` if no setpoint is available.
-        """
-        salinfo_copy = salobj.SalInfo(self.domain, mtm1m3ts_remote.salinfo.name)
-        topic = salobj.topics.ReadTopic(
-            salinfo=salinfo_copy, attr_name="cmd_applySetpoints", max_history=1
-        )
-        await salinfo_copy.start()
-
-        def get_last_setpoint() -> float | None:
-            msg = topic.get()
-            if msg is None:
-                return None
-            return msg.heatersSetpoint - self.heater_setpoint_delta
-
-        try:
-            yield get_last_setpoint
-        finally:
-            await salinfo_copy.close()
 
     @classmethod
     def get_config_schema(cls) -> str:
@@ -309,93 +275,53 @@ additionalProperties: false
     async def monitor(self) -> None:
         self.log.debug("TmaModel.monitor")
 
-        async with (
-            salobj.Remote(
-                domain=self.domain,
-                name="MTM1M3TS",
-            ) as m1m3ts_remote,
-            salobj.Remote(
-                domain=self.domain,
-                name="MTMount",
-            ) as mtmount_remote,
-            self.last_setpoint_getter(m1m3ts_remote) as get_last_setpoint,
+        if (
+            "m1m3ts" not in self.features_to_disable
+            or "top_end" not in self.features_to_disable
         ):
-            if (
-                "m1m3ts" not in self.features_to_disable
-                or "top_end" not in self.features_to_disable
-            ):
-                ready_futures: list[asyncio.Future] = [
-                    asyncio.Future() for _ in range(2)
-                ]
-                m1m3ts_future = asyncio.gather(
-                    self.follow_ess_indoor(
-                        m1m3ts_remote=m1m3ts_remote,
-                        mtmount_remote=mtmount_remote,
-                        get_last_setpoint=get_last_setpoint,
-                        future=ready_futures[0],
-                    ),
-                    self.wait_for_sunrise(
-                        m1m3ts_remote=m1m3ts_remote,
-                        mtmount_remote=mtmount_remote,
-                        future=ready_futures[1],
-                    ),
+            self.log.debug("TmaModel.monitor started")
+
+            try:
+                await asyncio.gather(
+                    self.follow_ess_indoor(),
+                    self.wait_for_sunrise(),
                 )
-                await asyncio.gather(*ready_futures)
-                self.log.debug("TmaModel.monitor started")
-                self.monitor_start_event.set()
-
-                try:
-                    await m1m3ts_future
-                except asyncio.CancelledError:
-                    m1m3ts_future.cancel()
-                    await asyncio.gather(m1m3ts_future, return_exceptions=True)
-                    raise
-                finally:
-                    if not self.top_end_task.done():
-                        self.top_end_task.cancel()
-                        try:
-                            await self.top_end_task
-                        except asyncio.CancelledError:
-                            pass  # Expected
-
-                    self.monitor_start_event.clear()
-
-                self.log.debug("TmaModel.monitor closing...")
-
-            else:
-                # If m1m3ts is disabled, just sleep.
-                while True:
+            finally:
+                if not self.top_end_task.done():
+                    self.top_end_task.cancel()
                     try:
-                        await asyncio.sleep(DORMANT_TIME)
+                        await self.top_end_task
                     except asyncio.CancelledError:
-                        self.log.debug("monitor cancelled")
-                        raise
+                        pass  # Expected
 
-    async def apply_setpoints(
-        self,
-        *,
-        m1m3ts_remote: salobj.Remote,
-        setpoint: float,
-    ) -> None:
+                self.monitor_start_event.clear()
+
+            self.log.debug("TmaModel.monitor closing...")
+
+        else:
+            # If m1m3ts is disabled, just sleep.
+            while True:
+                try:
+                    await asyncio.sleep(DORMANT_TIME)
+                except asyncio.CancelledError:
+                    self.log.debug("monitor cancelled")
+                    raise
+
+    async def apply_setpoints(self, setpoint: float) -> None:
         if "m1m3ts" not in self.features_to_disable:
             glycol_setpoint = setpoint + self.glycol_setpoint_delta
             heaters_setpoint = setpoint + self.heater_setpoint_delta
             self.log.debug(
                 f"Setting MTM1MTS: {glycol_setpoint=:.2f}°C {heaters_setpoint=:.2f}°C"
             )
-            await m1m3ts_remote.cmd_applySetpoints.set_start(
+            await self.m1m3ts_remote.cmd_applySetpoints.set_start(
                 glycolSetpoint=glycol_setpoint,
                 heatersSetpoint=heaters_setpoint,
             )
 
         self.m1m3_setpoints_are_stale = False
 
-    async def set_fan_speed(
-        self,
-        *,
-        m1m3ts_remote: salobj.Remote,
-        setpoint: float,
-    ) -> None:
+    async def set_fan_speed(self, *, setpoint: float) -> None:
         """Compute and send the FCU fan speed based on glass temperature.
 
         The commanded fan speed is determined by the absolute difference
@@ -411,8 +337,6 @@ additionalProperties: false
 
         Parameters
         ----------
-        m1m3ts_remote : `~lsst.ts.salobj.Remote`
-            SAL remote for the M1M3 thermal system CSC.
         setpoint : `float`
             Demand temperature (°C) before applying any offsets.
         """
@@ -437,7 +361,7 @@ additionalProperties: false
         fan_speed = max(min(fan_speed, self.fan_speed_max), self.fan_speed_min)
 
         fan_rpm = int(round(0.1 * fan_speed))
-        await m1m3ts_remote.cmd_heaterFanDemand.set_start(
+        await self.m1m3ts_remote.cmd_heaterFanDemand.set_start(
             heaterPWM=[-1] * 96,
             fanRPM=[fan_rpm] * 96,
         )
@@ -459,9 +383,7 @@ additionalProperties: false
 
         self.m1m3_setpoints_are_stale = True
 
-    async def start_top_end_task(
-        self, mtmount_remote: salobj.Remote, setpoint: float
-    ) -> None:
+    async def start_top_end_task(self, setpoint: float) -> None:
         """Schedule self.apply_top_end_setpoint for asynchronous execution.
 
         This method handles canceling an outstanding call if needed and will
@@ -471,9 +393,6 @@ additionalProperties: false
 
         Parameters
         ----------
-        mtmount_remote: `~lsst.ts.salobj.Remote`
-            The remote object for MTMount CSC commands.
-
         setpoint: float
             The setpoint (without delta applied) for the mirror system.
         """
@@ -493,13 +412,9 @@ additionalProperties: false
                 )
                 self.top_end_task_warned = True
 
-        self.top_end_task = asyncio.create_task(
-            self.apply_top_end_setpoint(mtmount_remote, setpoint)
-        )
+        self.top_end_task = asyncio.create_task(self.apply_top_end_setpoint(setpoint))
 
-    async def apply_top_end_setpoint(
-        self, mtmount_remote: salobj.Remote, setpoint: float
-    ) -> None:
+    async def apply_top_end_setpoint(self, setpoint: float) -> None:
         """Apply the average temperature plus offset as the top end setpoint.
 
         This is a very simple approach to start with, but more complexity may
@@ -509,21 +424,18 @@ additionalProperties: false
 
         Parameters
         ----------
-        mtmount_remote: `~lsst.ts.salobj.Remote`
-            The remote object for MTMount CSC commands.
-
         setpoint: float
             The setpoint (without delta applied) for the mirror system.
         """
         while (
-            await mtmount_remote.evt_summaryState.aget(timeout=STD_TIMEOUT)
+            await self.mtmount_remote.evt_summaryState.aget(timeout=STD_TIMEOUT)
         ).summaryState != State.ENABLED:
             await asyncio.sleep(DORMANT_TIME)
 
         top_end_setpoint = setpoint + self.top_end_setpoint_delta
         try:
             await asyncio.wait_for(
-                mtmount_remote.cmd_setThermal.set_start(
+                self.mtmount_remote.cmd_setThermal.set_start(
                     topEndChillerSetpoint=top_end_setpoint,
                     topEndChillerState=ThermalCommandState.ON,
                 ),
@@ -532,20 +444,12 @@ additionalProperties: false
         except asyncio.TimeoutError:
             self.log.exception("Apply setpoint to top end timed out!")
 
-    async def follow_ess_indoor(
-        self,
-        *,
-        m1m3ts_remote: salobj.Remote,
-        mtmount_remote: salobj.Remote,
-        get_last_setpoint: LastSetpointGetter,
-        future: asyncio.Future,
-    ) -> None:
+    async def follow_ess_indoor(self) -> None:
         self.log.debug("follow_ess_indoor")
 
         n_failures = 0  # Number of failures to read temperature
 
-        if not future.done():
-            future.set_result(None)
+        self.monitor_start_event.set()
 
         while self.diurnal_timer.is_running:
             if "require_dome_open" not in self.features_to_disable:
@@ -571,18 +475,19 @@ additionalProperties: false
             else:
                 n_failures = 0
 
-            await self.start_top_end_task(mtmount_remote, indoor_temperature)
+            await self.start_top_end_task(indoor_temperature)
 
-            last_m1m3ts_setpoint = get_last_setpoint()
+            msg = self.m1m3ts_remote.evt_appliedSetpoints.get()
+            if msg is None:
+                last_m1m3ts_setpoint = None
+            else:
+                last_m1m3ts_setpoint = msg.heatersSetpoint - self.heater_setpoint_delta
 
             # Apply the new setpoint to change fan speed.
             if "fanspeed" not in self.features_to_disable and not math.isnan(
                 indoor_temperature
             ):
-                await self.set_fan_speed(
-                    m1m3ts_remote=m1m3ts_remote,
-                    setpoint=indoor_temperature,
-                )
+                await self.set_fan_speed(setpoint=indoor_temperature)
 
             # Maximum cooling rate depends on environmental conditions:
             #  * If the dome is open or
@@ -610,10 +515,7 @@ additionalProperties: false
 
             if last_m1m3ts_setpoint is None:
                 # No previous setpoint = apply it regardless
-                await self.apply_setpoints(
-                    m1m3ts_remote=m1m3ts_remote,
-                    setpoint=indoor_temperature,
-                )
+                await self.apply_setpoints(indoor_temperature)
             elif indoor_temperature > last_m1m3ts_setpoint:
                 # Warm the mirror if the setpoint is past the deadband
                 new_setpoint = indoor_temperature
@@ -628,10 +530,7 @@ additionalProperties: false
                         indoor_temperature,
                         last_m1m3ts_setpoint + maximum_heating_step,
                     )
-                    await self.apply_setpoints(
-                        m1m3ts_remote=m1m3ts_remote,
-                        setpoint=new_setpoint,
-                    )
+                    await self.apply_setpoints(new_setpoint)
                 else:
                     # Cool the mirror if the setpoint is past the deadband
                     new_setpoint = indoor_temperature
@@ -647,10 +546,7 @@ additionalProperties: false
                             indoor_temperature,
                             last_m1m3ts_setpoint - maximum_cooling_step,
                         )
-                        await self.apply_setpoints(
-                            m1m3ts_remote=m1m3ts_remote,
-                            setpoint=new_setpoint,
-                        )
+                        await self.apply_setpoints(setpoint=new_setpoint)
             else:
                 # Cool the mirror if the setpoint is past the deadband
                 new_setpoint = indoor_temperature
@@ -664,43 +560,24 @@ additionalProperties: false
                         last_m1m3ts_setpoint - maximum_cooling_step,
                     )
                     await self.apply_setpoints(
-                        m1m3ts_remote=m1m3ts_remote,
                         setpoint=new_setpoint,
                     )
 
             if self.m1m3_setpoints_are_stale and last_m1m3ts_setpoint is not None:
-                await self.apply_setpoints(
-                    m1m3ts_remote=m1m3ts_remote,
-                    setpoint=indoor_temperature,
-                )
+                await self.apply_setpoints(setpoint=indoor_temperature)
 
             await asyncio.sleep(self.m1m3_setpoint_cadence)
 
-    async def wait_for_sunrise(
-        self,
-        *,
-        m1m3ts_remote: salobj.Remote,
-        mtmount_remote: salobj.Remote,
-        future: asyncio.Future,
-    ) -> None:
+    async def wait_for_sunrise(self) -> None:
         """Wait for sunrise and then sets the room temperature.
 
         Wait for the timer to signal sunrise, and then obtain the
         temperature that was reported last night at the end
         of twilight, and then apply that temperature as the
         M1M3TS for the day.
-
-        Parameters
-        ----------
-        m1m3ts_remote : `~lsst.ts.salobj.Remote`
-            A SALobj remote representing the MTM1M3TS controller.
-        mtmount_remote : `~lsst.ts.salobj.Remote`
-            A SALobj remote representing the MTMount controller.
         """
         while self.diurnal_timer.is_running:
             async with self.diurnal_timer.sunrise_condition:
-                if not future.done():
-                    future.set_result(None)
 
                 await self.diurnal_timer.sunrise_condition.wait()
                 last_twilight_temperature = (
@@ -714,11 +591,5 @@ additionalProperties: false
                         "Sunrise M1M3TS and top end is set based on twilight temperature: "
                         f"{last_twilight_temperature:.2f}°C"
                     )
-                    await self.apply_setpoints(
-                        m1m3ts_remote=m1m3ts_remote,
-                        setpoint=last_twilight_temperature,
-                    )
-                    await self.start_top_end_task(
-                        mtmount_remote=mtmount_remote,
-                        setpoint=last_twilight_temperature,
-                    )
+                    await self.apply_setpoints(last_twilight_temperature)
+                    await self.start_top_end_task(last_twilight_temperature)
