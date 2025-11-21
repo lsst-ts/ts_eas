@@ -1,3 +1,12 @@
+v0.9.5 (2025-11-21)
+===================
+
+New Features
+------------
+
+- Ensured Remote objects are constructed one time only. (`OSW-1405 <https://rubinobs.atlassian.net//browse/OSW-1405>`_)
+
+
 v0.9.4 (2025-11-13)
 ===================
 
