@@ -1,1 +1,0 @@
-Ensured Remote objects are constructed one time only.
