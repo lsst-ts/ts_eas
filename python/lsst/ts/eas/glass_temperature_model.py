@@ -21,17 +21,14 @@
 
 __all__ = ["GlassTemperatureModel"]
 
-import asyncio
 import logging
 import re
 import statistics
-from contextlib import AsyncExitStack
 from dataclasses import dataclass
 
 from lsst.ts import salobj, utils
 from lsst.ts.xml.tables.m1m3 import find_thermocouple
 
-SAL_INDICES = (114, 115, 116, 117)
 N_THERMOCOUPLES = 146
 MAX_TIMESTAMP_AGE = 300
 
@@ -58,18 +55,16 @@ class GlassTemperatureModel:
 
     Parameters
     ----------
-    domain : `~lsst.ts.salobj.Domain`
-        A SAL domain object for obtaining remotes.
     log : `~logging.Logger`
         A logger for log messages.
     """
 
-    def __init__(self, *, domain: salobj.Domain, log: logging.Logger) -> None:
-        self.domain = domain
+    def __init__(
+        self,
+        *,
+        log: logging.Logger,
+    ) -> None:
         self.log = log
-
-        self.monitor_start_event = asyncio.Event()
-        self.monitor_stop = asyncio.Event()
 
         # A list of most recent temperature probe samples.
         self.thermocouple_cache: list[ThermocoupleSample | None] = [
@@ -152,31 +147,3 @@ class GlassTemperatureModel:
         if not valid_temperatures:
             return None
         return statistics.median(valid_temperatures)
-
-    async def monitor(self) -> None:
-        """Start the monitor for this model.
-
-        Connect to the four thermal scanner ESS controllers,
-        set up callbacks, and idle.
-        """
-        self.log.debug("GlassTemperatureModel.monitor")
-
-        async with AsyncExitStack() as stack:
-            remotes = []
-            for index in SAL_INDICES:
-                remote = await stack.enter_async_context(
-                    salobj.Remote(
-                        domain=self.domain,
-                        name="ESS",
-                        index=index,
-                        include=("temperature",),
-                    )
-                )
-                remote.tel_temperature.callback = self.temperature_callback
-                remotes.append(remote)
-
-            self.monitor_start_event.set()
-
-            await self.monitor_stop.wait()
-
-        self.log.debug("GlassTemperatureModel monitor stops.")

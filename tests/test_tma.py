@@ -114,18 +114,21 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         async with (
             M1M3TSMock() as mock_m1m3ts,
             MTMountMock() as mock_mtmount,
+            salobj.Remote(name="MTM1M3TS", domain=mock_m1m3ts.domain) as m1m3ts_remote,
+            salobj.Remote(name="MTMount", domain=mock_m1m3ts.domain) as mtmount_remote,
         ):
             await mock_mtmount.evt_summaryState.set_write(
                 summaryState=salobj.State.ENABLED
             )
 
             self.tma_model = eas.tma_model.TmaModel(
-                domain=mock_m1m3ts.domain,
                 log=mock_m1m3ts.log,
                 diurnal_timer=self.diurnal_timer,
                 dome_model=self.dome_model,
                 glass_temperature_model=SimpleNamespace(median_temperature=0.0),
                 weather_model=self.weather_model,
+                m1m3ts_remote=m1m3ts_remote,
+                mtmount_remote=mtmount_remote,
                 glycol_setpoint_delta=model_args["glycol_setpoint_delta"],
                 heater_setpoint_delta=model_args["heater_setpoint_delta"],
                 top_end_setpoint_delta=model_args["top_end_setpoint_delta"],
@@ -283,17 +286,17 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
 
         async with (
             M1M3TSMock() as mock_m1m3ts,
-            salobj.Remote(
-                name="MTM1M3TS", domain=mock_m1m3ts.domain
-            ) as mtm1m3ts_remote,
+            salobj.Remote(name="MTM1M3TS", domain=mock_m1m3ts.domain) as m1m3ts_remote,
+            salobj.Remote(name="MTMount", domain=mock_m1m3ts.domain) as mtmount_remote,
         ):
             tma_model = eas.tma_model.TmaModel(
-                domain=mock_m1m3ts.domain,
                 log=mock_m1m3ts.log,
                 diurnal_timer=diurnal_timer,
                 dome_model=dome_model,
                 glass_temperature_model=SimpleNamespace(median_temperature=0.0),
                 weather_model=weather_model,
+                m1m3ts_remote=m1m3ts_remote,
+                mtmount_remote=mtmount_remote,
                 glycol_setpoint_delta=-2,
                 heater_setpoint_delta=heater_setpoint_delta,
                 top_end_setpoint_delta=-1,
@@ -320,7 +323,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             # No difference between glass and setpoint (with offset):
             #    * fan at minimum RPM (700)
             #    * glycol delta at minimum (-1)
-            await tma_model.set_fan_speed(m1m3ts_remote=mtm1m3ts_remote, setpoint=1.0)
+            await tma_model.set_fan_speed(setpoint=1.0)
             self.assertEqual(mock_m1m3ts.fan_rpm, [fan_minimum] * 96)
             self.assertEqual(
                 tma_model.glycol_setpoint_delta,
@@ -331,7 +334,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             # (warming up the glass)
             #    * fan at maximum RPM (2500)
             #    * glycol delta at minimum (-1)
-            await tma_model.set_fan_speed(m1m3ts_remote=mtm1m3ts_remote, setpoint=2.0)
+            await tma_model.set_fan_speed(setpoint=2.0)
             self.assertEqual(mock_m1m3ts.fan_rpm, [fan_maximum] * 96)
             self.assertEqual(
                 tma_model.glycol_setpoint_delta,
@@ -342,7 +345,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             # (cooling the glass)
             #    * fan at maximum RPM (2500)
             #    * glycol delta at maximum (-5)
-            await tma_model.set_fan_speed(m1m3ts_remote=mtm1m3ts_remote, setpoint=0.0)
+            await tma_model.set_fan_speed(setpoint=0.0)
             self.assertEqual(mock_m1m3ts.fan_rpm, [fan_maximum] * 96)
             self.assertEqual(
                 tma_model.glycol_setpoint_delta,
