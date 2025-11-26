@@ -266,6 +266,49 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 enabled_commands=(),
             )
 
+    async def test_two_transitions(self) -> None:
+        """Like `test_standard_state_transitions`, but twice through.
+
+        This test exists to catch bugs that only appear on subsequent
+        state-machine passes, not on the initial transition sequence.
+        If re-running the `configure` command causes a problem, this
+        will catch it.
+
+        See OSW-1513 EAS fault 'Remote' object has no attribute 'index'
+        """
+        async with (
+            self.mock_extra_cscs(),
+            self.make_csc(
+                initial_state=salobj.State.STANDBY,
+                config_dir=TEST_CONFIG_DIR,
+                simulation_mode=1,
+            ),
+        ):
+            # Start in STANDBY state.
+            assert self.csc.summary_state == salobj.State.STANDBY
+            await self.assert_next_summary_state(salobj.State.STANDBY)
+
+            for _ in range(2):
+                # Send start; new state is DISABLED.
+                await self.remote.cmd_start.set_start(timeout=STD_TIMEOUT)  # type: ignore
+                assert self.csc.summary_state == salobj.State.DISABLED
+                await self.assert_next_summary_state(salobj.State.DISABLED)
+
+                # Send enable; new state is ENABLED.
+                await self.remote.cmd_enable.start(timeout=STD_TIMEOUT)  # type: ignore
+                assert self.csc.summary_state == salobj.State.ENABLED
+                await self.assert_next_summary_state(salobj.State.ENABLED)
+
+                # Send disable; new state is DISABLED.
+                await self.remote.cmd_disable.start(timeout=STD_TIMEOUT)  # type: ignore
+                assert self.csc.summary_state == salobj.State.DISABLED
+                await self.assert_next_summary_state(salobj.State.DISABLED)
+
+                # Send standby; new state is STANDBY.
+                await self.remote.cmd_standby.start(timeout=STD_TIMEOUT)  # type: ignore
+                assert self.csc.summary_state == salobj.State.STANDBY
+                await self.assert_next_summary_state(salobj.State.STANDBY)
+
     async def load_wind_history(self, wind_data_file: str) -> None:
         self.wind_data = Table.read(
             TEST_WIND_DATA_DIR / wind_data_file, format="ascii.ecsv"
