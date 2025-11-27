@@ -47,8 +47,25 @@ class DomeModel:
 
         # Most recent tel_apertureShutter
         self.aperture_shutter_telemetry: salobj.BaseMsgType | None = None
-        self.on_open: deque[asyncio.Event] = deque()
+        self.on_open: deque[tuple[asyncio.Event, float]] = deque()
+        self.delayed_events: dict[asyncio.Event, asyncio.Handle] = dict()
         self.was_closed: bool | None = None
+
+    def cancel_pending_events(self) -> None:
+        """Cancels all pending handles scheduled to set events.
+
+        Any events waiting to be set will be set at this time.
+        The handles associated with the waiting events will be
+        cancelled.
+        """
+        if not self.delayed_events:
+            return
+
+        delayed_events = dict(self.delayed_events)
+        self.delayed_events.clear()
+        for event, handle in delayed_events.items():
+            handle.cancel()
+            event.set()
 
     async def aperture_shutter_callback(
         self, aperture_shutter_telemetry: salobj.BaseMsgType
@@ -69,8 +86,19 @@ class DomeModel:
         if self.was_closed is not False and is_closed is False:
             events_to_signal = list(self.on_open)
             self.on_open.clear()
-            for event in events_to_signal:
-                event.set()
+            loop = asyncio.get_running_loop()
+
+            for event, delay in events_to_signal:
+
+                def fire_event() -> None:
+                    event.set()
+                    self.delayed_events.pop(event)
+
+                handle = loop.call_later(delay, fire_event)
+                self.delayed_events[event] = handle
+
+        elif is_closed and self.delayed_events:
+            self.cancel_pending_events()
 
         self.was_closed = is_closed
 
