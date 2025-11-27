@@ -47,8 +47,25 @@ class DomeModel:
 
         # Most recent tel_apertureShutter
         self.aperture_shutter_telemetry: salobj.BaseMsgType | None = None
-        self.on_open: deque[asyncio.Event] = deque()
+        self.on_open: deque[tuple[asyncio.Event, float]] = deque()
+        self.delayed_tasks: set[asyncio.Task] = set()
         self.was_closed: bool | None = False
+
+    async def cancel_pending_tasks(self) -> None:
+        """Cancels all pending tasks scheduled to set events.
+
+        Any events waiting to be set will be set at this time.
+        The tasks associated with the waiting events will be
+        cancelled.
+        """
+        if not self.delayed_tasks:
+            return
+
+        tasks = list(self.delayed_tasks)
+        self.delayed_tasks.clear()
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     async def aperture_shutter_callback(
         self, aperture_shutter_telemetry: salobj.BaseMsgType
@@ -69,10 +86,26 @@ class DomeModel:
         if self.was_closed is not False and is_closed is False:
             events_to_signal = list(self.on_open)
             self.on_open.clear()
-            for event in events_to_signal:
-                event.set()
+            for event, delay in events_to_signal:
+                task = asyncio.create_task(self.delayed_set(event, delay))
+                self.delayed_tasks.add(task)
+                task.add_done_callback(self.delayed_tasks.discard)
+
+        elif is_closed and self.delayed_tasks:
+            await self.cancel_pending_tasks()
 
         self.was_closed = is_closed
+
+    async def delayed_set(self, event: asyncio.Event, delay: float) -> None:
+        """Set `event` after `delay` seconds, or upon cancellation.
+
+        If the task is cancelled before the delay elapses, the event
+        is set nonetheless. Waiters should re-check the dome state.
+        """
+        try:
+            await asyncio.sleep(delay)
+        finally:
+            event.set()
 
     @property
     def is_closed(self) -> bool | None:
