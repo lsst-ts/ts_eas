@@ -47,6 +47,10 @@ class DomeModel:
 
         # Most recent tel_apertureShutter
         self.aperture_shutter_telemetry: salobj.BaseMsgType | None = None
+
+        # Most recent tel_louvers
+        self.louvers_telemetry: salobj.BaseMsgType | None = None
+
         self.on_open: deque[asyncio.Event] = deque()
         self.was_closed: bool | None = False
 
@@ -64,6 +68,13 @@ class DomeModel:
             A newly received apertureShutter telemetry item.
         """
         self.aperture_shutter_telemetry = aperture_shutter_telemetry
+        self.refresh_telemetry()
+
+    async def louvers_callback(self, louvers_telemetry: salobj.BaseMsgType) -> None:
+        self.louvers_telemetry = louvers_telemetry
+        self.refresh_telemetry()
+
+    def refresh_telemetry(self) -> None:
         is_closed = self.is_closed
 
         if self.was_closed is not False and is_closed is False:
@@ -83,12 +94,24 @@ class DomeModel:
         if self.aperture_shutter_telemetry is None:
             return None
 
-        send_timestamp = self.aperture_shutter_telemetry.private_sndStamp
+        if self.louvers_telemetry is None:
+            return None
+
+        send_timestamp = min(
+            self.aperture_shutter_telemetry.private_sndStamp,
+            self.louvers_telemetry.private_sndStamp,
+        )
         telemetry_age = utils.current_tai() - send_timestamp
         if telemetry_age > MAX_TELEMETRY_AGE:
             return None
 
-        return (
+        shutters_closed = (
             self.aperture_shutter_telemetry.positionActual[0] < DOME_OPEN_THRESHOLD
             and self.aperture_shutter_telemetry.positionActual[1] < DOME_OPEN_THRESHOLD
         )
+        louvers_closed = all(
+            position < DOME_OPEN_THRESHOLD
+            for position in self.louvers_telemetry.positionActual
+        )
+
+        return shutters_closed and louvers_closed
