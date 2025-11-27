@@ -109,7 +109,7 @@ class EasCsc(salobj.ConfigurableCsc):
             domain=self.domain,
             name="MTDome",
             readonly=True,
-            include=["apertureShutter"],
+            include=["apertureShutter", "louvers"],
         )
         self.ess_ts1_remote = salobj.Remote(
             domain=self.domain,
@@ -139,22 +139,17 @@ class EasCsc(salobj.ConfigurableCsc):
         self.mtm1m3ts_remote = salobj.Remote(
             domain=self.domain,
             name="MTM1M3TS",
-            include=["applySetpoints", "appliedSetpoints", "heaterFanDemand"],
+            include=["appliedSetpoints"],
         )
         self.mtmount_remote = salobj.Remote(
             domain=self.domain,
             name="MTMount",
-            include=["summaryState", "setThermal"],
+            include=["summaryState"],
         )
         self.hvac_remote = salobj.Remote(
             domain=self.domain,
             name="HVAC",
-            include=[
-                "enableDevice",
-                "disableDevice",
-                "configLowerAhu",
-                "configChiller",
-            ],
+            include=[],
         )
 
         self.ess_indoor_remote: salobj.Remote | None = None
@@ -308,6 +303,7 @@ class EasCsc(salobj.ConfigurableCsc):
         self.dome_remote.tel_apertureShutter.callback = (
             self.dome_model.aperture_shutter_callback
         )
+        self.dome_remote.tel_louvers.callback = self.dome_model.louvers_callback
         self.ess_ts1_remote.tel_temperature.callback = (
             self.glass_temperature_model.temperature_callback
         )
