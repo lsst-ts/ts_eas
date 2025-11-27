@@ -52,6 +52,10 @@ class HvacModel:
         A model representing the dome state.
     weather_model : `WeatherModel`
         A model representing weather conditions.
+    ahu_setpoint_delta : `float`
+        The offset that will be added to the measured temperature in
+        selecting a setpoint for the HVAC air handling units (AHUs/UMAs)
+        measured in °C.
     setpoint_lower_limit : `float`
         The minimum allowed setpoint for thermal control. If a lower setpoint
         than this is indicated from the ESS temperature readings, this setpoint
@@ -101,6 +105,7 @@ class HvacModel:
         dome_model: DomeModel,
         weather_model: WeatherModel,
         hvac_remote: salobj.Remote,
+        ahu_setpoint_delta: float,
         setpoint_lower_limit: float,
         wind_threshold: float,
         vec04_hold_time: float,
@@ -124,6 +129,7 @@ class HvacModel:
         # Configuration parameters:
         self.dome_model = dome_model
         self.weather_model = weather_model
+        self.ahu_setpoint_delta = ahu_setpoint_delta
         self.setpoint_lower_limit = setpoint_lower_limit
         self.wind_threshold = wind_threshold
         self.vec04_hold_time = vec04_hold_time
@@ -152,6 +158,13 @@ $schema: http://json-schema.org/draft-07/schema#
 description: Schema for EAS HVAC configuration.
 type: object
 properties:
+  ahu_setpoint_delta:
+    type: number
+    default: -1.0
+    description: >-
+      The offset that will be applied to the measured temperature in
+      selecting a setpoint for the HVAC air handling units (AHUs/UMAs)
+      measured in °C.
   setpoint_lower_limit:
     type: number
     default: 6.0
@@ -194,6 +207,7 @@ properties:
     default: -10.0
     description: Absolute minimum setpoint (°C) allowed for the colder glycol chiller.
 required:
+  - ahu_setpoint_delta
   - setpoint_lower_limit
   - wind_threshold
   - vec04_hold_time
@@ -342,7 +356,7 @@ additionalProperties: false
                     if "room_setpoint" not in self.features_to_disable:
                         # Time to set the room setpoint based on last twilight
                         setpoint = max(
-                            last_twilight_temperature,
+                            last_twilight_temperature + self.ahu_setpoint_delta,
                             self.setpoint_lower_limit,
                         )
 
@@ -558,7 +572,7 @@ additionalProperties: false
         while self.diurnal_timer.is_running:
             if self.diurnal_timer.is_night(Time.now()) and self.dome_model.is_closed:
                 setpoint = max(
-                    self.weather_model.current_temperature,
+                    self.weather_model.current_temperature + self.ahu_setpoint_delta,
                     self.setpoint_lower_limit,
                 )
                 if math.isnan(setpoint):
