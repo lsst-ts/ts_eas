@@ -159,6 +159,8 @@ class EasCsc(salobj.ConfigurableCsc):
 
         self.ess_indoor_remote: salobj.Remote | None = None
         self.ess_outdoor_remote: salobj.Remote | None = None
+        self.ess_indoor_remote_index: int | None = None
+        self.ess_outdoor_remote_index: int | None = None
 
     async def handle_summary_state(self) -> None:
         """Override of the handle_summary_state function to
@@ -199,7 +201,7 @@ class EasCsc(salobj.ConfigurableCsc):
     ) -> None:
         if (
             self.ess_indoor_remote is None
-            or self.ess_indoor_remote.index != indoor_ess_index
+            or self.ess_indoor_remote_index != indoor_ess_index
         ):
             if self.ess_indoor_remote is not None:
                 await self.ess_indoor_remote.close()
@@ -210,10 +212,11 @@ class EasCsc(salobj.ConfigurableCsc):
                 readonly=True,
                 include=["temperature", "dewPoint"],
             )
+            self.ess_indoor_remote_index = indoor_ess_index
 
         if (
             self.ess_outdoor_remote is None
-            or self.ess_outdoor_remote.index != outdoor_ess_index
+            or self.ess_outdoor_remote_index != outdoor_ess_index
         ):
             if self.ess_outdoor_remote is not None:
                 await self.ess_outdoor_remote.close()
@@ -224,6 +227,7 @@ class EasCsc(salobj.ConfigurableCsc):
                 readonly=True,
                 include=["temperature", "airFlow"],
             )
+            self.ess_outdoor_remote_index = outdoor_ess_index
 
     async def configure(self, config: SimpleNamespace) -> None:
         self.config = config
