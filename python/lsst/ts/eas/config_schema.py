@@ -41,6 +41,9 @@ CONFIG_SCHEMA = yaml.safe_load(
       tma:
         description: TMA configuration items.
         type: object
+      dome:
+        description: Dome configuration items.
+        type: object
       features_to_disable:
         description: >-
           List of EAS functionalities to disable. Options are:
@@ -77,6 +80,7 @@ CONFIG_SCHEMA = yaml.safe_load(
       - weather
       - hvac
       - tma
+      - dome
       - features_to_disable
       - twilight_definition
     additionalProperties: false

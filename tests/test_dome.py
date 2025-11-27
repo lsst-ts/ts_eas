@@ -20,6 +20,7 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import asyncio
+import logging
 import unittest
 from types import SimpleNamespace
 
@@ -28,33 +29,54 @@ from lsst.ts import eas, utils
 STD_SLEEP = 0.2
 
 
-def get_open_dome_telemetry() -> SimpleNamespace:
-    """Returns telemetry indicating an open dome."""
+def get_open_shutter_telemetry() -> SimpleNamespace:
+    """Returns telemetry indicating an open shutter."""
     return SimpleNamespace(
         private_sndStamp=utils.current_tai(),
         positionActual=[100.0, 100.0],
     )
 
 
-def get_closed_dome_telemetry() -> SimpleNamespace:
-    """Returns telemetry indicating an closed dome."""
+def get_closed_shutter_telemetry() -> SimpleNamespace:
+    """Returns telemetry indicating an closed shutter."""
     return SimpleNamespace(
         private_sndStamp=utils.current_tai(),
         positionActual=[0.0, 0.0],
     )
 
 
+def get_open_louver_telemetry() -> SimpleNamespace:
+    """Returns telemetry indicating at least one louver is open."""
+    return SimpleNamespace(
+        private_sndStamp=utils.current_tai(),
+        # One open, others closed
+        positionActual=[0.0] * 10 + [100.0] + [0.0] * 23,
+    )
+
+
+def get_closed_louver_telemetry() -> SimpleNamespace:
+    """Returns telemetry indicating all louvers are closed."""
+    return SimpleNamespace(
+        private_sndStamp=utils.current_tai(),
+        positionActual=[0.0] * 34,
+    )
+
+
 class TestDomeModel(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
-        self.model = eas.dome_model.DomeModel()
+        self.model = eas.dome_model.DomeModel(
+            log=logging.getLogger(),
+            dome_open_threshold=50.0,
+        )
         # Always start with dome closed.
-        await self.model.aperture_shutter_callback(get_closed_dome_telemetry())
+        await self.model.aperture_shutter_callback(get_closed_shutter_telemetry())
+        await self.model.louvers_callback(get_closed_louver_telemetry())
 
     async def test_cancel_pending_events_cancels_and_sets_events(self) -> None:
         event = asyncio.Event()
 
         self.model.on_open.append((event, 1000.0))
-        await self.model.aperture_shutter_callback(get_open_dome_telemetry())
+        await self.model.aperture_shutter_callback(get_open_shutter_telemetry())
 
         handle = self.model.delayed_events.get(event)
         self.model.cancel_pending_events()
@@ -72,7 +94,7 @@ class TestDomeModel(unittest.IsolatedAsyncioTestCase):
         self.model.on_open.append((event, delay))
 
         # Open the dome
-        await self.model.aperture_shutter_callback(get_open_dome_telemetry())
+        await self.model.aperture_shutter_callback(get_open_shutter_telemetry())
 
         # on_open should be cleared
         self.assertFalse(self.model.on_open)
@@ -90,29 +112,65 @@ class TestDomeModel(unittest.IsolatedAsyncioTestCase):
         self.model.on_open.append((event, delay))
 
         # Open the dome...
-        await self.model.aperture_shutter_callback(get_open_dome_telemetry())
+        await self.model.aperture_shutter_callback(get_open_shutter_telemetry())
 
         self.assertEqual(len(self.model.delayed_events), 1)
         await asyncio.sleep(0)
 
         # Close the dome before the delay expires...
-        await self.model.aperture_shutter_callback(get_closed_dome_telemetry())
+        await self.model.aperture_shutter_callback(get_closed_shutter_telemetry())
         await asyncio.sleep(0)
 
         self.assertTrue(event.is_set())
         self.assertFalse(self.model.delayed_events)
 
     async def test_delayed_events_cleared_as_tasks_complete(self) -> None:
-        self.model = eas.dome_model.DomeModel()
-        await self.model.aperture_shutter_callback(get_closed_dome_telemetry())
-
         event = asyncio.Event()
         delay = 0.01
         self.model.on_open.append((event, delay))
 
         # Open the dome...
-        await self.model.aperture_shutter_callback(get_open_dome_telemetry())
+        await self.model.aperture_shutter_callback(get_open_shutter_telemetry())
         await asyncio.sleep(STD_SLEEP)
 
         self.assertTrue(event.is_set())
         self.assertFalse(self.model.delayed_events)
+
+    async def test_is_closed_true_when_shutter_and_louvers_closed(self) -> None:
+        """Dome is closed when shutter AND all louvers are closed."""
+        await self.model.aperture_shutter_callback(get_closed_shutter_telemetry())
+        await self.model.louvers_callback(get_closed_louver_telemetry())
+
+        self.assertTrue(self.model.is_closed)
+
+    async def test_is_closed_false_when_shutter_open_even_if_louvers_closed(
+        self,
+    ) -> None:
+        """Dome is open if shutter is open, regardless of louvers."""
+        await self.model.aperture_shutter_callback(get_open_shutter_telemetry())
+        await self.model.louvers_callback(get_closed_louver_telemetry())
+
+        self.assertFalse(self.model.is_closed)
+
+    async def test_is_closed_false_when_any_louver_open_even_if_shutter_closed(
+        self,
+    ) -> None:
+        """Dome is open if any louver is open, even with shutter closed."""
+        await self.model.aperture_shutter_callback(get_closed_shutter_telemetry())
+        await self.model.louvers_callback(get_open_louver_telemetry())
+
+        self.assertFalse(self.model.is_closed)
+
+    async def test_is_closed_none_when_louver_telemetry_missing(self) -> None:
+        """State is unknown when louver telemetry is missing."""
+        self.model.louvers_telemetry = None
+        await self.model.aperture_shutter_callback(get_closed_shutter_telemetry())
+
+        self.assertIsNone(self.model.is_closed)
+
+    async def test_is_closed_none_when_shutter_telemetry_missing(self) -> None:
+        """State is unknown when shutter telemetry is missing."""
+        self.model.aperture_shutter_telemetry = None
+        await self.model.louvers_callback(get_closed_louver_telemetry())
+
+        self.assertIsNone(self.model.is_closed)
