@@ -1,3 +1,12 @@
+v0.9.6 (2025-11-27)
+===================
+
+Bug Fixes
+---------
+
+- Remove non-existent 'index' attribute of Remote. (`OSW-1513 <https://rubinobs.atlassian.net//browse/OSW-1513>`_)
+
+
 v0.9.5 (2025-11-21)
 ===================
 
