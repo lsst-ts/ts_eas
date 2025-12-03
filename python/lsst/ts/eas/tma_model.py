@@ -456,7 +456,9 @@ additionalProperties: false
                 if self.dome_model.is_closed is not False:
                     event = asyncio.Event()
                     self.dome_model.on_open.append(event)
+                    self.log.debug("Waiting for dome open.")
                     await event.wait()
+                    self.log.debug("Dome has been opened.")
 
             indoor_temperature = self.weather_model.current_indoor_temperature
 
