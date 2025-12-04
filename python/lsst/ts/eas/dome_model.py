@@ -48,7 +48,7 @@ class DomeModel:
         # Most recent tel_apertureShutter
         self.aperture_shutter_telemetry: salobj.BaseMsgType | None = None
         self.on_open: deque[asyncio.Event] = deque()
-        self.was_closed: bool | None = False
+        self.was_closed: bool | None = None
 
     async def aperture_shutter_callback(
         self, aperture_shutter_telemetry: salobj.BaseMsgType
