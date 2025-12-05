@@ -1,10 +1,19 @@
+v0.9.7 (2025-12-04)
+===================
+
+Bug Fixes
+---------
+
+- Fixed detection of dome open condition. (`OSW-1540 <https://rubinobs.atlassian.net//browse/OSW-1540>`_`)
+
+
 v0.9.6 (2025-11-27)
 ===================
 
 Bug Fixes
 ---------
 
-- Remove non-existent 'index' attribute of Remote. (`OSW-1513 <https://rubinobs.atlassian.net//browse/OSW-1513>`_)
+- Removed non-existent 'index' attribute of Remote. (`OSW-1513 <https://rubinobs.atlassian.net//browse/OSW-1513>`_)
 
 
 v0.9.5 (2025-11-21)
