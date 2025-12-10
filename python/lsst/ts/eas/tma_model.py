@@ -518,10 +518,13 @@ additionalProperties: false
             if last_m1m3ts_setpoint is None:
                 # No previous setpoint = apply it regardless
                 await self.apply_setpoints(indoor_temperature)
+
             elif indoor_temperature > last_m1m3ts_setpoint:
-                # Warm the mirror if the setpoint is past the deadband
+                # Warm the mirror if the setpoint is past the heating deadband.
                 new_setpoint = indoor_temperature
-                if new_setpoint - last_m1m3ts_setpoint > self.setpoint_deadband_heating:
+                delta = new_setpoint - last_m1m3ts_setpoint
+
+                if delta > self.setpoint_deadband_heating:
                     # Apply the setpoint, limited by maximum_heating_rate
                     maximum_heating_step = (
                         self.maximum_heating_rate
@@ -529,44 +532,43 @@ additionalProperties: false
                         / SECONDS_PER_HOUR
                     )
                     new_setpoint = min(
-                        indoor_temperature,
+                        new_setpoint,
                         last_m1m3ts_setpoint + maximum_heating_step,
                     )
                     await self.apply_setpoints(new_setpoint)
                 else:
-                    # Cool the mirror if the setpoint is past the deadband
-                    new_setpoint = indoor_temperature
-                    if (
-                        last_m1m3ts_setpoint - new_setpoint
-                        > self.setpoint_deadband_cooling
-                    ):
-                        # Apply the setpoint, limited by maximum_cooling_rate
-                        maximum_cooling_step = (
-                            cooling_rate * self.m1m3_setpoint_cadence / SECONDS_PER_HOUR
-                        )
-                        new_setpoint = max(
-                            indoor_temperature,
-                            last_m1m3ts_setpoint - maximum_cooling_step,
-                        )
-                        await self.apply_setpoints(setpoint=new_setpoint)
-            else:
-                # Cool the mirror if the setpoint is past the deadband
+                    self.log.debug(
+                        "Heating deadband criterion not met. "
+                        "No M1M3TS setpoint update."
+                    )
+
+            elif indoor_temperature < last_m1m3ts_setpoint:
+                # Cool the mirror if the setpoint is past the cooling deadband.
                 new_setpoint = indoor_temperature
-                if last_m1m3ts_setpoint - new_setpoint > self.setpoint_deadband_cooling:
+                delta = last_m1m3ts_setpoint - new_setpoint
+
+                if delta > self.setpoint_deadband_cooling:
                     # Apply the setpoint, limited by maximum_cooling_rate
                     maximum_cooling_step = (
                         cooling_rate * self.m1m3_setpoint_cadence / SECONDS_PER_HOUR
                     )
                     new_setpoint = max(
-                        indoor_temperature,
+                        new_setpoint,
                         last_m1m3ts_setpoint - maximum_cooling_step,
                     )
-                    await self.apply_setpoints(
-                        setpoint=new_setpoint,
+                    await self.apply_setpoints(new_setpoint)
+                else:
+                    self.log.debug(
+                        "Cooling deadband criterion not met. "
+                        "No M1M3TS setpoint update."
                     )
 
+            else:
+                # indoor_temperature == last_m1m3ts_setpoint
+                self.log.debug("No M1M3TS setpoint update required.")
+
             if self.m1m3_setpoints_are_stale and last_m1m3ts_setpoint is not None:
-                await self.apply_setpoints(setpoint=indoor_temperature)
+                await self.apply_setpoints(indoor_temperature)
 
             await asyncio.sleep(self.m1m3_setpoint_cadence)
 
