@@ -22,13 +22,14 @@
 __all__ = ["DomeModel"]
 
 import asyncio
+import logging
 from collections import deque
 
+import yaml
 from lsst.ts import salobj, utils
 
 DORMANT_TIME = 300  # Time to wait while sleeping, seconds
 MAX_TELEMETRY_AGE = 300  # Time at which apertureShutter telemetry expires, seconds
-DOME_OPEN_THRESHOLD = 50  # Dome open percentage at which the dome is considered "open"
 
 
 class DomeModel:
@@ -40,16 +41,48 @@ class DomeModel:
     ---------
     log : `~logging.Logger`
         A logger for log messages.
+    dome_open_threshold : `float`
+        Percent opening of a dome slit or louver beyond which the dome is
+        considered "open."
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        log: logging.Logger,
+        dome_open_threshold: float,
+    ) -> None:
         self.monitor_start_event = asyncio.Event()
 
         # Most recent tel_apertureShutter
         self.aperture_shutter_telemetry: salobj.BaseMsgType | None = None
+
+        # Most recent tel_louvers
+        self.louvers_telemetry: salobj.BaseMsgType | None = None
+
         self.on_open: deque[tuple[asyncio.Event, float]] = deque()
         self.delayed_events: dict[asyncio.Event, asyncio.Handle] = dict()
         self.was_closed: bool | None = None
+
+        self.log = log
+        self.dome_open_threshold = dome_open_threshold
+
+    @classmethod
+    def get_config_schema(cls) -> str:
+        return yaml.safe_load(
+            """
+$schema: http://json-schema.org/draft-07/schema#
+description: Schema for TMA EAS configuration.
+type: object
+properties:
+  dome_open_threshold:
+    description: Percent opening of a dome slit or louver beyond which the dome is considered "open."
+    type: number
+    default: 50.0
+required:
+  - dome_open_threshold
+"""
+        )
 
     def cancel_pending_events(self) -> None:
         """Cancels all pending handles scheduled to set events.
@@ -81,6 +114,13 @@ class DomeModel:
             A newly received apertureShutter telemetry item.
         """
         self.aperture_shutter_telemetry = aperture_shutter_telemetry
+        self.refresh_telemetry()
+
+    async def louvers_callback(self, louvers_telemetry: salobj.BaseMsgType) -> None:
+        self.louvers_telemetry = louvers_telemetry
+        self.refresh_telemetry()
+
+    def refresh_telemetry(self) -> None:
         is_closed = self.is_closed
 
         if self.was_closed is not False and is_closed is False:
@@ -108,15 +148,25 @@ class DomeModel:
 
         If the current state of the dome is unknown, None is returned.
         """
-        if self.aperture_shutter_telemetry is None:
+        if self.aperture_shutter_telemetry is None or self.louvers_telemetry is None:
             return None
 
-        send_timestamp = self.aperture_shutter_telemetry.private_sndStamp
+        send_timestamp = min(
+            self.aperture_shutter_telemetry.private_sndStamp,
+            self.louvers_telemetry.private_sndStamp,
+        )
         telemetry_age = utils.current_tai() - send_timestamp
         if telemetry_age > MAX_TELEMETRY_AGE:
             return None
 
-        return (
-            self.aperture_shutter_telemetry.positionActual[0] < DOME_OPEN_THRESHOLD
-            and self.aperture_shutter_telemetry.positionActual[1] < DOME_OPEN_THRESHOLD
+        shutters_closed = (
+            self.aperture_shutter_telemetry.positionActual[0] < self.dome_open_threshold
+            and self.aperture_shutter_telemetry.positionActual[1]
+            < self.dome_open_threshold
         )
+        louvers_closed = all(
+            position < self.dome_open_threshold
+            for position in self.louvers_telemetry.positionActual
+        )
+
+        return shutters_closed and louvers_closed

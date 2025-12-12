@@ -357,6 +357,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             await self.mtdome.tel_apertureShutter.set_write(
                 positionActual=(0.0, 0.0),
             )
+            await self.mtdome.tel_louvers.set_write(positionActual=[0.0] * 34)
             # Give the telemetry time to propagate into the EAS CSC
             await asyncio.sleep(STD_SLEEP)
             await self.csc.close_tasks()
@@ -389,6 +390,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             await self.mtdome.tel_apertureShutter.set_write(
                 positionActual=(100.0, 100.0),
             )
+            await self.mtdome.tel_louvers.set_write(positionActual=[100.0] * 34)
             # Give the telemetry time to propagate into the EAS CSC
             await asyncio.sleep(STD_SLEEP)
             await self.csc.close_tasks()
@@ -421,6 +423,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             await self.mtdome.tel_apertureShutter.set_write(
                 positionActual=(100.0, 100.0),
             )
+            await self.mtdome.tel_louvers.set_write(positionActual=[100.0] * 34)
             # Give the telemetry time to propagate into the EAS CSC
             await asyncio.sleep(STD_SLEEP)
             await self.csc.close_tasks()
@@ -452,6 +455,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             await self.mtdome.tel_apertureShutter.set_write(
                 positionActual=(100.0, 100.0),
             )
+            await self.mtdome.tel_louvers.set_write(positionActual=[100.0] * 34)
             await self.ess.tel_airFlow.set_write(
                 speed=0,
             )
@@ -482,6 +486,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             await self.mtdome.tel_apertureShutter.set_write(
                 positionActual=(100.0, 100.0),
             )
+            await self.mtdome.tel_louvers.set_write(positionActual=[100.0] * 34)
 
             # And in the next run of the control loop, the
             # VEC-04 fan is enabled.
@@ -514,6 +519,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             await self.mtdome.tel_apertureShutter.set_write(
                 positionActual=(100.0, 100.0),
             )
+            await self.mtdome.tel_louvers.set_write(positionActual=[100.0] * 34)
 
             await self.wait_for_all_hvac_events()
 
@@ -549,6 +555,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             # This ecsv file contains 30 minutes of high winds (>100)
             # followed by 30 minutes of low winds.
             await self.load_wind_history("stale_wind_data.ecsv")
+            await self.mtdome.tel_louvers.set_write(positionActual=[0.0] * 34)
             await self.mtdome.tel_apertureShutter.set_write(
                 positionActual=(100.0, 100.0),
             )
@@ -623,6 +630,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             await self.mtdome.tel_apertureShutter.set_write(
                 positionActual=(0.0, 0.0),
             )
+            await self.mtdome.tel_louvers.set_write(positionActual=[0.0] * 34)
 
             await self.wait_for_all_hvac_events()
 
