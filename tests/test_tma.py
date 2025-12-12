@@ -23,11 +23,13 @@ import asyncio
 import logging
 import typing
 import unittest
+from collections import deque
 from types import SimpleNamespace
 
 from lsst.ts import eas, salobj
 
 STD_TIMEOUT = 60
+STD_SLEEP = 0.5
 
 logging.basicConfig(
     format="%(asctime)s:%(levelname)s:%(name)s:%(message)s", level=logging.DEBUG
@@ -91,6 +93,7 @@ class WeatherModelMock:
 class DomeModelMock:
     def __init__(self, is_closed: bool) -> None:
         self.is_closed = is_closed
+        self.on_open: deque[tuple[asyncio.Event, float]] = deque()
 
 
 class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
@@ -146,6 +149,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                     "fan_throttle_turn_on_temp_diff": 0.0,
                     "fan_throttle_max_temp_diff": 1.0,
                 },
+                after_open_delay=0.0,
                 features_to_disable=model_args["features_to_disable"],
             )
             monitor_task = asyncio.create_task(self.tma_model.monitor())
@@ -314,6 +318,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                     "fan_throttle_turn_on_temp_diff": 0.0,
                     "fan_throttle_max_temp_diff": 1.0,
                 },
+                after_open_delay=0.0,
                 features_to_disable=[],
             )
 
@@ -351,6 +356,86 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 tma_model.glycol_setpoint_delta,
                 tma_model.fan_glycol_heater_offset_max + heater_setpoint_delta,
             )
+
+    async def test_after_open_delay(self) -> None:
+        after_open_delay = 123.0
+
+        async with (
+            M1M3TSMock() as mock_m1m3ts,
+            MTMountMock() as mock_mtmount,
+            salobj.Remote(name="MTM1M3TS", domain=mock_m1m3ts.domain) as m1m3ts_remote,
+            salobj.Remote(name="MTMount", domain=mock_m1m3ts.domain) as mtmount_remote,
+        ):
+            await mock_mtmount.evt_summaryState.set_write(
+                summaryState=salobj.State.ENABLED
+            )
+
+            diurnal_timer = eas.diurnal_timer.DiurnalTimer()
+            diurnal_timer.is_running = True
+
+            weather_model = WeatherModelMock(self.last_twilight_temperature)
+            weather_model.current_indoor_temperature = 10.0
+            dome_model = DomeModelMock(is_closed=True)
+
+            tma_model = eas.tma_model.TmaModel(
+                log=mock_m1m3ts.log,
+                diurnal_timer=diurnal_timer,
+                dome_model=dome_model,
+                glass_temperature_model=SimpleNamespace(median_temperature=0.0),
+                weather_model=weather_model,
+                m1m3ts_remote=m1m3ts_remote,
+                mtmount_remote=mtmount_remote,
+                glycol_setpoint_delta=-2,
+                heater_setpoint_delta=0.0,
+                top_end_setpoint_delta=-1,
+                m1m3_setpoint_cadence=10,
+                setpoint_deadband_heating=0,
+                setpoint_deadband_cooling=0,
+                maximum_heating_rate=100,
+                slow_cooling_rate=1,
+                fast_cooling_rate=10,
+                fan_speed={
+                    "fan_speed_min": 700.0,
+                    "fan_speed_max": 2000.0,
+                    "fan_glycol_heater_offset_min": -1.0,
+                    "fan_glycol_heater_offset_max": -4.0,
+                    "fan_throttle_turn_on_temp_diff": 0.0,
+                    "fan_throttle_max_temp_diff": 1.0,
+                },
+                after_open_delay=after_open_delay,
+                features_to_disable=[],
+            )
+
+            task = asyncio.create_task(tma_model.follow_ess_indoor())
+            await asyncio.sleep(0)  # Give the task a chance to start.
+
+            # An event has been added to notify when the dome opens.
+            self.assertEqual(len(dome_model.on_open), 1)
+            event, delay = dome_model.on_open.pop()
+            self.assertEqual(delay, after_open_delay)
+
+            # Fire the event, but dome is still closed.
+            # (This occurs if the dome is re-closed before the delay time.)
+            event.set()
+            await asyncio.sleep(STD_SLEEP)
+            self.assertIsNone(mock_mtmount.top_end_setpoint)
+
+            # TmaModel should have queued up a new event.
+            self.assertEqual(len(dome_model.on_open), 1)
+            event, delay = dome_model.on_open.pop()
+            self.assertEqual(delay, after_open_delay)
+
+            # Fire the event, but this time the dome is open.
+            dome_model.is_closed = False
+            event.set()
+            await asyncio.sleep(STD_SLEEP)
+            self.assertIsNotNone(mock_mtmount.top_end_setpoint)
+
+            task.cancel()
+            try:
+                await asyncio.wait_for(task, timeout=STD_TIMEOUT)
+            except asyncio.CancelledError:
+                pass  # expected
 
     def basic_make_csc(
         self,

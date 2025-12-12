@@ -105,11 +105,15 @@ class EasCsc(salobj.ConfigurableCsc):
         self.hvac_model: HvacModel | None = None
         self.tma_model: TmaModel | None = None
 
+        self.dome_model: DomeModel | None = None
+        self.glass_temperature_model: GlassTemperatureModel | None = None
+        self.weather_model: WeatherModel | None = None
+
         self.dome_remote = salobj.Remote(
             domain=self.domain,
             name="MTDome",
             readonly=True,
-            include=["apertureShutter"],
+            include=["apertureShutter", "louvers"],
         )
         self.ess_ts1_remote = salobj.Remote(
             domain=self.domain,
@@ -139,22 +143,17 @@ class EasCsc(salobj.ConfigurableCsc):
         self.mtm1m3ts_remote = salobj.Remote(
             domain=self.domain,
             name="MTM1M3TS",
-            include=["applySetpoints", "appliedSetpoints", "heaterFanDemand"],
+            include=["appliedSetpoints"],
         )
         self.mtmount_remote = salobj.Remote(
             domain=self.domain,
             name="MTMount",
-            include=["summaryState", "setThermal"],
+            include=["summaryState"],
         )
         self.hvac_remote = salobj.Remote(
             domain=self.domain,
             name="HVAC",
-            include=[
-                "enableDevice",
-                "disableDevice",
-                "configLowerAhu",
-                "configChiller",
-            ],
+            include=[],
         )
 
         self.ess_indoor_remote: salobj.Remote | None = None
@@ -256,7 +255,9 @@ class EasCsc(salobj.ConfigurableCsc):
         self.diurnal_timer = DiurnalTimer(sun_altitude=self.config.twilight_definition)
         await self.diurnal_timer.start()
 
-        self.dome_model = DomeModel()
+        if self.dome_model is not None:
+            self.dome_model.cancel_pending_events()
+
         self.glass_temperature_model = GlassTemperatureModel(log=self.log)
 
         # Validate the sub-schemas and update with defaults.
@@ -264,10 +265,13 @@ class EasCsc(salobj.ConfigurableCsc):
             (WeatherModel, "weather"),
             (HvacModel, "hvac"),
             (TmaModel, "tma"),
+            (DomeModel, "dome"),
         ):
             schema = object_type.get_config_schema()
             validator = salobj.DefaultingValidator(schema)
             setattr(config, attr, validator.validate(getattr(config, attr)))
+
+        self.dome_model = DomeModel(log=self.log, **self.config.dome)
 
         self.weather_model = WeatherModel(
             log=self.log,
@@ -297,6 +301,12 @@ class EasCsc(salobj.ConfigurableCsc):
 
     def connect_callbacks(self) -> None:
         """Connects callbacks to their remotes."""
+
+        # Models should be initialized before this method is called.
+        assert self.dome_model is not None, "Dome model not initialized."
+        assert self.glass_temperature_model is not None, "Glass model not initialized."
+        assert self.weather_model is not None, "Weather Model not initialized."
+
         if self.ess_indoor_remote is None or self.ess_outdoor_remote is None:
             raise RuntimeError(
                 "The ESS indoor and outdoor temperature remotes did not "
@@ -308,6 +318,7 @@ class EasCsc(salobj.ConfigurableCsc):
         self.dome_remote.tel_apertureShutter.callback = (
             self.dome_model.aperture_shutter_callback
         )
+        self.dome_remote.tel_louvers.callback = self.dome_model.louvers_callback
         self.ess_ts1_remote.tel_temperature.callback = (
             self.glass_temperature_model.temperature_callback
         )
@@ -365,6 +376,7 @@ class EasCsc(salobj.ConfigurableCsc):
         assert self.tma_model is not None, "TMA Model not initialized."
         assert self.diurnal_timer is not None, "Timer not initialized."
         assert self.glass_temperature_model is not None, "Glass model not initialized."
+        assert self.weather_model is not None, "Weather Model not initialized."
 
         self.log.debug("monitor_health")
 
