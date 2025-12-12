@@ -23,7 +23,7 @@ import asyncio
 import logging
 import math
 import unittest
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 import astropy
 from lsst.ts import salobj
@@ -160,6 +160,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
 
     def make_model(self, **overrides: float | list[str] | None) -> hvac_model.HvacModel:
         params = dict(
+            ahu_setpoint_delta=0.0,
             setpoint_lower_limit=6.0,
             wind_threshold=10.0,
             vec04_hold_time=0.0,
@@ -528,6 +529,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         class SubtestCase(TypedDict):
             name: str
             last_twilight: float
+            ahu_setpoint_delta: NotRequired[float]  # non-required
             features_to_disable: list[str]
             expect_setpoints: dict[int, float]
 
@@ -555,6 +557,18 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 },
             },
             {
+                "name": "ahu setpoint delta",
+                "last_twilight": 9.0,
+                "features_to_disable": [],
+                "ahu_setpoint_delta": -1.0,
+                "expect_setpoints": {
+                    DeviceId.lowerAHU01P05: 8.0,
+                    DeviceId.lowerAHU02P05: 8.0,
+                    DeviceId.lowerAHU03P05: 8.0,
+                    DeviceId.lowerAHU04P05: 8.0,
+                },
+            },
+            {
                 "name": "room_setpoint disabled",
                 "last_twilight": 4.0,
                 "features_to_disable": ["room_setpoint"],
@@ -568,6 +582,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 self.diurnal.is_running = True
                 self.weather.last_twilight_temperature = case["last_twilight"]
                 model = self.make_model(
+                    ahu_setpoint_delta=case.get("ahu_setpoint_delta", 0.0),
                     features_to_disable=case.get("features_to_disable"),
                 )
 
@@ -591,6 +606,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             name: str
             night: bool
             closed: bool
+            ahu_setpoint_delta: NotRequired[float]
             temp: float
             expect_setpoints: dict[str, float]
 
@@ -602,6 +618,22 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 "temp": 6.0,
                 "expect_setpoints": {
                     ahu: 6.0
+                    for ahu in (
+                        DeviceId.lowerAHU01P05,
+                        DeviceId.lowerAHU02P05,
+                        DeviceId.lowerAHU03P05,
+                        DeviceId.lowerAHU04P05,
+                    )
+                },
+            },
+            {
+                "name": "apply setpoints with delta",
+                "night": True,
+                "closed": True,
+                "temp": 9.0,
+                "ahu_setpoint_delta": -1.0,
+                "expect_setpoints": {
+                    ahu: 8.0
                     for ahu in (
                         DeviceId.lowerAHU01P05,
                         DeviceId.lowerAHU02P05,
@@ -635,11 +667,14 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
 
         for case in scenarios:
             with self.subTest(case=case["name"]):
+                self.diurnal.is_running = True
                 self.diurnal._night = case["night"]
                 self.dome.is_closed = case["closed"]
                 self.weather.current_temperature = case["temp"]
 
-                model = self.make_model()
+                model = self.make_model(
+                    ahu_setpoint_delta=case.get("ahu_setpoint_delta", 0.0)
+                )
                 task = asyncio.create_task(model.apply_setpoint_at_night())
 
                 await asyncio.sleep(STD_SLEEP)
