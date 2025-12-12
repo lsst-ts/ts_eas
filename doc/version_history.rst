@@ -1,3 +1,19 @@
+v0.9.8 (2025-12-12)
+===================
+
+New Features
+------------
+
+- Added AHU setpoint delta to config. (`OSW-1067 <https://rubinobs.atlassian.net//browse/OSW-1067>`_)
+- Added louvers to dome opening condition. (`OSW-1488 <https://rubinobs.atlassian.net//browse/OSW-1488>`_)
+
+
+Bug Fixes
+---------
+
+- Fixed deadband logic in TMA setpoints. (`OSW-1563 <https://rubinobs.atlassian.net//browse/OSW-1563>`_)
+
+
 v0.9.7 (2025-12-04)
 ===================
 
