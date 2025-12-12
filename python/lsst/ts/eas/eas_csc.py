@@ -105,6 +105,10 @@ class EasCsc(salobj.ConfigurableCsc):
         self.hvac_model: HvacModel | None = None
         self.tma_model: TmaModel | None = None
 
+        self.dome_model: DomeModel | None = None
+        self.glass_temperature_model: GlassTemperatureModel | None = None
+        self.weather_model: WeatherModel | None = None
+
         self.dome_remote = salobj.Remote(
             domain=self.domain,
             name="MTDome",
@@ -256,6 +260,9 @@ class EasCsc(salobj.ConfigurableCsc):
         self.diurnal_timer = DiurnalTimer(sun_altitude=self.config.twilight_definition)
         await self.diurnal_timer.start()
 
+        if self.dome_model is not None:
+            self.dome_model.cancel_pending_events()
+
         self.dome_model = DomeModel()
         self.glass_temperature_model = GlassTemperatureModel(log=self.log)
 
@@ -297,6 +304,12 @@ class EasCsc(salobj.ConfigurableCsc):
 
     def connect_callbacks(self) -> None:
         """Connects callbacks to their remotes."""
+
+        # Models should be initialized before this method is called.
+        assert self.dome_model is not None, "Dome model not initialized."
+        assert self.glass_temperature_model is not None, "Glass model not initialized."
+        assert self.weather_model is not None, "Weather Model not initialized."
+
         if self.ess_indoor_remote is None or self.ess_outdoor_remote is None:
             raise RuntimeError(
                 "The ESS indoor and outdoor temperature remotes did not "
@@ -365,6 +378,7 @@ class EasCsc(salobj.ConfigurableCsc):
         assert self.tma_model is not None, "TMA Model not initialized."
         assert self.diurnal_timer is not None, "Timer not initialized."
         assert self.glass_temperature_model is not None, "Glass model not initialized."
+        assert self.weather_model is not None, "Weather Model not initialized."
 
         self.log.debug("monitor_health")
 
