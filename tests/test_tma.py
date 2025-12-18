@@ -311,6 +311,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             #    * fan at minimum RPM (700)
             #    * glycol delta at minimum (-1)
             await tma_model.set_fan_speed(setpoint=1.0)
+            await asyncio.sleep(STD_SLEEP)
             self.assertEqual(mock_m1m3ts.fan_rpm, [fan_minimum] * 96)
             self.assertEqual(
                 tma_model.glycol_setpoint_delta,
@@ -322,6 +323,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             #    * fan at maximum RPM (2500)
             #    * glycol delta at minimum (-1)
             await tma_model.set_fan_speed(setpoint=2.0)
+            await asyncio.sleep(STD_SLEEP)
             self.assertEqual(mock_m1m3ts.fan_rpm, [fan_maximum] * 96)
             self.assertEqual(
                 tma_model.glycol_setpoint_delta,

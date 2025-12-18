@@ -1,0 +1,1 @@
+Added command wrapper to wait for CSC ENABLED and handle errors.
