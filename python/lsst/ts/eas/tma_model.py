@@ -31,8 +31,8 @@ from astropy.time import Time
 
 from lsst.ts import salobj, utils
 from lsst.ts.xml.enums.MTMount import ThermalCommandState
-from lsst.ts.xml.sal_enums import State
 
+from .cmdwrapper import CommandWrapper
 from .diurnal_timer import DiurnalTimer
 from .dome_model import DomeModel
 from .glass_temperature_model import GlassTemperatureModel
@@ -141,6 +141,21 @@ class TmaModel:
         # Remotes and duplicated topic:
         self.m1m3ts_remote = m1m3ts_remote
         self.mtmount_remote = mtmount_remote
+        self.apply_setpoints_command = CommandWrapper(
+            log=self.log,
+            remote=m1m3ts_remote,
+            command=m1m3ts_remote.cmd_applySetpoints,
+        )
+        self.heater_fan_demand_command = CommandWrapper(
+            log=self.log,
+            remote=m1m3ts_remote,
+            command=m1m3ts_remote.cmd_heaterFanDemand,
+        )
+        self.set_thermal_command = CommandWrapper(
+            log=self.log,
+            remote=mtmount_remote,
+            command=mtmount_remote.cmd_setThermal,
+        )
 
         # Configuration parameters:
         self.glycol_setpoint_delta = glycol_setpoint_delta
@@ -311,7 +326,7 @@ additionalProperties: false
             glycol_setpoint = setpoint + self.glycol_setpoint_delta
             heaters_setpoint = setpoint + self.heater_setpoint_delta
             self.log.debug(f"Setting MTM1MTS: {glycol_setpoint=:.2f}°C {heaters_setpoint=:.2f}°C")
-            await self.m1m3ts_remote.cmd_applySetpoints.set_start(
+            await self.apply_setpoints_command.set_start(
                 glycolSetpoint=glycol_setpoint,
                 heatersSetpoint=heaters_setpoint,
             )
@@ -358,7 +373,7 @@ additionalProperties: false
         fan_speed = max(min(fan_speed, self.fan_speed_max), self.fan_speed_min)
 
         fan_rpm = int(round(0.1 * fan_speed))
-        await self.m1m3ts_remote.cmd_heaterFanDemand.set_start(
+        await self.heater_fan_demand_command.set_start(
             heaterPWM=[-1] * 96,
             fanRPM=[fan_rpm] * 96,
         )
@@ -377,65 +392,6 @@ additionalProperties: false
             self.glycol_setpoint_delta = self.heater_setpoint_delta + self.fan_glycol_heater_offset_min
 
         self.m1m3_setpoints_are_stale = True
-
-    async def start_top_end_task(self, setpoint: float) -> None:
-        """Schedule self.apply_top_end_setpoint for asynchronous execution.
-
-        This method handles canceling an outstanding call if needed and will
-        raise if the previous call failed. If the previous call was still
-        running (presumably because the MTMount CSC was not enabled) then a
-        warning is logged.
-
-        Parameters
-        ----------
-        setpoint: float
-            The setpoint (without delta applied) for the mirror system.
-        """
-        if "top_end" in self.features_to_disable:
-            return
-
-        if self.top_end_task.done():
-            self.top_end_task_warned = False
-        else:
-            self.top_end_task.cancel()
-        try:
-            await self.top_end_task
-        except asyncio.CancelledError:
-            if not self.top_end_task_warned:
-                self.log.warning("Previous attempt to apply MTMount setpoint was cancelled.")
-                self.top_end_task_warned = True
-
-        self.top_end_task = asyncio.create_task(self.apply_top_end_setpoint(setpoint))
-
-    async def apply_top_end_setpoint(self, setpoint: float) -> None:
-        """Apply the average temperature plus offset as the top end setpoint.
-
-        This is a very simple approach to start with, but more complexity may
-        be added later. That might merit other methods, or a separate model
-        for the top end, but for now we just use the simplest approach
-        possible.
-
-        Parameters
-        ----------
-        setpoint: float
-            The setpoint (without delta applied) for the mirror system.
-        """
-        while (
-            await self.mtmount_remote.evt_summaryState.aget(timeout=STD_TIMEOUT)
-        ).summaryState != State.ENABLED:
-            await asyncio.sleep(DORMANT_TIME)
-
-        top_end_setpoint = setpoint + self.top_end_setpoint_delta
-        try:
-            await asyncio.wait_for(
-                self.mtmount_remote.cmd_setThermal.set_start(
-                    topEndChillerSetpoint=top_end_setpoint,
-                    topEndChillerState=ThermalCommandState.ON,
-                ),
-                timeout=STD_TIMEOUT,
-            )
-        except asyncio.TimeoutError:
-            self.log.exception("Apply setpoint to top end timed out!")
 
     async def follow_ess_indoor(self) -> None:
         self.log.debug("follow_ess_indoor")
@@ -473,7 +429,11 @@ additionalProperties: false
             else:
                 n_failures = 0
 
-            await self.start_top_end_task(indoor_temperature)
+            if "top_end" not in self.features_to_disable:
+                await self.set_thermal_command.set_start(
+                    topEndChillerSetpoint=indoor_temperature + self.top_end_setpoint_delta,
+                    topEndChillerState=ThermalCommandState.ON,
+                )
 
             msg = self.m1m3ts_remote.evt_appliedSetpoints.get()
             if msg is None:
@@ -570,4 +530,10 @@ additionalProperties: false
                         f"{last_twilight_temperature:.2f}°C"
                     )
                     await self.apply_setpoints(last_twilight_temperature)
-                    await self.start_top_end_task(last_twilight_temperature)
+
+                    if "top_end" not in self.features_to_disable:
+                        chiller_setpoint = last_twilight_temperature + self.top_end_setpoint_delta
+                        await self.set_thermal_command.set_start(
+                            topEndChillerSetpoint=chiller_setpoint,
+                            topEndChillerState=ThermalCommandState.ON,
+                        )

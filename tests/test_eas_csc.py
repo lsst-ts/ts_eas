@@ -147,6 +147,9 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         )
 
         await self.mtmount.evt_summaryState.set_write(summaryState=salobj.State.ENABLED)
+        await self.hvac.evt_summaryState.set_write(summaryState=salobj.State.ENABLED)
+        await self.ess.evt_summaryState.set_write(summaryState=salobj.State.ENABLED)
+        await self.ess112.evt_summaryState.set_write(summaryState=salobj.State.ENABLED)
 
         emit_ess112_temperature_task = asyncio.create_task(self.emit_ess112_temperature())
 

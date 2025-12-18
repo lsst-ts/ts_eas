@@ -111,37 +111,37 @@ class EasCsc(salobj.ConfigurableCsc):
             domain=self.domain,
             name="MTDome",
             readonly=True,
-            include=["apertureShutter", "louvers"],
+            include=["apertureShutter", "louvers", "summaryState"],
         )
         self.ess_ts1_remote = salobj.Remote(
             domain=self.domain,
             name="ESS",
             index=THERMAL_SCANNER_1_INDEX,
             readonly=True,
-            include=["temperature"],
+            include=["temperature", "summaryState"],
         )
         self.ess_ts2_remote = salobj.Remote(
             domain=self.domain,
             name="ESS",
             index=THERMAL_SCANNER_2_INDEX,
-            include=["temperature"],
+            include=["temperature", "summaryState"],
         )
         self.ess_ts3_remote = salobj.Remote(
             domain=self.domain,
             name="ESS",
             index=THERMAL_SCANNER_3_INDEX,
-            include=["temperature"],
+            include=["temperature", "summaryState"],
         )
         self.ess_ts4_remote = salobj.Remote(
             domain=self.domain,
             name="ESS",
             index=THERMAL_SCANNER_4_INDEX,
-            include=["temperature"],
+            include=["temperature", "summaryState"],
         )
         self.mtm1m3ts_remote = salobj.Remote(
             domain=self.domain,
             name="MTM1M3TS",
-            include=["appliedSetpoints"],
+            include=["appliedSetpoints", "summaryState"],
         )
         self.mtmount_remote = salobj.Remote(
             domain=self.domain,
@@ -151,7 +151,7 @@ class EasCsc(salobj.ConfigurableCsc):
         self.hvac_remote = salobj.Remote(
             domain=self.domain,
             name="HVAC",
-            include=[],
+            include=["summaryState"],
         )
 
         self.ess_indoor_remote: salobj.Remote | None = None

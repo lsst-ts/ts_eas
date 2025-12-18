@@ -31,6 +31,7 @@ from astropy.time import Time
 from lsst.ts import salobj, utils
 from lsst.ts.xml.enums.HVAC import DeviceId
 
+from .cmdwrapper import CommandWrapper
 from .diurnal_timer import DiurnalTimer
 from .dome_model import DomeModel
 from .weather_model import WeatherModel
@@ -150,8 +151,27 @@ class HvacModel:
         self.glycol_setpoint1: float | None = None
         self.glycol_setpoint2: float | None = None
 
-        # The remote
-        self.hvac_remote = hvac_remote
+        # HVAC command handlers
+        self.enable_device_command = CommandWrapper(
+            log=self.log,
+            remote=hvac_remote,
+            command=hvac_remote.cmd_enableDevice,
+        )
+        self.disable_device_command = CommandWrapper(
+            log=self.log,
+            remote=hvac_remote,
+            command=hvac_remote.cmd_disableDevice,
+        )
+        self.config_lower_ahu_command = CommandWrapper(
+            log=self.log,
+            remote=hvac_remote,
+            command=hvac_remote.cmd_configLowerAhu,
+        )
+        self.config_chiller_command = CommandWrapper(
+            log=self.log,
+            remote=hvac_remote,
+            command=hvac_remote.cmd_configChiller,
+        )
 
     @classmethod
     def get_config_schema(cls) -> str:
@@ -283,6 +303,9 @@ additionalProperties: false
                 await asyncio.sleep(0.1)
                 continue
 
+            enable_device_list = []
+            disable_device_list = []
+
             if (
                 "vec04" not in self.features_to_disable
                 and not shutter_closed
@@ -298,14 +321,10 @@ additionalProperties: false
                     self.last_vec04_time = utils.current_tai()
                     if wind_threshold:
                         self.log.info(f"Turning on VEC-04 fan! {change_message}")
-                        await self.hvac_remote.cmd_enableDevice.set_start(
-                            device_id=DeviceId.loadingBayFan04P04
-                        )
+                        enable_device_list.append(DeviceId.loadingBayFan04P04)
                     else:
                         self.log.info(f"Turning off VEC-04 fan! {change_message}")
-                        await self.hvac_remote.cmd_disableDevice.set_start(
-                            device_id=DeviceId.loadingBayFan04P04
-                        )
+                        disable_device_list.append(DeviceId.loadingBayFan04P04)
 
             if shutter_closed != cached_shutter_closed:
                 cached_shutter_closed = shutter_closed
@@ -319,24 +338,26 @@ additionalProperties: false
                     if "ahu" not in self.features_to_disable:
                         # Enable the four AHUs
                         self.log.info("Enabling HVAC AHUs!")
-                        for device in ahus:
-                            await self.hvac_remote.cmd_enableDevice.set_start(device_id=device)
-                            await asyncio.sleep(0.1)
+                        enable_device_list.extend(ahus)
 
                     if "vec04" not in self.features_to_disable:
                         # Disable the VEC-04 fan
                         self.log.info("Turning off VEC-04 fan!")
-                        await self.hvac_remote.cmd_disableDevice.set_start(
-                            device_id=DeviceId.loadingBayFan04P04
-                        )
+                        disable_device_list.append(DeviceId.loadingBayFan04P04)
                         self.last_vec04_time = utils.current_tai()
                 else:
                     if "ahu" not in self.features_to_disable:
                         self.log.info("Disabling HVAC AHUs!")
-                        for device in ahus:
-                            await self.hvac_remote.cmd_disableDevice.set_start(device_id=device)
-                            await asyncio.sleep(0.1)
+                        disable_device_list.extend(ahus)
 
+            if disable_device_list:
+                await self.disable_device_command.set_start_multi(
+                    [{"device_id": device} for device in disable_device_list]
+                )
+            if enable_device_list:
+                await self.enable_device_command.set_start_multi(
+                    [{"device_id": device} for device in enable_device_list]
+                )
             await asyncio.sleep(HVAC_SLEEP_TIME)
 
     async def wait_for_sunrise(self) -> None:
@@ -359,19 +380,23 @@ additionalProperties: false
                             self.setpoint_lower_limit,
                         )
 
-                        for device_id in (
-                            DeviceId.lowerAHU01P05,
-                            DeviceId.lowerAHU02P05,
-                            DeviceId.lowerAHU03P05,
-                            DeviceId.lowerAHU04P05,
-                        ):
-                            await self.hvac_remote.cmd_configLowerAhu.set_start(
-                                device_id=device_id,
-                                workingSetpoint=setpoint,
-                                maxFanSetpoint=math.nan,
-                                minFanSetpoint=math.nan,
-                                antiFreezeTemperature=math.nan,
-                            )
+                        await self.config_lower_ahu_command.set_start_multi(
+                            [
+                                {
+                                    "device_id": device_id,
+                                    "workingSetpoint": setpoint,
+                                    "maxFanSetpoint": math.nan,
+                                    "minFanSetpoint": math.nan,
+                                    "antiFreezeTemperature": math.nan,
+                                }
+                                for device_id in (
+                                    DeviceId.lowerAHU01P05,
+                                    DeviceId.lowerAHU02P05,
+                                    DeviceId.lowerAHU03P05,
+                                    DeviceId.lowerAHU04P05,
+                                )
+                            ]
+                        )
 
     def compute_glycol_setpoints(self, ambient_temperature: float) -> tuple[float, float]:
         """Compute staggered glycol chiller setpoints.
@@ -499,16 +524,23 @@ additionalProperties: false
                         self.glycol_setpoint1 = glycol_setpoint1
                         self.glycol_setpoint2 = glycol_setpoint2
 
+                chiller_commands = []
                 if self.glycol_setpoint1 is not None:
-                    await self.hvac_remote.cmd_configChiller.set_start(
-                        device_id=DeviceId.chiller01P01,
-                        activeSetpoint=self.glycol_setpoint1,
+                    chiller_commands.append(
+                        {
+                            "device_id": DeviceId.chiller01P01,
+                            "activeSetpoint": self.glycol_setpoint1,
+                        }
                     )
                 if self.glycol_setpoint2 is not None:
-                    await self.hvac_remote.cmd_configChiller.set_start(
-                        device_id=DeviceId.chiller02P01,
-                        activeSetpoint=self.glycol_setpoint2,
+                    chiller_commands.append(
+                        {
+                            "device_id": DeviceId.chiller02P01,
+                            "activeSetpoint": self.glycol_setpoint2,
+                        }
                     )
+                if chiller_commands:
+                    await self.config_chiller_command.set_start_multi(chiller_commands)
             except Exception:
                 self.log.exception("In HVAC glycol control loop")
 
@@ -540,13 +572,17 @@ additionalProperties: false
                     self.log.error("Failed to calculate noon glycol setpoints.")
                     continue
 
-                await self.hvac_remote.cmd_configChiller.set_start(
-                    device_id=DeviceId.chiller01P01,
-                    activeSetpoint=self.glycol_setpoint1,
-                )
-                await self.hvac_remote.cmd_configChiller.set_start(
-                    device_id=DeviceId.chiller02P01,
-                    activeSetpoint=self.glycol_setpoint2,
+                await self.config_chiller_command.set_start_multi(
+                    [
+                        {
+                            "device_id": DeviceId.chiller01P01,
+                            "activeSetpoint": self.glycol_setpoint1,
+                        },
+                        {
+                            "device_id": DeviceId.chiller02P01,
+                            "activeSetpoint": self.glycol_setpoint2,
+                        },
+                    ]
                 )
 
     async def apply_setpoint_at_night(self) -> None:
@@ -572,18 +608,22 @@ additionalProperties: false
 
                 else:
                     # Apply setpoint for each of the 4 AHUs
-                    for device_id in (
-                        DeviceId.lowerAHU01P05,
-                        DeviceId.lowerAHU02P05,
-                        DeviceId.lowerAHU03P05,
-                        DeviceId.lowerAHU04P05,
-                    ):
-                        await self.hvac_remote.cmd_configLowerAhu.set_start(
-                            device_id=device_id,
-                            workingSetpoint=setpoint,
-                            maxFanSetpoint=math.nan,
-                            minFanSetpoint=math.nan,
-                            antiFreezeTemperature=math.nan,
-                        )
+                    await self.config_lower_ahu_command.set_start_multi(
+                        [
+                            {
+                                "device_id": device_id,
+                                "workingSetpoint": setpoint,
+                                "maxFanSetpoint": math.nan,
+                                "minFanSetpoint": math.nan,
+                                "antiFreezeTemperature": math.nan,
+                            }
+                            for device_id in (
+                                DeviceId.lowerAHU04P05,
+                                DeviceId.lowerAHU03P05,
+                                DeviceId.lowerAHU02P05,
+                                DeviceId.lowerAHU01P05,
+                            )
+                        ]
+                    )
 
             await asyncio.sleep(HVAC_SLEEP_TIME)
