@@ -27,6 +27,7 @@ import math
 
 import yaml
 from astropy.time import Time
+
 from lsst.ts import salobj, utils
 from lsst.ts.xml.enums.HVAC import DeviceId
 
@@ -125,9 +126,7 @@ class HvacModel:
 
         self.monitor_start_event = asyncio.Event()
 
-        self.last_vec04_time: float = (
-            0  # Last time VEC-04 was changed (UNIX TAI seconds).
-        )
+        self.last_vec04_time: float = 0  # Last time VEC-04 was changed (UNIX TAI seconds).
 
         # Configuration parameters:
         self.dome_model = dome_model
@@ -321,9 +320,7 @@ additionalProperties: false
                         # Enable the four AHUs
                         self.log.info("Enabling HVAC AHUs!")
                         for device in ahus:
-                            await self.hvac_remote.cmd_enableDevice.set_start(
-                                device_id=device
-                            )
+                            await self.hvac_remote.cmd_enableDevice.set_start(device_id=device)
                             await asyncio.sleep(0.1)
 
                     if "vec04" not in self.features_to_disable:
@@ -337,9 +334,7 @@ additionalProperties: false
                     if "ahu" not in self.features_to_disable:
                         self.log.info("Disabling HVAC AHUs!")
                         for device in ahus:
-                            await self.hvac_remote.cmd_disableDevice.set_start(
-                                device_id=device
-                            )
+                            await self.hvac_remote.cmd_disableDevice.set_start(device_id=device)
                             await asyncio.sleep(0.1)
 
             await asyncio.sleep(HVAC_SLEEP_TIME)
@@ -355,13 +350,8 @@ additionalProperties: false
         while self.diurnal_timer.is_running:
             async with self.diurnal_timer.sunrise_condition:
                 await self.diurnal_timer.sunrise_condition.wait()
-                last_twilight_temperature = (
-                    await self.weather_model.get_last_twilight_temperature()
-                )
-                if (
-                    self.diurnal_timer.is_running
-                    and last_twilight_temperature is not None
-                ):
+                last_twilight_temperature = await self.weather_model.get_last_twilight_temperature()
+                if self.diurnal_timer.is_running and last_twilight_temperature is not None:
                     if "room_setpoint" not in self.features_to_disable:
                         # Time to set the room setpoint based on last twilight
                         setpoint = max(
@@ -383,9 +373,7 @@ additionalProperties: false
                                 antiFreezeTemperature=math.nan,
                             )
 
-    def compute_glycol_setpoints(
-        self, ambient_temperature: float
-    ) -> tuple[float, float]:
+    def compute_glycol_setpoints(self, ambient_temperature: float) -> tuple[float, float]:
         """Compute staggered glycol chiller setpoints.
 
         Compute staggered glycol chiller setpoints based on ambient
@@ -427,9 +415,7 @@ additionalProperties: false
         # average should not be lower than the dew point (with margin)
         nightly_maximum_dew_point = self.weather_model.nightly_maximum_indoor_dew_point
         if nightly_maximum_dew_point is not None:
-            target_average = max(
-                target_average, nightly_maximum_dew_point + self.glycol_dew_point_margin
-            )
+            target_average = max(target_average, nightly_maximum_dew_point + self.glycol_dew_point_margin)
 
         # Break average and delta into individual setpoints. The two
         # setpoints should have the computed average and differ
@@ -473,11 +459,7 @@ additionalProperties: false
         # The difference between the average and the current ambient
         # reading must not fall below `glycol_band_low` or above
         # `glycol_band_high`.
-        return (
-            self.glycol_band_low
-            <= average_setpoint - ambient_temperature
-            <= self.glycol_band_high
-        )
+        return self.glycol_band_low <= average_setpoint - ambient_temperature <= self.glycol_band_high
 
     async def monitor_glycol_chillers(self) -> None:
         """Continuously monitor and enforce glycol chiller setpoints.
@@ -491,7 +473,6 @@ additionalProperties: false
         self.log.debug("monitor_glycol_chillers")
         while self.diurnal_timer.is_running:
             try:
-
                 # At night, reset the setpoints and do not control
                 # the glycol.
                 if self.diurnal_timer.is_night(Time.now()):
@@ -503,13 +484,9 @@ additionalProperties: false
                 # After the setpoints are chosen at noon, monitor
                 # the system and adjust setpoints if needed.
                 ambient_temperature = self.weather_model.current_indoor_temperature
-                if ambient_temperature is not None and not self.check_glycol_setpoint(
-                    ambient_temperature
-                ):
+                if ambient_temperature is not None and not self.check_glycol_setpoint(ambient_temperature):
                     self.log.debug("Recomputing glycol setpoints.")
-                    glycol_setpoint1, glycol_setpoint2 = self.compute_glycol_setpoints(
-                        ambient_temperature
-                    )
+                    glycol_setpoint1, glycol_setpoint2 = self.compute_glycol_setpoints(ambient_temperature)
 
                     if all(
                         (
@@ -550,15 +527,13 @@ additionalProperties: false
                 if not self.diurnal_timer.is_running:
                     return
 
-                nightly_minimum_temperature = (
-                    self.weather_model.nightly_minimum_temperature
-                )
+                nightly_minimum_temperature = self.weather_model.nightly_minimum_temperature
                 if math.isnan(nightly_minimum_temperature):
                     self.log.error("Nightly minimum temperature was not available.")
                     continue
 
-                self.glycol_setpoint1, self.glycol_setpoint2 = (
-                    self.compute_glycol_setpoints(nightly_minimum_temperature)
+                self.glycol_setpoint1, self.glycol_setpoint2 = self.compute_glycol_setpoints(
+                    nightly_minimum_temperature
                 )
 
                 if self.glycol_setpoint1 is None or self.glycol_setpoint2 is None:
@@ -592,9 +567,7 @@ additionalProperties: false
                 )
                 if math.isnan(setpoint):
                     if not warned_no_temperature:
-                        self.log.warning(
-                            "Failed to collect a temperature sample for HVAC setpoint."
-                        )
+                        self.log.warning("Failed to collect a temperature sample for HVAC setpoint.")
                         warned_no_temperature = True
 
                 else:

@@ -38,9 +38,7 @@ iers_conf.iers_degraded_accuracy = "ignore"
 iers.IERS_Auto.iers_table = iers.IERS_B.open()
 iers.conf.auto_max_age = None
 
-OBSERVATORY_LOCATION = EarthLocation(
-    lat=-30.24074167 * u.deg, lon=-70.7366833 * u.deg, height=2750 * u.m
-)
+OBSERVATORY_LOCATION = EarthLocation(lat=-30.24074167 * u.deg, lon=-70.7366833 * u.deg, height=2750 * u.m)
 OBSERVATORY_TIME_ZONE = ZoneInfo("America/Santiago")
 
 # Standard definition of sunrise / sunset with solar elevation -0.833 degrees.
@@ -106,15 +104,11 @@ def get_sun_altitude_deg(t: Time) -> float:
         The sun's altitude (deg) above the horizon at time t.
     """
     sun = get_sun(t)
-    altaz = sun.transform_to(
-        AltAz(obstime=t, location=OBSERVATORY_LOCATION, pressure=0)
-    )
+    altaz = sun.transform_to(AltAz(obstime=t, location=OBSERVATORY_LOCATION, pressure=0))
     return altaz.alt.deg
 
 
-def get_crossing_time(
-    target_alt: float, going_up: bool = False, search_from: Time | None = None
-) -> Time:
+def get_crossing_time(target_alt: float, going_up: bool = False, search_from: Time | None = None) -> Time:
     """Compute the time when the sun will reach target_alt.
 
     Parameters
@@ -190,10 +184,7 @@ class DiurnalTimer:
         elif sun_altitude == "astronomical":
             sun_altitude = ASTRONOMICAL_TWILIGHT
         elif isinstance(sun_altitude, str):
-            raise RuntimeError(
-                "Allowed string values for "
-                "sun_altitude: civil, nautical, astronomical"
-            )
+            raise RuntimeError("Allowed string values for sun_altitude: civil, nautical, astronomical")
 
         if not (-90 <= sun_altitude <= 0):
             raise RuntimeError("sun_altitude not in range -90 to 0")
@@ -388,9 +379,7 @@ class DiurnalTimer:
             Time returned will be time corresponding to the
             end of twilight on or after this time.
         """
-        return get_crossing_time(
-            SOLAR_ELEVATION_AT_SUNSET, going_up=True, search_from=after
-        )
+        return get_crossing_time(SOLAR_ELEVATION_AT_SUNSET, going_up=True, search_from=after)
 
     def sun_altitude_at(self, t_utc: float) -> float:
         """Return the sun altitude in degrees at the specified time.
@@ -424,9 +413,7 @@ class DiurnalTimer:
             (a little more than) one day.
         """
         if self.twilight_time is None:
-            raise RuntimeError(
-                "seconds_until_twilight called before initialization finished."
-            )
+            raise RuntimeError("seconds_until_twilight called before initialization finished.")
 
         t = (self.twilight_time - time).sec
         if t < 0 or t > (HOURS_PER_DAY + 1) * SECONDS_PER_HOUR:
@@ -448,9 +435,7 @@ class DiurnalTimer:
             (a little more than) one day.
         """
         if self.sunrise_time is None:
-            raise RuntimeError(
-                "seconds_until_sunrise called before initialization finished."
-            )
+            raise RuntimeError("seconds_until_sunrise called before initialization finished.")
 
         t = (self.sunrise_time - time).sec
         if t < 0 or t > (HOURS_PER_DAY + 1) * SECONDS_PER_HOUR:

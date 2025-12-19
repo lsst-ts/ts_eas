@@ -26,6 +26,7 @@ import unittest
 from typing import NotRequired, TypedDict
 
 import astropy
+
 from lsst.ts import salobj
 from lsst.ts.eas import hvac_model
 from lsst.ts.xml.enums.HVAC import DeviceId
@@ -198,9 +199,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         model = self.make_model()
         s1, s2 = model.compute_glycol_setpoints(self.weather.current_indoor_temperature)
 
-        expected_avg = (
-            self.weather.current_indoor_temperature + model.glycol_average_offset
-        )  # 15 - 7.5 = 7.5
+        expected_avg = self.weather.current_indoor_temperature + model.glycol_average_offset  # 15 - 7.5 = 7.5
 
         # Average of the two setpoints should differ from the ambient
         # by `glycol_average_offset`.
@@ -253,9 +252,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         model.glycol_setpoint1 = 8.0
         model.glycol_setpoint2 = 7.0
 
-        self.assertTrue(
-            model.check_glycol_setpoint(self.weather.current_indoor_temperature)
-        )
+        self.assertTrue(model.check_glycol_setpoint(self.weather.current_indoor_temperature))
 
     def test_average_below_band_returns_false(self) -> None:
         """Test glycol average below band."""
@@ -264,9 +261,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         model.glycol_setpoint1 = 4.5
         model.glycol_setpoint2 = 3.5
 
-        self.assertFalse(
-            model.check_glycol_setpoint(self.weather.current_indoor_temperature)
-        )
+        self.assertFalse(model.check_glycol_setpoint(self.weather.current_indoor_temperature))
 
     def test_average_above_band_returns_false(self) -> None:
         """Test glycol average above band."""
@@ -275,9 +270,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         model.glycol_setpoint1 = 11.5
         model.glycol_setpoint2 = 10.5
 
-        self.assertFalse(
-            model.check_glycol_setpoint(self.weather.current_indoor_temperature)
-        )
+        self.assertFalse(model.check_glycol_setpoint(self.weather.current_indoor_temperature))
 
     async def test_adjust_glycol_at_noon(self) -> None:
         """Signal noon and verify that glycol setpoints are issued."""
@@ -357,9 +350,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
 
         # Setpoints should be recalculated based on
         # `current_indoor_temperature` in the weather model.
-        average = sum(self.hvac.chiller_setpoints.values()) / len(
-            self.hvac.chiller_setpoints
-        )
+        average = sum(self.hvac.chiller_setpoints.values()) / len(self.hvac.chiller_setpoints)
         difference = (
             self.hvac.chiller_setpoints[DeviceId.chiller01P01]
             - self.hvac.chiller_setpoints[DeviceId.chiller02P01]
@@ -692,9 +683,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 self.dome.is_closed = case["closed"]
                 self.weather.current_temperature = case["temp"]
 
-                model = self.make_model(
-                    ahu_setpoint_delta=case.get("ahu_setpoint_delta", 0.0)
-                )
+                model = self.make_model(ahu_setpoint_delta=case.get("ahu_setpoint_delta", 0.0))
                 task = asyncio.create_task(model.apply_setpoint_at_night())
 
                 await asyncio.sleep(STD_SLEEP)
