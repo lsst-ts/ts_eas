@@ -87,6 +87,8 @@ class HvacModel:
         (chiller 1 warmer).
     glycol_absolute_minimum : `float`
         Absolute minimum setpoint (°C) allowed for the colder glycol chiller.
+    glycol_absolute_maximum : `float`
+        Absolute maximum setpoint (°C) allowed for the warmer glycol chiller.
     disable_features: `list[str]`
         A list of features that should be disabled. The following strings can
         be used:
@@ -115,6 +117,7 @@ class HvacModel:
         glycol_dew_point_margin: float,
         glycol_setpoints_delta: float,
         glycol_absolute_minimum: float,
+        glycol_absolute_maximum: float,
         features_to_disable: list[str],
     ) -> None:
         self.log = log
@@ -142,6 +145,7 @@ class HvacModel:
         self.glycol_dew_point_margin = glycol_dew_point_margin
         self.glycol_setpoints_delta = glycol_setpoints_delta
         self.glycol_absolute_minimum = glycol_absolute_minimum
+        self.glycol_absolute_maximum = glycol_absolute_maximum
 
         # Glycol setpoints
         self.glycol_setpoint1: float | None = None
@@ -206,6 +210,10 @@ properties:
     type: number
     default: -10.0
     description: Absolute minimum setpoint (°C) allowed for the colder glycol chiller.
+  glycol_absolute_maximum:
+    type: number
+    default: 10.0
+    description: Absolute maximum setpoint (°C) allowed for the warmer glycol chiller.
 required:
   - ahu_setpoint_delta
   - setpoint_lower_limit
@@ -217,6 +225,7 @@ required:
   - glycol_dew_point_margin
   - glycol_setpoints_delta
   - glycol_absolute_minimum
+  - glycol_absolute_maximum
 additionalProperties: false
 """
         )
@@ -381,7 +390,7 @@ additionalProperties: false
 
         Compute staggered glycol chiller setpoints based on ambient
         temperature, configured band limits, dew point, and absolute
-        minimum constraint.
+        minimum and maximum constraint.
 
         The algorithm enforces:
           * Average setpoint nominally `ambient + glycol_average_offset`
@@ -395,6 +404,7 @@ additionalProperties: false
           * Absolute minimum enforced on the colder chiller
             (`setpoint2` : `float` >= `glycol_absolute_minimum`: `float`),
             adjusting both setpoints to preserve the delta.
+          * Similar constraints for the absolute maximum temperature.
 
         Parameters
         ----------
@@ -432,6 +442,11 @@ additionalProperties: false
         if setpoint2 < self.glycol_absolute_minimum:
             setpoint2 = self.glycol_absolute_minimum
             setpoint1 = setpoint2 + self.glycol_setpoints_delta
+
+        # Enforce the absolute maximum temperature
+        if setpoint1 > self.glycol_absolute_maximum:
+            setpoint1 = self.glycol_absolute_maximum
+            setpoint2 = setpoint1 - self.glycol_setpoints_delta
 
         return setpoint1, setpoint2
 

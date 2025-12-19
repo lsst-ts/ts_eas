@@ -170,6 +170,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             glycol_dew_point_margin=1.0,
             glycol_setpoints_delta=1.0,
             glycol_absolute_minimum=-10.0,
+            glycol_absolute_maximum=10.0,
             features_to_disable=[],
         )
         params.update(overrides)
@@ -218,13 +219,32 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
 
     def test_dew_point_guard_raises_average(self) -> None:
         """If nighttime dewpoint is high, raise setpoint average."""
-        self.weather.nightly_maximum_indoor_dew_point = 9.0
+        self.weather.nightly_maximum_indoor_dew_point = 7.625
         model = self.make_model()  # margin default = 1.0
 
-        # Nominal average would be 7.5, but dew point 9 + margin 1 = 10
-        #   --> average raised to 10.
+        # Nominal average would be 7.5, but dew point 7.625 + margin 1 = 8.625
+        #   --> average raised to 8.625.
         s1, s2 = model.compute_glycol_setpoints(self.weather.current_indoor_temperature)
-        self.assertAlmostEqual((s1 + s2) / 2.0, 10.0, places=6)
+        self.assertAlmostEqual((s1 + s2) / 2.0, 8.625, places=6)
+
+    def test_absolute_minimum_enforced(self) -> None:
+        """Setpoints should not drop below the configured absolute minimum."""
+        model = self.make_model(glycol_absolute_minimum=-10.0)
+        self.weather.nightly_maximum_indoor_dew_point = -20.0
+
+        s1, s2 = model.compute_glycol_setpoints(ambient_temperature=-5.0)
+
+        self.assertAlmostEqual(s1, -9.0, places=6)
+        self.assertAlmostEqual(s2, -10.0, places=6)
+
+    def test_absolute_maximum_enforced(self) -> None:
+        """Setpoints should not exceed the configured absolute maximum."""
+        model = self.make_model(glycol_absolute_maximum=10.0)
+
+        s1, s2 = model.compute_glycol_setpoints(ambient_temperature=30.0)
+
+        self.assertAlmostEqual(s1, 10.0, places=6)
+        self.assertAlmostEqual(s2, 9.0, places=6)
 
     def test_average_inside_band_returns_true(self) -> None:
         """Average offset within [band_low, band_high] should be True."""
