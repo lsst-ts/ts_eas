@@ -25,6 +25,7 @@ import asyncio
 import logging
 import math
 import time
+from typing import Callable
 
 import yaml
 from astropy.time import Time
@@ -128,8 +129,10 @@ class TmaModel:
         fast_cooling_rate: float,
         fan_speed: dict[str, float],
         features_to_disable: list[str],
+        allow_send: Callable[[], bool] | None = None,
     ) -> None:
         self.log = log
+        self.allow_send = allow_send
 
         self.monitor_start_event = asyncio.Event()
 
@@ -145,16 +148,19 @@ class TmaModel:
             log=self.log,
             remote=m1m3ts_remote,
             command=m1m3ts_remote.cmd_applySetpoints,
+            allow_send=self.allow_send,
         )
         self.heater_fan_demand_command = CommandWrapper(
             log=self.log,
             remote=m1m3ts_remote,
             command=m1m3ts_remote.cmd_heaterFanDemand,
+            allow_send=self.allow_send,
         )
         self.set_thermal_command = CommandWrapper(
             log=self.log,
             remote=mtmount_remote,
             command=mtmount_remote.cmd_setThermal,
+            allow_send=self.allow_send,
         )
 
         # Configuration parameters:

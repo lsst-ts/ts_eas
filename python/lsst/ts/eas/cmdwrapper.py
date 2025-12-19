@@ -49,9 +49,15 @@ class CommandWrapper:
         The SAL remote to control with the command.
     command : `~salobj.topics.RemoteCommand`
         The RemoteCommand object with which to issue the command.
+    allow_send : `Callable` | `None`
+        Optional predicate that must return True for the command to be
+        scheduled or sent. If it returns False, the command is dropped.
 
     Attributes
     ----------
+    allow_send : `Callable` | `None`
+        Optional predicate that must return True for the command to be
+        scheduled or sent. If it returns False, the command is dropped.
     timeout : `float` | `None`
         Maximum time, in seconds, to wait for the remote to become ENABLED.
         If None, wait indefinitely.
@@ -66,7 +72,9 @@ class CommandWrapper:
         log: logging.Logger,
         remote: salobj.Remote,
         command: salobj.topics.RemoteCommand,
+        allow_send: Callable[[], bool] | None = None,
     ) -> None:
+        self.allow_send = allow_send
         self.exception_callback: ExceptionCallback | None = None
         self.timeout: float | None = None
         self.task: asyncio.Task | None = None
@@ -128,6 +136,10 @@ class CommandWrapper:
 
         try:
             while deadline is None or deadline > current_tai():
+                allow_send = self.allow_send
+                if allow_send is not None and not allow_send():
+                    self.log.debug(f"Skipping command {self} because EAS is disabled.")
+                    return
                 summary_state = self.remote.evt_summaryState.get()
                 if summary_state is not None and summary_state.summaryState == salobj.State.ENABLED:
                     for kwargs in kwargs_list:
@@ -190,6 +202,11 @@ class CommandWrapper:
             Sequence of keyword-argument mappings to pass to the underlying SAL
             command ``set_start``, in the order they should be issued.
         """
+        allow_send = self.allow_send
+        if allow_send is not None and not allow_send():
+            self.log.debug(f"Skipping command {self} because sending is disabled.")
+            return
+
         old_task = self.task
         new_task = asyncio.create_task(self._run(kwargs_list))
         self.task = new_task

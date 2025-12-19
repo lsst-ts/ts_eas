@@ -24,6 +24,7 @@ __all__ = ["HvacModel", "HVAC_SLEEP_TIME"]
 import asyncio
 import logging
 import math
+from typing import Callable
 
 import yaml
 from astropy.time import Time
@@ -121,8 +122,10 @@ class HvacModel:
         glycol_absolute_minimum: float,
         glycol_absolute_maximum: float,
         features_to_disable: list[str],
+        allow_send: Callable[[], bool] | None = None,
     ) -> None:
         self.log = log
+        self.allow_send = allow_send
         self.diurnal_timer = diurnal_timer
 
         self.monitor_start_event = asyncio.Event()
@@ -156,21 +159,25 @@ class HvacModel:
             log=self.log,
             remote=hvac_remote,
             command=hvac_remote.cmd_enableDevice,
+            allow_send=self.allow_send,
         )
         self.disable_device_command = CommandWrapper(
             log=self.log,
             remote=hvac_remote,
             command=hvac_remote.cmd_disableDevice,
+            allow_send=self.allow_send,
         )
         self.config_lower_ahu_command = CommandWrapper(
             log=self.log,
             remote=hvac_remote,
             command=hvac_remote.cmd_configLowerAhu,
+            allow_send=self.allow_send,
         )
         self.config_chiller_command = CommandWrapper(
             log=self.log,
             remote=hvac_remote,
             command=hvac_remote.cmd_configChiller,
+            allow_send=self.allow_send,
         )
 
     @classmethod
