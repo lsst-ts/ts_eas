@@ -137,6 +137,21 @@ class TestCommandWrapper(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.command.calls, [{"foo": 1}])
 
+    async def test_skips_when_sending_disabled(self) -> None:
+        self.remote.evt_summaryState.set_state(salobj.State.ENABLED)
+        self.fake_model.allow_send = lambda: False
+
+        with self.assertLogs("CommandWrapper", level="DEBUG") as cm:
+            await self.fake_model.send(foo=1)
+            await asyncio.sleep(0)
+
+            task_attr = self.fake_model.send._command_task_attr
+            task = getattr(self.fake_model, task_attr)
+            self.assertTrue(task.done())
+            self.assertIsNone(task.result())
+            self.assertEqual(self.command.calls, [])
+            self.assertTrue(any("not allowed" in msg.lower() for msg in cm.output))
+
     async def test_supersedes_prior_call(self) -> None:
         self.remote.evt_summaryState.set_state(None)
 

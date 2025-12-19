@@ -303,6 +303,35 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 assert self.csc.summary_state == salobj.State.STANDBY
                 await self.assert_next_summary_state(salobj.State.STANDBY)
 
+    async def test_disabled_does_not_send_commands(self) -> None:
+        """When DISABLED, EAS should not send HVAC commands."""
+        async with (
+            self.mock_extra_cscs(),
+            self.make_csc(
+                initial_state=salobj.State.DISABLED,
+                config_dir=TEST_CONFIG_DIR,
+                simulation_mode=1,
+            ),
+        ):
+            await asyncio.wait_for(self.csc.monitor_start_event.wait(), timeout=STD_TIMEOUT)
+
+            await self.load_wind_history("air_flow.ecsv")
+            await self.mtdome.tel_apertureShutter.set_write(
+                positionActual=(0.0, 0.0),
+            )
+            await self.mtdome.tel_louvers.set_write(positionActual=[0.0] * 34)
+            await asyncio.sleep(STD_SLEEP)
+            await self.csc.close_tasks()
+
+        for event in self.hvac_events.values():
+            self.assertFalse(event.is_set())
+
+        self.assertIsNone(self.ahu1_state)
+        self.assertIsNone(self.ahu2_state)
+        self.assertIsNone(self.ahu3_state)
+        self.assertIsNone(self.ahu4_state)
+        self.assertIsNone(self.vec04_state)
+
     async def load_wind_history(self, wind_data_file: str) -> None:
         self.wind_data = Table.read(TEST_WIND_DATA_DIR / wind_data_file, format="ascii.ecsv")
         self.wind_data["private_sndStamp"] -= self.wind_data["private_sndStamp"].min()

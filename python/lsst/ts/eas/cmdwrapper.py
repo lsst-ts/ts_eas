@@ -66,6 +66,7 @@ async def _run_command(
     kwargs_list: list[dict[str, Any]],
     timeout: float | None,
     dormant_time: float,
+    allow_send: Callable[[], bool] | None,
     exception_callback: ExceptionCallback | None,
 ) -> None:
     """Wait for ENABLED, issue command calls, and handle errors.
@@ -85,11 +86,18 @@ async def _run_command(
         indefinitely.
     dormant_time : `float`
         Sleep interval between summary state checks.
+    allow_send : `Callable` | `None`
+        Optional predicate that must return True for the command to be
+        scheduled or sent. If it returns False, the command is dropped.
     exception_callback : `ExceptionCallback` | `None`
         Optional callback invoked when the command raises an exception.
     """
     label = _command_label(remote, command)
     deadline = None if timeout is None else current_tai() + timeout
+
+    if allow_send is not None and not allow_send():
+        log.debug(f"Command {label} not allowed (EAS not enabled?)")
+        return
 
     try:
         while deadline is None or deadline > current_tai():
@@ -151,6 +159,7 @@ def command_wrapper(
     command_attr: str,
     timeout: float | None = None,
     dormant_time: float = DEFAULT_DORMANT_TIME,
+    allow_send_attr: str = "allow_send",
     exception_callback_attr: str = "command_exception_callback",
 ) -> Callable[[Callable[..., Coroutine[Any, Any, Any]]], Callable[..., Coroutine[Any, Any, None]]]:
     """Decorate an async method to issue a command when the CSC is ENABLED.
@@ -165,6 +174,9 @@ def command_wrapper(
         Maximum time to wait for ENABLED, or None to wait indefinitely.
     dormant_time : `float`
         Sleep interval between summary state checks.
+    allow_send_attr : `str`
+        Attribute name on the instance containing a callable that reports
+        whether the command should be blocked (because EAS is not ENABLED).
     exception_callback_attr : `str`
         Attribute name on the instance containing an exception callback.
 
@@ -209,6 +221,7 @@ def command_wrapper(
             remote = getattr(self, remote_attr)
             command = getattr(remote, command_attr)
             log = getattr(self, "log", logging.getLogger(__name__))
+            allow_send = getattr(self, allow_send_attr, None)
             exception_callback = getattr(self, exception_callback_attr, None)
 
             old_task = getattr(self, task_attr, None)
@@ -220,6 +233,7 @@ def command_wrapper(
                     kwargs_list=kwargs_list,
                     timeout=timeout,
                     dormant_time=dormant_time,
+                    allow_send=allow_send,
                     exception_callback=exception_callback,
                 )
             )

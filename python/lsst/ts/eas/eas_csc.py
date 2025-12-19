@@ -163,7 +163,8 @@ class EasCsc(salobj.ConfigurableCsc):
         """Override of the handle_summary_state function to
         set up the control loop.
         """
-        self.log.debug(f"handle_summary_state {salobj.State(self.summary_state).name}")
+        summary_state = salobj.State(self.summary_state)
+        self.log.debug(f"handle_summary_state {summary_state.name}")
 
         if self.disabled_or_enabled:
             if self.health_monitor_task.done():
@@ -171,6 +172,9 @@ class EasCsc(salobj.ConfigurableCsc):
 
         else:
             await self.shutdown_health_monitor()
+
+    def _allow_send(self) -> bool:
+        return self.summary_state != salobj.State.DISABLED
 
     async def shutdown_health_monitor(self) -> None:
         """Cancel the health monitor task and waits for completion."""
@@ -284,6 +288,7 @@ class EasCsc(salobj.ConfigurableCsc):
             weather_model=self.weather_model,
             hvac_remote=self.hvac_remote,
             features_to_disable=self.config.features_to_disable,
+            allow_send=self._allow_send,
             **self.config.hvac,
         )
         self.tma_model = TmaModel(
@@ -295,6 +300,7 @@ class EasCsc(salobj.ConfigurableCsc):
             m1m3ts_remote=self.mtm1m3ts_remote,
             mtmount_remote=self.mtmount_remote,
             features_to_disable=self.config.features_to_disable,
+            allow_send=self._allow_send,
             **self.config.tma,
         )
 
