@@ -338,7 +338,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
 
     async def test_recalculate_glycol_setpoints(self) -> None:
         """Glycol setpoints recalculate if ambient pushes them out of band."""
-        hvac_model.HVAC_SLEEP_TIME = 0.0
+        hvac_model.HVAC_SLEEP_TIME = STD_SLEEP
         model = self.make_model()
 
         model.glycol_setpoint1 = -10
@@ -363,7 +363,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
 
     async def test_dont_recalculate_glycol_setpoints(self) -> None:
         """Glycol setpoints don't recalculate if they remain in band."""
-        hvac_model.HVAC_SLEEP_TIME = 0.0
+        hvac_model.HVAC_SLEEP_TIME = STD_SLEEP
         model = self.make_model()
 
         initial_setpoint1 = 9
