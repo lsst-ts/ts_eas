@@ -27,6 +27,7 @@ from unittest import mock
 
 import pandas as pd
 from astropy.time import Time
+
 from lsst.ts import eas, salobj, utils
 
 STD_TIMEOUT = 10
@@ -46,9 +47,7 @@ class MockDiurnalTimer:
         return True
 
 
-class TestGetLastTwilightTemperature(
-    salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase
-):
+class TestGetLastTwilightTemperature(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         """Constructs a WeatherModel object for testing."""
         log = logging.getLogger()
@@ -58,9 +57,7 @@ class TestGetLastTwilightTemperature(
         self.diurnal_timer = MockDiurnalTimer()
 
         self.ess_remote = salobj.Remote(domain=self.domain, name="ESS", index=301)
-        self.indoor_ess_remote = salobj.Remote(
-            domain=self.domain, name="ESS", index=112
-        )
+        self.indoor_ess_remote = salobj.Remote(domain=self.domain, name="ESS", index=112)
 
         await self.ess.start_task
         await self.indoor_ess.start_task
@@ -77,15 +74,9 @@ class TestGetLastTwilightTemperature(
             wind_minimum_window=600,
         )
         self.ess_remote.tel_airFlow.callback = self.weather_model.air_flow_callback
-        self.ess_remote.tel_temperature.callback = (
-            self.weather_model.temperature_callback
-        )
-        self.indoor_ess_remote.tel_dewPoint.callback = (
-            self.weather_model.indoor_dew_point_callback
-        )
-        self.indoor_ess_remote.tel_temperature.callback = (
-            self.weather_model.indoor_temperature_callback
-        )
+        self.ess_remote.tel_temperature.callback = self.weather_model.temperature_callback
+        self.indoor_ess_remote.tel_dewPoint.callback = self.weather_model.indoor_dew_point_callback
+        self.indoor_ess_remote.tel_temperature.callback = self.weather_model.indoor_temperature_callback
 
         await super().asyncSetUp()
 
@@ -121,9 +112,7 @@ class TestGetLastTwilightTemperature(
             ]
         )
 
-        with mock.patch(
-            "lsst_efd_client.EfdClient", return_value=mock_client
-        ) as EfdClient:
+        with mock.patch("lsst_efd_client.EfdClient", return_value=mock_client) as EfdClient:
             result = await self.weather_model.get_last_twilight_temperature()
 
         self.assertEqual(result, 8.0)
@@ -161,9 +150,7 @@ class TestGetLastTwilightTemperature(
         """At twilight, the last twilight_temperature should be updated."""
 
         monitor_task = asyncio.create_task(self.weather_model.monitor())
-        await asyncio.wait_for(
-            self.weather_model.monitor_start_event.wait(), timeout=STD_TIMEOUT
-        )
+        await asyncio.wait_for(self.weather_model.monitor_start_event.wait(), timeout=STD_TIMEOUT)
 
         for i in range(2):
             await self.ess.tel_temperature.set_write(

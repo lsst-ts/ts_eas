@@ -38,9 +38,7 @@ from .tma_model import TmaModel
 from .weather_model import WeatherModel
 
 # Constants for the health monitor:
-FAILURE_TIMEOUT = (
-    600  # Failure count will reset after monitor has run for this time (seconds).
-)
+FAILURE_TIMEOUT = 600  # Failure count will reset after monitor has run for this time (seconds).
 INITIAL_BACKOFF = 1  # monitor initial retry delay (seconds)
 MAX_BACKOFF = 60  # monitor maximum retry delay (seconds)
 
@@ -195,13 +193,8 @@ class EasCsc(salobj.ConfigurableCsc):
             await self.diurnal_timer.stop()
         await super().close_tasks()
 
-    async def construct_ess_remotes(
-        self, *, indoor_ess_index: int, outdoor_ess_index: int
-    ) -> None:
-        if (
-            self.ess_indoor_remote is None
-            or self.ess_indoor_remote_index != indoor_ess_index
-        ):
+    async def construct_ess_remotes(self, *, indoor_ess_index: int, outdoor_ess_index: int) -> None:
+        if self.ess_indoor_remote is None or self.ess_indoor_remote_index != indoor_ess_index:
             if self.ess_indoor_remote is not None:
                 await self.ess_indoor_remote.close()
             self.ess_indoor_remote = salobj.Remote(
@@ -213,10 +206,7 @@ class EasCsc(salobj.ConfigurableCsc):
             )
             self.ess_indoor_remote_index = indoor_ess_index
 
-        if (
-            self.ess_outdoor_remote is None
-            or self.ess_outdoor_remote_index != outdoor_ess_index
-        ):
+        if self.ess_outdoor_remote is None or self.ess_outdoor_remote_index != outdoor_ess_index:
             if self.ess_outdoor_remote is not None:
                 await self.ess_outdoor_remote.close()
             self.ess_outdoor_remote = salobj.Remote(
@@ -315,34 +305,16 @@ class EasCsc(salobj.ConfigurableCsc):
                 "the configuration file and try again."
             )
 
-        self.dome_remote.tel_apertureShutter.callback = (
-            self.dome_model.aperture_shutter_callback
-        )
+        self.dome_remote.tel_apertureShutter.callback = self.dome_model.aperture_shutter_callback
         self.dome_remote.tel_louvers.callback = self.dome_model.louvers_callback
-        self.ess_ts1_remote.tel_temperature.callback = (
-            self.glass_temperature_model.temperature_callback
-        )
-        self.ess_ts2_remote.tel_temperature.callback = (
-            self.glass_temperature_model.temperature_callback
-        )
-        self.ess_ts3_remote.tel_temperature.callback = (
-            self.glass_temperature_model.temperature_callback
-        )
-        self.ess_ts4_remote.tel_temperature.callback = (
-            self.glass_temperature_model.temperature_callback
-        )
-        self.ess_outdoor_remote.tel_airFlow.callback = (
-            self.weather_model.air_flow_callback
-        )
-        self.ess_outdoor_remote.tel_temperature.callback = (
-            self.weather_model.temperature_callback
-        )
-        self.ess_indoor_remote.tel_dewPoint.callback = (
-            self.weather_model.indoor_dew_point_callback
-        )
-        self.ess_indoor_remote.tel_temperature.callback = (
-            self.weather_model.indoor_temperature_callback
-        )
+        self.ess_ts1_remote.tel_temperature.callback = self.glass_temperature_model.temperature_callback
+        self.ess_ts2_remote.tel_temperature.callback = self.glass_temperature_model.temperature_callback
+        self.ess_ts3_remote.tel_temperature.callback = self.glass_temperature_model.temperature_callback
+        self.ess_ts4_remote.tel_temperature.callback = self.glass_temperature_model.temperature_callback
+        self.ess_outdoor_remote.tel_airFlow.callback = self.weather_model.air_flow_callback
+        self.ess_outdoor_remote.tel_temperature.callback = self.weather_model.temperature_callback
+        self.ess_indoor_remote.tel_dewPoint.callback = self.weather_model.indoor_dew_point_callback
+        self.ess_indoor_remote.tel_temperature.callback = self.weather_model.indoor_temperature_callback
 
     def disconnect_callbacks(self) -> None:
         """Disconnects callbacks from their remotes."""
@@ -400,9 +372,7 @@ class EasCsc(salobj.ConfigurableCsc):
             self.log.debug("Monitors started.")
             self.monitor_start_event.set()
 
-            done, pending = await asyncio.wait(
-                self.subtasks, return_when=asyncio.FIRST_COMPLETED
-            )
+            done, pending = await asyncio.wait(self.subtasks, return_when=asyncio.FIRST_COMPLETED)
             self.subtasks = []
             self.disconnect_callbacks()
             self.monitor_start_event.clear()
@@ -439,11 +409,7 @@ class EasCsc(salobj.ConfigurableCsc):
             `config.wind_minimum_window` seconds old, then
             NaN is returned. Units are m/s.
         """
-        return (
-            self.weather_model.average_windspeed
-            if self.weather_model is not None
-            else math.nan
-        )
+        return self.weather_model.average_windspeed if self.weather_model is not None else math.nan
 
     @staticmethod
     def get_config_pkg() -> str:

@@ -29,9 +29,7 @@ from lsst.ts import eas, salobj, utils
 STD_TIMEOUT = 10
 
 
-class TestGlassTemperatureModel(
-    salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase
-):
+class TestGlassTemperatureModel(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.log = logging.getLogger()
         self.domain = salobj.Domain()
@@ -48,21 +46,11 @@ class TestGlassTemperatureModel(
         await self.ess_ts3_remote.start_task
         await self.ess_ts4_remote.start_task
 
-        self.glass_temperature_model = (
-            eas.glass_temperature_model.GlassTemperatureModel(log=self.log)
-        )
-        self.ess_ts1_remote.tel_temperature.callback = (
-            self.glass_temperature_model.temperature_callback
-        )
-        self.ess_ts2_remote.tel_temperature.callback = (
-            self.glass_temperature_model.temperature_callback
-        )
-        self.ess_ts3_remote.tel_temperature.callback = (
-            self.glass_temperature_model.temperature_callback
-        )
-        self.ess_ts4_remote.tel_temperature.callback = (
-            self.glass_temperature_model.temperature_callback
-        )
+        self.glass_temperature_model = eas.glass_temperature_model.GlassTemperatureModel(log=self.log)
+        self.ess_ts1_remote.tel_temperature.callback = self.glass_temperature_model.temperature_callback
+        self.ess_ts2_remote.tel_temperature.callback = self.glass_temperature_model.temperature_callback
+        self.ess_ts3_remote.tel_temperature.callback = self.glass_temperature_model.temperature_callback
+        self.ess_ts4_remote.tel_temperature.callback = self.glass_temperature_model.temperature_callback
 
         self.thermal_scanners_ready = asyncio.Event()
         self.thermal_scanner_task = asyncio.create_task(self.run_thermal_scanners())
@@ -97,9 +85,7 @@ class TestGlassTemperatureModel(
 
     async def run_thermal_scanners(self) -> None:
         self.running_thermal_scanners = True
-        thermal_scanners = [
-            salobj.Controller("ESS", sal_index) for sal_index in (114, 115, 116, 117)
-        ]
+        thermal_scanners = [salobj.Controller("ESS", sal_index) for sal_index in (114, 115, 116, 117)]
         for controller in thermal_scanners:
             await controller.start_task
 
@@ -109,13 +95,11 @@ class TestGlassTemperatureModel(
             if self.temperatures is None:
                 continue
 
-            timestamp = (
-                utils.current_tai() if self.timestamp is None else self.timestamp
-            )
+            timestamp = utils.current_tai() if self.timestamp is None else self.timestamp
             for controller, temperature in zip(thermal_scanners, self.temperatures):
                 for i in range(6):
                     await controller.tel_temperature.set_write(
-                        sensorName=f"m1m3-ts-0{controller.salinfo.index-114} {i + 1}/6",
+                        sensorName=f"m1m3-ts-0{controller.salinfo.index - 114} {i + 1}/6",
                         timestamp=timestamp,
                         numChannels=15 if i == 5 else 16,
                         temperatureItem=temperature,

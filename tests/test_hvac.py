@@ -26,6 +26,7 @@ import unittest
 from typing import NotRequired, TypedDict
 
 import astropy
+
 from lsst.ts import salobj
 from lsst.ts.eas import hvac_model
 from lsst.ts.xml.enums.HVAC import DeviceId
@@ -170,6 +171,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             glycol_dew_point_margin=1.0,
             glycol_setpoints_delta=1.0,
             glycol_absolute_minimum=-10.0,
+            glycol_absolute_maximum=10.0,
             features_to_disable=[],
         )
         params.update(overrides)
@@ -197,9 +199,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         model = self.make_model()
         s1, s2 = model.compute_glycol_setpoints(self.weather.current_indoor_temperature)
 
-        expected_avg = (
-            self.weather.current_indoor_temperature + model.glycol_average_offset
-        )  # 15 - 7.5 = 7.5
+        expected_avg = self.weather.current_indoor_temperature + model.glycol_average_offset  # 15 - 7.5 = 7.5
 
         # Average of the two setpoints should differ from the ambient
         # by `glycol_average_offset`.
@@ -218,13 +218,32 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
 
     def test_dew_point_guard_raises_average(self) -> None:
         """If nighttime dewpoint is high, raise setpoint average."""
-        self.weather.nightly_maximum_indoor_dew_point = 9.0
+        self.weather.nightly_maximum_indoor_dew_point = 7.625
         model = self.make_model()  # margin default = 1.0
 
-        # Nominal average would be 7.5, but dew point 9 + margin 1 = 10
-        #   --> average raised to 10.
+        # Nominal average would be 7.5, but dew point 7.625 + margin 1 = 8.625
+        #   --> average raised to 8.625.
         s1, s2 = model.compute_glycol_setpoints(self.weather.current_indoor_temperature)
-        self.assertAlmostEqual((s1 + s2) / 2.0, 10.0, places=6)
+        self.assertAlmostEqual((s1 + s2) / 2.0, 8.625, places=6)
+
+    def test_absolute_minimum_enforced(self) -> None:
+        """Setpoints should not drop below the configured absolute minimum."""
+        model = self.make_model(glycol_absolute_minimum=-10.0)
+        self.weather.nightly_maximum_indoor_dew_point = -20.0
+
+        s1, s2 = model.compute_glycol_setpoints(ambient_temperature=-5.0)
+
+        self.assertAlmostEqual(s1, -9.0, places=6)
+        self.assertAlmostEqual(s2, -10.0, places=6)
+
+    def test_absolute_maximum_enforced(self) -> None:
+        """Setpoints should not exceed the configured absolute maximum."""
+        model = self.make_model(glycol_absolute_maximum=10.0)
+
+        s1, s2 = model.compute_glycol_setpoints(ambient_temperature=30.0)
+
+        self.assertAlmostEqual(s1, 10.0, places=6)
+        self.assertAlmostEqual(s2, 9.0, places=6)
 
     def test_average_inside_band_returns_true(self) -> None:
         """Average offset within [band_low, band_high] should be True."""
@@ -233,9 +252,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         model.glycol_setpoint1 = 8.0
         model.glycol_setpoint2 = 7.0
 
-        self.assertTrue(
-            model.check_glycol_setpoint(self.weather.current_indoor_temperature)
-        )
+        self.assertTrue(model.check_glycol_setpoint(self.weather.current_indoor_temperature))
 
     def test_average_below_band_returns_false(self) -> None:
         """Test glycol average below band."""
@@ -244,9 +261,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         model.glycol_setpoint1 = 4.5
         model.glycol_setpoint2 = 3.5
 
-        self.assertFalse(
-            model.check_glycol_setpoint(self.weather.current_indoor_temperature)
-        )
+        self.assertFalse(model.check_glycol_setpoint(self.weather.current_indoor_temperature))
 
     def test_average_above_band_returns_false(self) -> None:
         """Test glycol average above band."""
@@ -255,9 +270,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         model.glycol_setpoint1 = 11.5
         model.glycol_setpoint2 = 10.5
 
-        self.assertFalse(
-            model.check_glycol_setpoint(self.weather.current_indoor_temperature)
-        )
+        self.assertFalse(model.check_glycol_setpoint(self.weather.current_indoor_temperature))
 
     async def test_adjust_glycol_at_noon(self) -> None:
         """Signal noon and verify that glycol setpoints are issued."""
@@ -337,9 +350,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
 
         # Setpoints should be recalculated based on
         # `current_indoor_temperature` in the weather model.
-        average = sum(self.hvac.chiller_setpoints.values()) / len(
-            self.hvac.chiller_setpoints
-        )
+        average = sum(self.hvac.chiller_setpoints.values()) / len(self.hvac.chiller_setpoints)
         difference = (
             self.hvac.chiller_setpoints[DeviceId.chiller01P01]
             - self.hvac.chiller_setpoints[DeviceId.chiller02P01]
@@ -672,9 +683,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 self.dome.is_closed = case["closed"]
                 self.weather.current_temperature = case["temp"]
 
-                model = self.make_model(
-                    ahu_setpoint_delta=case.get("ahu_setpoint_delta", 0.0)
-                )
+                model = self.make_model(ahu_setpoint_delta=case.get("ahu_setpoint_delta", 0.0))
                 task = asyncio.create_task(model.apply_setpoint_at_night())
 
                 await asyncio.sleep(STD_SLEEP)

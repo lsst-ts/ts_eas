@@ -30,6 +30,7 @@ from zoneinfo import ZoneInfo
 
 from astropy.time import Time
 from astropy.utils import iers
+
 from lsst.ts.eas.diurnal_timer import DiurnalTimer
 
 TEST_DIR = pathlib.Path(__file__).parent
@@ -87,16 +88,12 @@ class SimulatedClock:
         self._sleep_patcher = patch("asyncio.sleep", side_effect=self._fake_sleep)
         self._sleep_patcher.start()
 
-        self._time_now_patcher = patch(
-            "astropy.time.Time.now", side_effect=self.time_now
-        )
+        self._time_now_patcher = patch("astropy.time.Time.now", side_effect=self.time_now)
         self._time_now_patcher.start()
 
         # Start scheduler
         self.is_running = True
-        self._scheduler_task = asyncio.create_task(
-            self._scheduler(), name="SimClockScheduler"
-        )
+        self._scheduler_task = asyncio.create_task(self._scheduler(), name="SimClockScheduler")
         return self
 
     async def __aexit__(
@@ -224,9 +221,7 @@ class TestDiurnalTimer(unittest.IsolatedAsyncioTestCase):
         # Generate all local noon times in 2025. Careful how you handle
         # daylight saving time :-P
         self.noon_times = [
-            datetime.combine(
-                date(2025, 1, 1) + timedelta(days=i), time(12, 0), tzinfo=self.tz
-            )
+            datetime.combine(date(2025, 1, 1) + timedelta(days=i), time(12, 0), tzinfo=self.tz)
             for i in range(365)
         ]
 
@@ -278,15 +273,9 @@ class TestDiurnalTimer(unittest.IsolatedAsyncioTestCase):
                     timeout=600,
                 )
 
-        self.assert_datetime_lists_close(
-            self.noon_times, self.noon_seen, label="Noon event"
-        )
-        self.assert_datetime_lists_close(
-            self.twilight_times, self.twilight_seen, label="Twilight event"
-        )
-        self.assert_datetime_lists_close(
-            self.sunrise_times, self.sunrise_seen, label="Sunrise event"
-        )
+        self.assert_datetime_lists_close(self.noon_times, self.noon_seen, label="Noon event")
+        self.assert_datetime_lists_close(self.twilight_times, self.twilight_seen, label="Twilight event")
+        self.assert_datetime_lists_close(self.sunrise_times, self.sunrise_seen, label="Sunrise event")
 
     async def test_is_night_start_in_daytime(self) -> None:
         timer = DiurnalTimer(sun_altitude="astronomical")

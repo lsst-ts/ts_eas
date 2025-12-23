@@ -67,9 +67,7 @@ class GlassTemperatureModel:
         self.log = log
 
         # A list of most recent temperature probe samples.
-        self.thermocouple_cache: list[ThermocoupleSample | None] = [
-            None
-        ] * N_THERMOCOUPLES
+        self.thermocouple_cache: list[ThermocoupleSample | None] = [None] * N_THERMOCOUPLES
 
         self.compiled_regex = re.compile(r"m1m3-ts-\d+ (\d+)/\d+")
 
@@ -91,9 +89,7 @@ class GlassTemperatureModel:
         sensor_name = temperature.sensorName  # Has format 'm1m3-ts-<index> <n>/6'
         regex_match = self.compiled_regex.match(temperature.sensorName)
         if regex_match is None:
-            message = (
-                f"M1M3TS ESS temperature sample has unexpected sensorName {sensor_name}"
-            )
+            message = f"M1M3TS ESS temperature sample has unexpected sensorName {sensor_name}"
             self.log.error(message)
             raise RuntimeError(message)
         sequence_num = int(regex_match[1])
@@ -113,9 +109,7 @@ class GlassTemperatureModel:
             if thermocouple.index < 0 or thermocouple.index >= N_THERMOCOUPLES:
                 raise ValueError("Unexpected thermocouple index")
 
-            self.thermocouple_cache[thermocouple.index] = ThermocoupleSample(
-                temperature, timestamp
-            )
+            self.thermocouple_cache[thermocouple.index] = ThermocoupleSample(temperature, timestamp)
 
     @property
     def median_temperature(self) -> float | None:

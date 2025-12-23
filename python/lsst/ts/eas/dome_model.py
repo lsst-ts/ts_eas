@@ -26,6 +26,7 @@ import logging
 from collections import deque
 
 import yaml
+
 from lsst.ts import salobj, utils
 
 DORMANT_TIME = 300  # Time to wait while sleeping, seconds
@@ -100,9 +101,7 @@ required:
             handle.cancel()
             event.set()
 
-    async def aperture_shutter_callback(
-        self, aperture_shutter_telemetry: salobj.BaseMsgType
-    ) -> None:
+    async def aperture_shutter_callback(self, aperture_shutter_telemetry: salobj.BaseMsgType) -> None:
         """Callback for MTDome.tel_apertureShutter.
 
         Data from this telemetry item is used to determine whether the dome
@@ -161,12 +160,10 @@ required:
 
         shutters_closed = (
             self.aperture_shutter_telemetry.positionActual[0] < self.dome_open_threshold
-            and self.aperture_shutter_telemetry.positionActual[1]
-            < self.dome_open_threshold
+            and self.aperture_shutter_telemetry.positionActual[1] < self.dome_open_threshold
         )
         louvers_closed = all(
-            position < self.dome_open_threshold
-            for position in self.louvers_telemetry.positionActual
+            position < self.dome_open_threshold for position in self.louvers_telemetry.positionActual
         )
 
         return shutters_closed and louvers_closed
