@@ -38,9 +38,7 @@ from .tma_model import TmaModel
 from .weather_model import WeatherModel
 
 # Constants for the health monitor:
-FAILURE_TIMEOUT = (
-    600  # Failure count will reset after monitor has run for this time (seconds).
-)
+FAILURE_TIMEOUT = 600  # Failure count will reset after monitor has run for this time (seconds).
 INITIAL_BACKOFF = 1  # monitor initial retry delay (seconds)
 MAX_BACKOFF = 60  # monitor maximum retry delay (seconds)
 
@@ -113,37 +111,37 @@ class EasCsc(salobj.ConfigurableCsc):
             domain=self.domain,
             name="MTDome",
             readonly=True,
-            include=["apertureShutter", "louvers"],
+            include=["apertureShutter", "louvers", "summaryState"],
         )
         self.ess_ts1_remote = salobj.Remote(
             domain=self.domain,
             name="ESS",
             index=THERMAL_SCANNER_1_INDEX,
             readonly=True,
-            include=["temperature"],
+            include=["temperature", "summaryState"],
         )
         self.ess_ts2_remote = salobj.Remote(
             domain=self.domain,
             name="ESS",
             index=THERMAL_SCANNER_2_INDEX,
-            include=["temperature"],
+            include=["temperature", "summaryState"],
         )
         self.ess_ts3_remote = salobj.Remote(
             domain=self.domain,
             name="ESS",
             index=THERMAL_SCANNER_3_INDEX,
-            include=["temperature"],
+            include=["temperature", "summaryState"],
         )
         self.ess_ts4_remote = salobj.Remote(
             domain=self.domain,
             name="ESS",
             index=THERMAL_SCANNER_4_INDEX,
-            include=["temperature"],
+            include=["temperature", "summaryState"],
         )
         self.mtm1m3ts_remote = salobj.Remote(
             domain=self.domain,
             name="MTM1M3TS",
-            include=["appliedSetpoints"],
+            include=["appliedSetpoints", "summaryState"],
         )
         self.mtmount_remote = salobj.Remote(
             domain=self.domain,
@@ -153,7 +151,7 @@ class EasCsc(salobj.ConfigurableCsc):
         self.hvac_remote = salobj.Remote(
             domain=self.domain,
             name="HVAC",
-            include=[],
+            include=["summaryState"],
         )
 
         self.ess_indoor_remote: salobj.Remote | None = None
@@ -191,17 +189,16 @@ class EasCsc(salobj.ConfigurableCsc):
     async def close_tasks(self) -> None:
         """Stop active tasks."""
         await self.shutdown_health_monitor()
+        if self.hvac_model is not None:
+            await self.hvac_model.close()
+        if self.tma_model is not None:
+            await self.tma_model.close()
         if self.diurnal_timer is not None:
             await self.diurnal_timer.stop()
         await super().close_tasks()
 
-    async def construct_ess_remotes(
-        self, *, indoor_ess_index: int, outdoor_ess_index: int
-    ) -> None:
-        if (
-            self.ess_indoor_remote is None
-            or self.ess_indoor_remote_index != indoor_ess_index
-        ):
+    async def construct_ess_remotes(self, *, indoor_ess_index: int, outdoor_ess_index: int) -> None:
+        if self.ess_indoor_remote is None or self.ess_indoor_remote_index != indoor_ess_index:
             if self.ess_indoor_remote is not None:
                 await self.ess_indoor_remote.close()
             self.ess_indoor_remote = salobj.Remote(
@@ -213,10 +210,7 @@ class EasCsc(salobj.ConfigurableCsc):
             )
             self.ess_indoor_remote_index = indoor_ess_index
 
-        if (
-            self.ess_outdoor_remote is None
-            or self.ess_outdoor_remote_index != outdoor_ess_index
-        ):
+        if self.ess_outdoor_remote is None or self.ess_outdoor_remote_index != outdoor_ess_index:
             if self.ess_outdoor_remote is not None:
                 await self.ess_outdoor_remote.close()
             self.ess_outdoor_remote = salobj.Remote(
@@ -230,6 +224,11 @@ class EasCsc(salobj.ConfigurableCsc):
 
     async def configure(self, config: SimpleNamespace) -> None:
         self.config = config
+
+        if self.hvac_model is not None:
+            await self.hvac_model.close()
+        if self.tma_model is not None:
+            await self.tma_model.close()
 
         await self.construct_ess_remotes(
             indoor_ess_index=config.weather["indoor_ess_index"],
@@ -315,34 +314,16 @@ class EasCsc(salobj.ConfigurableCsc):
                 "the configuration file and try again."
             )
 
-        self.dome_remote.tel_apertureShutter.callback = (
-            self.dome_model.aperture_shutter_callback
-        )
+        self.dome_remote.tel_apertureShutter.callback = self.dome_model.aperture_shutter_callback
         self.dome_remote.tel_louvers.callback = self.dome_model.louvers_callback
-        self.ess_ts1_remote.tel_temperature.callback = (
-            self.glass_temperature_model.temperature_callback
-        )
-        self.ess_ts2_remote.tel_temperature.callback = (
-            self.glass_temperature_model.temperature_callback
-        )
-        self.ess_ts3_remote.tel_temperature.callback = (
-            self.glass_temperature_model.temperature_callback
-        )
-        self.ess_ts4_remote.tel_temperature.callback = (
-            self.glass_temperature_model.temperature_callback
-        )
-        self.ess_outdoor_remote.tel_airFlow.callback = (
-            self.weather_model.air_flow_callback
-        )
-        self.ess_outdoor_remote.tel_temperature.callback = (
-            self.weather_model.temperature_callback
-        )
-        self.ess_indoor_remote.tel_dewPoint.callback = (
-            self.weather_model.indoor_dew_point_callback
-        )
-        self.ess_indoor_remote.tel_temperature.callback = (
-            self.weather_model.indoor_temperature_callback
-        )
+        self.ess_ts1_remote.tel_temperature.callback = self.glass_temperature_model.temperature_callback
+        self.ess_ts2_remote.tel_temperature.callback = self.glass_temperature_model.temperature_callback
+        self.ess_ts3_remote.tel_temperature.callback = self.glass_temperature_model.temperature_callback
+        self.ess_ts4_remote.tel_temperature.callback = self.glass_temperature_model.temperature_callback
+        self.ess_outdoor_remote.tel_airFlow.callback = self.weather_model.air_flow_callback
+        self.ess_outdoor_remote.tel_temperature.callback = self.weather_model.temperature_callback
+        self.ess_indoor_remote.tel_dewPoint.callback = self.weather_model.indoor_dew_point_callback
+        self.ess_indoor_remote.tel_temperature.callback = self.weather_model.indoor_temperature_callback
 
     def disconnect_callbacks(self) -> None:
         """Disconnects callbacks from their remotes."""
@@ -400,9 +381,7 @@ class EasCsc(salobj.ConfigurableCsc):
             self.log.debug("Monitors started.")
             self.monitor_start_event.set()
 
-            done, pending = await asyncio.wait(
-                self.subtasks, return_when=asyncio.FIRST_COMPLETED
-            )
+            done, pending = await asyncio.wait(self.subtasks, return_when=asyncio.FIRST_COMPLETED)
             self.subtasks = []
             self.disconnect_callbacks()
             self.monitor_start_event.clear()
@@ -439,11 +418,7 @@ class EasCsc(salobj.ConfigurableCsc):
             `config.wind_minimum_window` seconds old, then
             NaN is returned. Units are m/s.
         """
-        return (
-            self.weather_model.average_windspeed
-            if self.weather_model is not None
-            else math.nan
-        )
+        return self.weather_model.average_windspeed if self.weather_model is not None else math.nan
 
     @staticmethod
     def get_config_pkg() -> str:

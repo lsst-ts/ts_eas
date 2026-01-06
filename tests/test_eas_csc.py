@@ -32,6 +32,7 @@ import numpy as np
 import pandas as pd
 from astropy.table import Table
 from astropy.time import Time
+
 from lsst.ts import eas, salobj, utils
 from lsst.ts.xml.enums.HVAC import DeviceId
 
@@ -42,9 +43,7 @@ LONG_SLEEP = 15
 TEST_CONFIG_DIR = pathlib.Path(__file__).parents[1].joinpath("tests", "config")
 TEST_WIND_DATA_DIR = pathlib.Path(__file__).parent
 
-logging.basicConfig(
-    format="%(asctime)s:%(levelname)s:%(name)s:%(message)s", level=logging.DEBUG
-)
+logging.basicConfig(format="%(asctime)s:%(levelname)s:%(name)s:%(message)s", level=logging.DEBUG)
 
 
 class MTMountMock(salobj.BaseCsc):
@@ -72,9 +71,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         def fake_current_tai() -> float:
             return self._real_current_tai() + self.fake_time.offset
 
-        self.current_tai_patcher = mock.patch(
-            "lsst.ts.utils.current_tai", side_effect=fake_current_tai
-        )
+        self.current_tai_patcher = mock.patch("lsst.ts.utils.current_tai", side_effect=fake_current_tai)
         self.mock_current_tai = self.current_tai_patcher.start()
         self.addCleanup(self.current_tai_patcher.stop)
 
@@ -94,9 +91,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             """Always return a minimal single-row DataFrame."""
             return pd.DataFrame({"temperatureItem0": [0.0], "dewPointItem": [-10.0]})
 
-        mock_instance.select_time_series = mock.AsyncMock(
-            side_effect=fake_select_time_series
-        )
+        mock_instance.select_time_series = mock.AsyncMock(side_effect=fake_select_time_series)
         self.mock_efd_client = mock_instance
 
     def offset_clock(self, offset: float) -> None:
@@ -152,10 +147,11 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         )
 
         await self.mtmount.evt_summaryState.set_write(summaryState=salobj.State.ENABLED)
+        await self.hvac.evt_summaryState.set_write(summaryState=salobj.State.ENABLED)
+        await self.ess.evt_summaryState.set_write(summaryState=salobj.State.ENABLED)
+        await self.ess112.evt_summaryState.set_write(summaryState=salobj.State.ENABLED)
 
-        emit_ess112_temperature_task = asyncio.create_task(
-            self.emit_ess112_temperature()
-        )
+        emit_ess112_temperature_task = asyncio.create_task(self.emit_ess112_temperature())
 
         self.hvac.cmd_enableDevice.callback = self.enable_callback
         self.hvac.cmd_disableDevice.callback = self.disable_callback
@@ -181,9 +177,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
     async def emit_ess112_temperature(self) -> None:
         while True:
             await asyncio.sleep(1)
-            await asyncio.wait_for(
-                self.csc.monitor_start_event.wait(), timeout=STD_TIMEOUT
-            )
+            await asyncio.wait_for(self.csc.monitor_start_event.wait(), timeout=STD_TIMEOUT)
 
             timestamp = 0
             if self.ess112 is not None:
@@ -310,9 +304,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 await self.assert_next_summary_state(salobj.State.STANDBY)
 
     async def load_wind_history(self, wind_data_file: str) -> None:
-        self.wind_data = Table.read(
-            TEST_WIND_DATA_DIR / wind_data_file, format="ascii.ecsv"
-        )
+        self.wind_data = Table.read(TEST_WIND_DATA_DIR / wind_data_file, format="ascii.ecsv")
         self.wind_data["private_sndStamp"] -= self.wind_data["private_sndStamp"].min()
         for row in self.wind_data:
             self.offset_clock(row["private_sndStamp"])
@@ -349,9 +341,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             ),
         ):
             # Give the EAS CSC time to establish an MTDome remote
-            await asyncio.wait_for(
-                self.csc.monitor_start_event.wait(), timeout=STD_TIMEOUT
-            )
+            await asyncio.wait_for(self.csc.monitor_start_event.wait(), timeout=STD_TIMEOUT)
 
             await self.load_wind_history("air_flow.ecsv")
             await self.mtdome.tel_apertureShutter.set_write(
@@ -362,9 +352,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(STD_SLEEP)
             await self.csc.close_tasks()
 
-        self.assertAlmostEqual(
-            self.csc.average_windspeed, self.wind_data["speed"].mean(), delta=0.1
-        )
+        self.assertAlmostEqual(self.csc.average_windspeed, self.wind_data["speed"].mean(), delta=0.1)
         self.assertEqual(self.ahu1_state, True)
         self.assertEqual(self.ahu2_state, True)
         self.assertEqual(self.ahu3_state, True)
@@ -382,9 +370,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             ),
         ):
             # Give the EAS CSC time to establish an MTDome remote
-            await asyncio.wait_for(
-                self.csc.monitor_start_event.wait(), timeout=STD_TIMEOUT
-            )
+            await asyncio.wait_for(self.csc.monitor_start_event.wait(), timeout=STD_TIMEOUT)
 
             await self.load_wind_history("air_flow.ecsv")
             await self.mtdome.tel_apertureShutter.set_write(
@@ -395,9 +381,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(STD_SLEEP)
             await self.csc.close_tasks()
 
-        self.assertAlmostEqual(
-            self.csc.average_windspeed, self.wind_data["speed"].mean(), delta=0.1
-        )
+        self.assertAlmostEqual(self.csc.average_windspeed, self.wind_data["speed"].mean(), delta=0.1)
         self.assertEqual(self.ahu1_state, False)
         self.assertEqual(self.ahu2_state, False)
         self.assertEqual(self.ahu3_state, False)
@@ -415,9 +399,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             ),
         ):
             # Give the EAS CSC time to establish an MTDome remote
-            await asyncio.wait_for(
-                self.csc.monitor_start_event.wait(), timeout=STD_TIMEOUT
-            )
+            await asyncio.wait_for(self.csc.monitor_start_event.wait(), timeout=STD_TIMEOUT)
 
             await self.load_wind_history("high_wind.ecsv")
             await self.mtdome.tel_apertureShutter.set_write(
@@ -428,9 +410,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(STD_SLEEP)
             await self.csc.close_tasks()
 
-        self.assertAlmostEqual(
-            self.csc.average_windspeed, self.wind_data["speed"].mean(), delta=0.1
-        )
+        self.assertAlmostEqual(self.csc.average_windspeed, self.wind_data["speed"].mean(), delta=0.1)
         self.assertEqual(self.ahu1_state, False)
         self.assertEqual(self.ahu2_state, False)
         self.assertEqual(self.ahu3_state, False)
@@ -448,9 +428,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             ),
         ):
             # Give the EAS CSC time to establish an MTDome remote
-            await asyncio.wait_for(
-                self.csc.monitor_start_event.wait(), timeout=STD_TIMEOUT
-            )
+            await asyncio.wait_for(self.csc.monitor_start_event.wait(), timeout=STD_TIMEOUT)
 
             await self.mtdome.tel_apertureShutter.set_write(
                 positionActual=(100.0, 100.0),
@@ -512,9 +490,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             ),
         ):
             # Give the EAS CSC time to establish an MTDome remote
-            await asyncio.wait_for(
-                self.csc.monitor_start_event.wait(), timeout=STD_TIMEOUT
-            )
+            await asyncio.wait_for(self.csc.monitor_start_event.wait(), timeout=STD_TIMEOUT)
 
             await self.mtdome.tel_apertureShutter.set_write(
                 positionActual=(100.0, 100.0),
@@ -548,9 +524,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             ),
         ):
             # Give the EAS CSC time to establish an MTDome remote
-            await asyncio.wait_for(
-                self.csc.monitor_start_event.wait(), timeout=STD_TIMEOUT
-            )
+            await asyncio.wait_for(self.csc.monitor_start_event.wait(), timeout=STD_TIMEOUT)
 
             # This ecsv file contains 30 minutes of high winds (>100)
             # followed by 30 minutes of low winds.
@@ -566,9 +540,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         mask = self.wind_data["speed"] < 100
         self.wind_data = self.wind_data[mask]
 
-        self.assertAlmostEqual(
-            self.csc.average_windspeed, self.wind_data["speed"].mean(), delta=0.1
-        )
+        self.assertAlmostEqual(self.csc.average_windspeed, self.wind_data["speed"].mean(), delta=0.1)
         self.assertEqual(self.ahu1_state, False)
         self.assertEqual(self.ahu2_state, False)
         self.assertEqual(self.ahu3_state, False)
@@ -590,9 +562,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             ),
         ):
             # Give the EAS CSC time to establish an MTDome remote
-            await asyncio.wait_for(
-                self.csc.monitor_start_event.wait(), timeout=STD_TIMEOUT
-            )
+            await asyncio.wait_for(self.csc.monitor_start_event.wait(), timeout=STD_TIMEOUT)
 
             # Close and re-open the remotes.
             await self.mtdome.close()
@@ -636,9 +606,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
 
             await self.csc.close_tasks()
 
-        self.assertAlmostEqual(
-            self.csc.average_windspeed, self.wind_data["speed"].mean(), delta=0.1
-        )
+        self.assertAlmostEqual(self.csc.average_windspeed, self.wind_data["speed"].mean(), delta=0.1)
         self.assertEqual(self.ahu1_state, True)
         self.assertEqual(self.ahu2_state, True)
         self.assertEqual(self.ahu3_state, True)

@@ -25,13 +25,15 @@ import asyncio
 import logging
 import math
 import time
+from typing import Any
 
 import yaml
 from astropy.time import Time
+
 from lsst.ts import salobj, utils
 from lsst.ts.xml.enums.MTMount import ThermalCommandState
-from lsst.ts.xml.sal_enums import State
 
+from .cmdwrapper import close_command_tasks, command_wrapper
 from .diurnal_timer import DiurnalTimer
 from .dome_model import DomeModel
 from .glass_temperature_model import GlassTemperatureModel
@@ -43,9 +45,7 @@ DORMANT_TIME = 100  # Time to wait while sleeping, seconds
 MAX_TEMPERATURE_FAILURES = 10
 
 SECONDS_PER_HOUR = 3600.0  # Number of seconds in one hour
-SLOW_COOLING_START_TIME = (
-    2  # Time (in hours) before twilight to begin using the slow cooling rate.
-)
+SLOW_COOLING_START_TIME = 2  # Time (in hours) before twilight to begin using the slow cooling rate.
 
 
 class TmaModel:
@@ -139,7 +139,7 @@ class TmaModel:
         self.weather_model = weather_model
         self.glass_temperature_model = glass_temperature_model
 
-        # Remotes and duplicated topic:
+        # Remotes used by command decorators.
         self.m1m3ts_remote = m1m3ts_remote
         self.mtmount_remote = mtmount_remote
 
@@ -166,15 +166,9 @@ class TmaModel:
         # Fan speed configuration
         self.fan_speed_min: float = fan_speed["fan_speed_min"]
         self.fan_speed_max: float = fan_speed["fan_speed_max"]
-        self.fan_glycol_heater_offset_min: float = fan_speed[
-            "fan_glycol_heater_offset_min"
-        ]
-        self.fan_glycol_heater_offset_max: float = fan_speed[
-            "fan_glycol_heater_offset_max"
-        ]
-        self.fan_throttle_turn_on_temp_diff: float = fan_speed[
-            "fan_throttle_turn_on_temp_diff"
-        ]
+        self.fan_glycol_heater_offset_min: float = fan_speed["fan_glycol_heater_offset_min"]
+        self.fan_glycol_heater_offset_max: float = fan_speed["fan_glycol_heater_offset_max"]
+        self.fan_throttle_turn_on_temp_diff: float = fan_speed["fan_throttle_turn_on_temp_diff"]
         self.fan_throttle_max_temp_diff: float = fan_speed["fan_throttle_max_temp_diff"]
 
     @classmethod
@@ -281,13 +275,43 @@ additionalProperties: false
 """
         )
 
+    @command_wrapper(remote_attr="m1m3ts_remote", command_attr="cmd_applySetpoints")
+    async def send_apply_setpoints(
+        self,
+        *,
+        glycol_setpoint: float,
+        heaters_setpoint: float,
+    ) -> dict[str, Any]:
+        return {
+            "glycolSetpoint": glycol_setpoint,
+            "heatersSetpoint": heaters_setpoint,
+        }
+
+    @command_wrapper(remote_attr="m1m3ts_remote", command_attr="cmd_heaterFanDemand")
+    async def send_heater_fan_demand(
+        self,
+        *,
+        heater_pwm: list[int],
+        fan_rpm: list[int],
+    ) -> dict[str, Any]:
+        return {"heaterPWM": heater_pwm, "fanRPM": fan_rpm}
+
+    @command_wrapper(remote_attr="mtmount_remote", command_attr="cmd_setThermal")
+    async def send_set_thermal(
+        self,
+        *,
+        top_end_chiller_setpoint: float,
+        top_end_chiller_state: ThermalCommandState,
+    ) -> dict[str, Any]:
+        return {
+            "topEndChillerSetpoint": top_end_chiller_setpoint,
+            "topEndChillerState": top_end_chiller_state,
+        }
+
     async def monitor(self) -> None:
         self.log.debug("TmaModel.monitor")
 
-        if (
-            "m1m3ts" not in self.features_to_disable
-            or "top_end" not in self.features_to_disable
-        ):
+        if "m1m3ts" not in self.features_to_disable or "top_end" not in self.features_to_disable:
             self.log.debug("TmaModel.monitor started")
 
             try:
@@ -320,12 +344,10 @@ additionalProperties: false
         if "m1m3ts" not in self.features_to_disable:
             glycol_setpoint = setpoint + self.glycol_setpoint_delta
             heaters_setpoint = setpoint + self.heater_setpoint_delta
-            self.log.debug(
-                f"Setting MTM1MTS: {glycol_setpoint=:.2f}°C {heaters_setpoint=:.2f}°C"
-            )
-            await self.m1m3ts_remote.cmd_applySetpoints.set_start(
-                glycolSetpoint=glycol_setpoint,
-                heatersSetpoint=heaters_setpoint,
+            self.log.debug(f"Setting MTM1MTS: {glycol_setpoint=:.2f}°C {heaters_setpoint=:.2f}°C")
+            await self.send_apply_setpoints(
+                glycol_setpoint=glycol_setpoint,
+                heaters_setpoint=heaters_setpoint,
             )
 
         self.m1m3_setpoints_are_stale = False
@@ -370,88 +392,25 @@ additionalProperties: false
         fan_speed = max(min(fan_speed, self.fan_speed_max), self.fan_speed_min)
 
         fan_rpm = int(round(0.1 * fan_speed))
-        await self.m1m3ts_remote.cmd_heaterFanDemand.set_start(
-            heaterPWM=[-1] * 96,
-            fanRPM=[fan_rpm] * 96,
+        await self.send_heater_fan_demand(
+            heater_pwm=[-1] * 96,
+            fan_rpm=[fan_rpm] * 96,
         )
 
         if glass_temperature > setpoint:
             # Adjust glycol offset based on fan speed:
             #   Fan speed of 700 (minimum) -> glycol offset of -1 from heater
             #   Fan speed of 2000 (maximum) -> glycol offset of -4 from heater
-            glycol_offset_slope = (
-                self.fan_glycol_heater_offset_max - self.fan_glycol_heater_offset_min
-            ) / (self.fan_speed_max - self.fan_speed_min)
+            glycol_offset_slope = (self.fan_glycol_heater_offset_max - self.fan_glycol_heater_offset_min) / (
+                self.fan_speed_max - self.fan_speed_min
+            )
             glycol_offset = glycol_offset_slope * (fan_speed - self.fan_speed_min)
             glycol_offset += self.fan_glycol_heater_offset_min
             self.glycol_setpoint_delta = self.heater_setpoint_delta + glycol_offset
         else:
-            self.glycol_setpoint_delta = (
-                self.heater_setpoint_delta + self.fan_glycol_heater_offset_min
-            )
+            self.glycol_setpoint_delta = self.heater_setpoint_delta + self.fan_glycol_heater_offset_min
 
         self.m1m3_setpoints_are_stale = True
-
-    async def start_top_end_task(self, setpoint: float) -> None:
-        """Schedule self.apply_top_end_setpoint for asynchronous execution.
-
-        This method handles canceling an outstanding call if needed and will
-        raise if the previous call failed. If the previous call was still
-        running (presumably because the MTMount CSC was not enabled) then a
-        warning is logged.
-
-        Parameters
-        ----------
-        setpoint: float
-            The setpoint (without delta applied) for the mirror system.
-        """
-        if "top_end" in self.features_to_disable:
-            return
-
-        if self.top_end_task.done():
-            self.top_end_task_warned = False
-        else:
-            self.top_end_task.cancel()
-        try:
-            await self.top_end_task
-        except asyncio.CancelledError:
-            if not self.top_end_task_warned:
-                self.log.warning(
-                    "Previous attempt to apply MTMount setpoint was cancelled."
-                )
-                self.top_end_task_warned = True
-
-        self.top_end_task = asyncio.create_task(self.apply_top_end_setpoint(setpoint))
-
-    async def apply_top_end_setpoint(self, setpoint: float) -> None:
-        """Apply the average temperature plus offset as the top end setpoint.
-
-        This is a very simple approach to start with, but more complexity may
-        be added later. That might merit other methods, or a separate model
-        for the top end, but for now we just use the simplest approach
-        possible.
-
-        Parameters
-        ----------
-        setpoint: float
-            The setpoint (without delta applied) for the mirror system.
-        """
-        while (
-            await self.mtmount_remote.evt_summaryState.aget(timeout=STD_TIMEOUT)
-        ).summaryState != State.ENABLED:
-            await asyncio.sleep(DORMANT_TIME)
-
-        top_end_setpoint = setpoint + self.top_end_setpoint_delta
-        try:
-            await asyncio.wait_for(
-                self.mtmount_remote.cmd_setThermal.set_start(
-                    topEndChillerSetpoint=top_end_setpoint,
-                    topEndChillerState=ThermalCommandState.ON,
-                ),
-                timeout=STD_TIMEOUT,
-            )
-        except asyncio.TimeoutError:
-            self.log.exception("Apply setpoint to top end timed out!")
 
     async def follow_ess_indoor(self) -> None:
         self.log.debug("follow_ess_indoor")
@@ -482,16 +441,18 @@ additionalProperties: false
                 )
                 n_failures += 1
                 if n_failures == MAX_TEMPERATURE_FAILURES:
-                    self.log.error(
-                        "No temperature samples were collected. CSC will fault."
-                    )
+                    self.log.error("No temperature samples were collected. CSC will fault.")
                     raise RuntimeError("No temperature samples were collected.")
                 await asyncio.sleep(self.m1m3_setpoint_cadence)
                 continue
             else:
                 n_failures = 0
 
-            await self.start_top_end_task(indoor_temperature)
+            if "top_end" not in self.features_to_disable:
+                await self.send_set_thermal(
+                    top_end_chiller_setpoint=indoor_temperature + self.top_end_setpoint_delta,
+                    top_end_chiller_state=ThermalCommandState.ON,
+                )
 
             msg = self.m1m3ts_remote.evt_appliedSetpoints.get()
             if msg is None:
@@ -500,9 +461,7 @@ additionalProperties: false
                 last_m1m3ts_setpoint = msg.heatersSetpoint - self.heater_setpoint_delta
 
             # Apply the new setpoint to change fan speed.
-            if "fanspeed" not in self.features_to_disable and not math.isnan(
-                indoor_temperature
-            ):
+            if "fanspeed" not in self.features_to_disable and not math.isnan(indoor_temperature):
                 await self.set_fan_speed(setpoint=indoor_temperature)
 
             # Maximum cooling rate depends on environmental conditions:
@@ -523,11 +482,7 @@ additionalProperties: false
                     < SLOW_COOLING_START_TIME * SECONDS_PER_HOUR
                 )
             )
-            cooling_rate = (
-                self.slow_cooling_rate
-                if use_slow_cooling_rate
-                else self.fast_cooling_rate
-            )
+            cooling_rate = self.slow_cooling_rate if use_slow_cooling_rate else self.fast_cooling_rate
 
             if last_m1m3ts_setpoint is None:
                 # No previous setpoint = apply it regardless
@@ -541,9 +496,7 @@ additionalProperties: false
                 if delta > self.setpoint_deadband_heating:
                     # Apply the setpoint, limited by maximum_heating_rate
                     maximum_heating_step = (
-                        self.maximum_heating_rate
-                        * self.m1m3_setpoint_cadence
-                        / SECONDS_PER_HOUR
+                        self.maximum_heating_rate * self.m1m3_setpoint_cadence / SECONDS_PER_HOUR
                     )
                     new_setpoint = min(
                         new_setpoint,
@@ -551,10 +504,7 @@ additionalProperties: false
                     )
                     await self.apply_setpoints(new_setpoint)
                 else:
-                    self.log.debug(
-                        "Heating deadband criterion not met. "
-                        "No M1M3TS setpoint update."
-                    )
+                    self.log.debug("Heating deadband criterion not met. No M1M3TS setpoint update.")
 
             elif indoor_temperature < last_m1m3ts_setpoint:
                 # Cool the mirror if the setpoint is past the cooling deadband.
@@ -563,19 +513,14 @@ additionalProperties: false
 
                 if delta > self.setpoint_deadband_cooling:
                     # Apply the setpoint, limited by maximum_cooling_rate
-                    maximum_cooling_step = (
-                        cooling_rate * self.m1m3_setpoint_cadence / SECONDS_PER_HOUR
-                    )
+                    maximum_cooling_step = cooling_rate * self.m1m3_setpoint_cadence / SECONDS_PER_HOUR
                     new_setpoint = max(
                         new_setpoint,
                         last_m1m3ts_setpoint - maximum_cooling_step,
                     )
                     await self.apply_setpoints(new_setpoint)
                 else:
-                    self.log.debug(
-                        "Cooling deadband criterion not met. "
-                        "No M1M3TS setpoint update."
-                    )
+                    self.log.debug("Cooling deadband criterion not met. No M1M3TS setpoint update.")
 
             else:
                 # indoor_temperature == last_m1m3ts_setpoint
@@ -596,18 +541,22 @@ additionalProperties: false
         """
         while self.diurnal_timer.is_running:
             async with self.diurnal_timer.sunrise_condition:
-
                 await self.diurnal_timer.sunrise_condition.wait()
-                last_twilight_temperature = (
-                    await self.weather_model.get_last_twilight_temperature()
-                )
-                if (
-                    self.diurnal_timer.is_running
-                    and last_twilight_temperature is not None
-                ):
+                last_twilight_temperature = await self.weather_model.get_last_twilight_temperature()
+                if self.diurnal_timer.is_running and last_twilight_temperature is not None:
                     self.log.info(
                         "Sunrise M1M3TS and top end is set based on twilight temperature: "
                         f"{last_twilight_temperature:.2f}°C"
                     )
                     await self.apply_setpoints(last_twilight_temperature)
-                    await self.start_top_end_task(last_twilight_temperature)
+
+                    if "top_end" not in self.features_to_disable:
+                        chiller_setpoint = last_twilight_temperature + self.top_end_setpoint_delta
+                        await self.send_set_thermal(
+                            top_end_chiller_setpoint=chiller_setpoint,
+                            top_end_chiller_state=ThermalCommandState.ON,
+                        )
+
+    async def close(self) -> None:
+        """Cancel any in-flight command tasks."""
+        await close_command_tasks(self)

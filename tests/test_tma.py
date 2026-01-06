@@ -31,9 +31,7 @@ from lsst.ts import eas, salobj
 STD_TIMEOUT = 60
 STD_SLEEP = 0.5
 
-logging.basicConfig(
-    format="%(asctime)s:%(levelname)s:%(name)s:%(message)s", level=logging.DEBUG
-)
+logging.basicConfig(format="%(asctime)s:%(levelname)s:%(name)s:%(message)s", level=logging.DEBUG)
 
 
 class M1M3TSMock(salobj.BaseCsc):
@@ -120,9 +118,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             salobj.Remote(name="MTM1M3TS", domain=mock_m1m3ts.domain) as m1m3ts_remote,
             salobj.Remote(name="MTMount", domain=mock_m1m3ts.domain) as mtmount_remote,
         ):
-            await mock_mtmount.evt_summaryState.set_write(
-                summaryState=salobj.State.ENABLED
-            )
+            await mock_mtmount.evt_summaryState.set_write(summaryState=salobj.State.ENABLED)
 
             self.tma_model = eas.tma_model.TmaModel(
                 log=mock_m1m3ts.log,
@@ -182,29 +178,23 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         heater_setpoint_delta = -1
         top_end_setpoint_delta = -0.5
 
-        glycol_setpoint, heater_setpoint, top_end_setpoint, _ = (
-            await self.run_with_parameters(
-                indoor_temperature=10,
-                glycol_setpoint_delta=glycol_setpoint_delta,
-                heater_setpoint_delta=heater_setpoint_delta,
-                top_end_setpoint_delta=top_end_setpoint_delta,
-                signal_sunrise=True,
-                features_to_disable=[],
-            )
+        glycol_setpoint, heater_setpoint, top_end_setpoint, _ = await self.run_with_parameters(
+            indoor_temperature=10,
+            glycol_setpoint_delta=glycol_setpoint_delta,
+            heater_setpoint_delta=heater_setpoint_delta,
+            top_end_setpoint_delta=top_end_setpoint_delta,
+            signal_sunrise=True,
+            features_to_disable=[],
         )
 
-        assert (
-            self.last_twilight_temperature is not None and glycol_setpoint is not None
-        )
+        assert self.last_twilight_temperature is not None and glycol_setpoint is not None
         self.assertAlmostEqual(
             glycol_setpoint,
             self.last_twilight_temperature + self.tma_model.glycol_setpoint_delta,
             places=4,
         )
 
-        assert (
-            self.last_twilight_temperature is not None and heater_setpoint is not None
-        )
+        assert self.last_twilight_temperature is not None and heater_setpoint is not None
         self.assertAlmostEqual(
             heater_setpoint,
             self.last_twilight_temperature + heater_setpoint_delta,
@@ -217,13 +207,11 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         heater_setpoint_delta = -1
         top_end_setpoint_delta = -1.5
 
-        glycol_setpoint, heater_setpoint, top_end_setpoint, fan_rpm = (
-            await self.run_with_parameters(
-                glycol_setpoint_delta=glycol_setpoint_delta,
-                heater_setpoint_delta=heater_setpoint_delta,
-                top_end_setpoint_delta=top_end_setpoint_delta,
-                features_to_disable=["m1m3ts"],
-            )
+        glycol_setpoint, heater_setpoint, top_end_setpoint, fan_rpm = await self.run_with_parameters(
+            glycol_setpoint_delta=glycol_setpoint_delta,
+            heater_setpoint_delta=heater_setpoint_delta,
+            top_end_setpoint_delta=top_end_setpoint_delta,
+            features_to_disable=["m1m3ts"],
         )
 
         self.assertTrue(glycol_setpoint is None)
@@ -240,23 +228,19 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         heater_setpoint_delta = -1
         top_end_setpoint_delta = -1
 
-        glycol_setpoint, heater_setpoint, top_end_setpoint, fan_rpm = (
-            await self.run_with_parameters(
-                indoor_temperature=indoor_temperature,
-                glycol_setpoint_delta=glycol_setpoint_delta,
-                heater_setpoint_delta=heater_setpoint_delta,
-                top_end_setpoint_delta=top_end_setpoint_delta,
-                features_to_disable=["top_end"],
-            )
+        glycol_setpoint, heater_setpoint, top_end_setpoint, fan_rpm = await self.run_with_parameters(
+            indoor_temperature=indoor_temperature,
+            glycol_setpoint_delta=glycol_setpoint_delta,
+            heater_setpoint_delta=heater_setpoint_delta,
+            top_end_setpoint_delta=top_end_setpoint_delta,
+            features_to_disable=["top_end"],
         )
 
         self.assertTrue(glycol_setpoint is not None)
         self.assertTrue(heater_setpoint is not None)
         self.assertTrue(top_end_setpoint is None)
         assert fan_rpm is not None
-        expected_fan_rpm = int(
-            0.1 * 0.5 * (self.tma_model.fan_speed_min + self.tma_model.fan_speed_max)
-        )
+        expected_fan_rpm = int(0.1 * 0.5 * (self.tma_model.fan_speed_min + self.tma_model.fan_speed_max))
         self.assertAlmostEqual(fan_rpm[0], expected_fan_rpm, 3)
 
     async def test_disabled_tma(self) -> None:
@@ -265,13 +249,11 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         heater_setpoint_delta = -1
         top_end_setpoint_delta = -1.5
 
-        glycol_setpoint, heater_setpoint, top_end_setpoint, _ = (
-            await self.run_with_parameters(
-                glycol_setpoint_delta=glycol_setpoint_delta,
-                heater_setpoint_delta=heater_setpoint_delta,
-                top_end_setpoint_delta=top_end_setpoint_delta,
-                features_to_disable=["m1m3ts", "top_end"],
-            )
+        glycol_setpoint, heater_setpoint, top_end_setpoint, _ = await self.run_with_parameters(
+            glycol_setpoint_delta=glycol_setpoint_delta,
+            heater_setpoint_delta=heater_setpoint_delta,
+            top_end_setpoint_delta=top_end_setpoint_delta,
+            features_to_disable=["m1m3ts", "top_end"],
         )
 
         self.assertTrue(glycol_setpoint is None)
@@ -329,6 +311,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             #    * fan at minimum RPM (700)
             #    * glycol delta at minimum (-1)
             await tma_model.set_fan_speed(setpoint=1.0)
+            await asyncio.sleep(STD_SLEEP)
             self.assertEqual(mock_m1m3ts.fan_rpm, [fan_minimum] * 96)
             self.assertEqual(
                 tma_model.glycol_setpoint_delta,
@@ -340,6 +323,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             #    * fan at maximum RPM (2500)
             #    * glycol delta at minimum (-1)
             await tma_model.set_fan_speed(setpoint=2.0)
+            await asyncio.sleep(STD_SLEEP)
             self.assertEqual(mock_m1m3ts.fan_rpm, [fan_maximum] * 96)
             self.assertEqual(
                 tma_model.glycol_setpoint_delta,
@@ -366,9 +350,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             salobj.Remote(name="MTM1M3TS", domain=mock_m1m3ts.domain) as m1m3ts_remote,
             salobj.Remote(name="MTMount", domain=mock_m1m3ts.domain) as mtmount_remote,
         ):
-            await mock_mtmount.evt_summaryState.set_write(
-                summaryState=salobj.State.ENABLED
-            )
+            await mock_mtmount.evt_summaryState.set_write(summaryState=salobj.State.ENABLED)
 
             diurnal_timer = eas.diurnal_timer.DiurnalTimer()
             diurnal_timer.is_running = True

@@ -31,14 +31,13 @@ import astropy.units as u
 import lsst_efd_client
 import yaml
 from astropy.time import Time
+
 from lsst.ts import salobj, utils
 
 from .diurnal_timer import DiurnalTimer
 
 SAL_TIMEOUT = 60  # SAL timeout time. (seconds)
-TEMPERATURE_CUTOFF_TIME = (
-    5 * 60
-)  # Maximum age of temperature data to continue. (seconds)
+TEMPERATURE_CUTOFF_TIME = 5 * 60  # Maximum age of temperature data to continue. (seconds)
 MAX_TEMPERATURE_SAMPLES = 20  # The maximum number of temperature samples to retain.
 
 NIGHT_SEARCH_WINDOW = 18 * u.hour
@@ -99,14 +98,10 @@ class WeatherModel:
         self.wind_history: deque = deque()
 
         # A deque containing tuples of timestamp, temperature
-        self.temperature_history: deque[tuple[float, float]] = deque(
-            maxlen=MAX_TEMPERATURE_SAMPLES
-        )
+        self.temperature_history: deque[tuple[float, float]] = deque(maxlen=MAX_TEMPERATURE_SAMPLES)
 
         # A deque containing tuples of timestamp, temperature for indoor ESS
-        self.indoor_temperature_history: deque[tuple[float, float]] = deque(
-            maxlen=MAX_TEMPERATURE_SAMPLES
-        )
+        self.indoor_temperature_history: deque[tuple[float, float]] = deque(maxlen=MAX_TEMPERATURE_SAMPLES)
 
         # The last observed temperature at the end of twilight
         self.last_twilight_temperature: float | None = None
@@ -194,9 +189,7 @@ additionalProperties: false
         else:
             time_window_begin = time_now - DAY_SEARCH_WINDOW
 
-        time_window_begin = self.diurnal_timer.get_twilight_time(
-            after=time_window_begin
-        )
+        time_window_begin = self.diurnal_timer.get_twilight_time(after=time_window_begin)
         time_window_end = self.diurnal_timer.get_sunrise_time(after=time_window_begin)
 
         efd_client = lsst_efd_client.EfdClient(self.efd_name)
@@ -264,9 +257,7 @@ additionalProperties: false
             if len(time_series) == 0:
                 continue
 
-            self.last_twilight_temperature = float(
-                time_series["temperatureItem0"].median()
-            )
+            self.last_twilight_temperature = float(time_series["temperatureItem0"].median())
             if math.isnan(self.last_twilight_temperature):
                 self.last_twilight_temperature = None
                 continue
@@ -311,9 +302,7 @@ additionalProperties: false
         now = temperature.private_sndStamp
         self.temperature_history.append((temperature.temperatureItem[0], now))
 
-    async def indoor_temperature_callback(
-        self, temperature: salobj.BaseMsgType
-    ) -> None:
+    async def indoor_temperature_callback(self, temperature: salobj.BaseMsgType) -> None:
         """Callback for ESS.tel_temperature for the indoor ESS.
 
         This function appends new temperature data to the existing table.
@@ -365,8 +354,7 @@ additionalProperties: false
         else:
             if not self.need_to_reset_dew_point:
                 self.log.info(
-                    "Nightly maximum dewpoint recorded: "
-                    f"{self.nightly_maximum_indoor_dew_point:.2f}°C"
+                    f"Nightly maximum dewpoint recorded: {self.nightly_maximum_indoor_dew_point:.2f}°C"
                 )
             self.need_to_reset_dew_point = True
 
@@ -398,10 +386,7 @@ additionalProperties: false
             self.wind_history.popleft()
 
         # If not enough data remains, return NaN
-        if (
-            not self.wind_history
-            or current_time - self.wind_history[0][1] < self.wind_minimum_window
-        ):
+        if not self.wind_history or current_time - self.wind_history[0][1] < self.wind_minimum_window:
             self.log.error("All wind history was stale")
             return math.nan
 
@@ -435,9 +420,7 @@ additionalProperties: false
         """
         return self.calculate_current_temperature(self.indoor_temperature_history)
 
-    def calculate_current_temperature(
-        self, temperature_history: deque[tuple[float, float]]
-    ) -> float:
+    def calculate_current_temperature(self, temperature_history: deque[tuple[float, float]]) -> float:
         """Calculates a current temperature for the given collection.
 
         Finds a median over the last 5 minutes for the specfied
@@ -458,9 +441,7 @@ additionalProperties: false
             last 5 minutes.
         """
         cutoff = utils.current_tai() - TEMPERATURE_CUTOFF_TIME
-        recent_samples = [
-            temperature for temperature, time in temperature_history if time >= cutoff
-        ]
+        recent_samples = [temperature for temperature, time in temperature_history if time >= cutoff]
 
         if not recent_samples:
             self.log.warning("No temperature samples collected.")
@@ -489,9 +470,7 @@ additionalProperties: false
                 await self.diurnal_timer.twilight_condition.wait()
                 if self.diurnal_timer.is_running:
                     try:
-                        self.last_twilight_temperature = (
-                            await self.measure_twilight_temperature()
-                        )
+                        self.last_twilight_temperature = await self.measure_twilight_temperature()
 
                     except Exception:
                         self.log.exception("Failed to read temperature from ESS")
@@ -506,7 +485,5 @@ additionalProperties: false
         # Store the current temperature for future use.
         self.log.debug("measure_twilight_temperature")
         last_twilight_temperature = self.current_temperature
-        self.log.info(
-            f"Collected twilight temperature: {last_twilight_temperature:.2f}°C"
-        )
+        self.log.info(f"Collected twilight temperature: {last_twilight_temperature:.2f}°C")
         return last_twilight_temperature
