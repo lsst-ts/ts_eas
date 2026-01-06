@@ -1,3 +1,14 @@
+v0.11.0 (2026-01-06)
+====================
+
+New Features
+------------
+
+- Added command wrapper to wait for CSC ENABLED and handle errors. (`OSW-1146 <https://rubinobs.atlassian.net//browse/OSW-1146>`_)
+- Switched from black to ruff. (`OSW-1558 <https://rubinobs.atlassian.net//browse/OSW-1558>`_)
+- Added glycol_absolute_maximum limit. (`OSW-1558 <https://rubinobs.atlassian.net//browse/OSW-1558>`_)
+
+
 v0.10.0 (2025-12-12)
 ===================
 
