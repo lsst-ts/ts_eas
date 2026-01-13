@@ -25,7 +25,7 @@ import asyncio
 import logging
 import math
 import time
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 from astropy.time import Time
@@ -129,8 +129,10 @@ class TmaModel:
         fast_cooling_rate: float,
         fan_speed: dict[str, float],
         features_to_disable: list[str],
+        allow_send: Callable[[], bool] | None = None,
     ) -> None:
         self.log = log
+        self.allow_send = allow_send
 
         self.monitor_start_event = asyncio.Event()
 

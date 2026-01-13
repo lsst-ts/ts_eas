@@ -1,0 +1,1 @@
+Avoid sending commands when CSC is DISABLED.
