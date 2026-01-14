@@ -270,23 +270,13 @@ additionalProperties: false
         # Give the dome model an opportunity to collect some telemetry...
         await asyncio.sleep(STD_TIMEOUT)
 
-        tasks = [self.control_ahus_and_vec04()]
-
-        if "room_setpoint" not in self.features_to_disable:
-            tasks.extend(
-                [
-                    self.wait_for_sunrise(),
-                    self.apply_setpoint_at_night(),
-                ]
-            )
-
-        if "glycol_chillers" not in self.features_to_disable:
-            tasks.extend(
-                [
-                    self.adjust_glycol_chillers_at_noon(),
-                    self.monitor_glycol_chillers(),
-                ]
-            )
+        tasks = [
+            self.control_ahus_and_vec04(),
+            self.wait_for_sunrise(),
+            self.apply_setpoint_at_night(),
+            self.adjust_glycol_chillers_at_noon(),
+            self.monitor_glycol_chillers(),
+        ]
 
         hvac_future = asyncio.gather(*tasks)
         self.monitor_start_event.set()
@@ -506,6 +496,10 @@ additionalProperties: false
         self.log.debug("monitor_glycol_chillers")
         while self.diurnal_timer.is_running:
             try:
+                if "glycol_chillers" in self.features_to_disable:
+                    await asyncio.sleep(HVAC_SLEEP_TIME)
+                    continue
+
                 # At night, reset the setpoints and do not control
                 # the glycol.
                 if self.diurnal_timer.is_night(Time.now()):
@@ -566,6 +560,8 @@ additionalProperties: false
                 await self.diurnal_timer.noon_condition.wait()
                 if not self.diurnal_timer.is_running:
                     return
+                if "glycol_chillers" in self.features_to_disable:
+                    continue
 
                 nightly_minimum_temperature = self.weather_model.nightly_minimum_temperature
                 if math.isnan(nightly_minimum_temperature):
@@ -605,6 +601,10 @@ additionalProperties: false
 
         while self.diurnal_timer.is_running:
             if self.diurnal_timer.is_night(Time.now()) and self.dome_model.is_closed:
+                if "room_setpoint" in self.features_to_disable:
+                    await asyncio.sleep(HVAC_SLEEP_TIME)
+                    continue
+
                 setpoint = max(
                     self.weather_model.current_temperature + self.ahu_setpoint_delta,
                     self.setpoint_lower_limit,
