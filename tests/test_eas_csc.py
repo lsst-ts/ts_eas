@@ -34,6 +34,7 @@ from astropy.table import Table
 from astropy.time import Time
 
 from lsst.ts import eas, salobj, utils
+from lsst.ts.xml.enums.EAS import ControlFeature
 from lsst.ts.xml.enums.HVAC import DeviceId
 
 STD_TIMEOUT = 60
@@ -331,6 +332,32 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.ahu3_state)
         self.assertIsNone(self.ahu4_state)
         self.assertIsNone(self.vec04_state)
+
+    async def test_disable_list_commands(self) -> None:
+        """Disable list commands update the shared features list."""
+        async with (
+            self.mock_extra_cscs(),
+            self.make_csc(
+                initial_state=salobj.State.ENABLED,
+                config_dir=TEST_CONFIG_DIR,
+                simulation_mode=1,
+            ),
+        ):
+            await asyncio.wait_for(self.csc.monitor_start_event.wait(), timeout=STD_TIMEOUT)
+
+            await self.remote.cmd_disableFeatures.set_start(  # type: ignore
+                features=int(ControlFeature.AHU | ControlFeature.VEC04),
+                timeout=STD_TIMEOUT,
+            )
+            self.assertIn("ahu", self.csc.config.features_to_disable)
+            self.assertIn("vec04", self.csc.config.features_to_disable)
+
+            await self.remote.cmd_enableFeatures.set_start(  # type: ignore
+                features=int(ControlFeature.AHU),
+                timeout=STD_TIMEOUT,
+            )
+            self.assertNotIn("ahu", self.csc.config.features_to_disable)
+            self.assertIn("vec04", self.csc.config.features_to_disable)
 
     async def load_wind_history(self, wind_data_file: str) -> None:
         self.wind_data = Table.read(TEST_WIND_DATA_DIR / wind_data_file, format="ascii.ecsv")
