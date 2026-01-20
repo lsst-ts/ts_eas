@@ -1,3 +1,12 @@
+v0.12.0 (2026-01-20)
+====================
+
+Bug Fixes
+---------
+
+- Avoid sending commands when CSC is DISABLED. (`OSW-1453 <https://rubinobs.atlassian.net//browse/OSW-1453>`_)
+
+
 v0.11.0 (2026-01-06)
 ====================
 
