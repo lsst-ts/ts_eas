@@ -25,7 +25,7 @@ import asyncio
 import logging
 import math
 import time
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 from astropy.time import Time
@@ -129,8 +129,10 @@ class TmaModel:
         fast_cooling_rate: float,
         fan_speed: dict[str, float],
         features_to_disable: list[str],
+        allow_send: Callable[[], bool] | None = None,
     ) -> None:
         self.log = log
+        self.allow_send = allow_send
 
         self.monitor_start_event = asyncio.Event()
 
@@ -311,34 +313,22 @@ additionalProperties: false
     async def monitor(self) -> None:
         self.log.debug("TmaModel.monitor")
 
-        if "m1m3ts" not in self.features_to_disable or "top_end" not in self.features_to_disable:
-            self.log.debug("TmaModel.monitor started")
-
-            try:
-                await asyncio.gather(
-                    self.follow_ess_indoor(),
-                    self.wait_for_sunrise(),
-                )
-            finally:
-                if not self.top_end_task.done():
-                    self.top_end_task.cancel()
-                    try:
-                        await self.top_end_task
-                    except asyncio.CancelledError:
-                        pass  # Expected
-
-                self.monitor_start_event.clear()
-
-            self.log.debug("TmaModel.monitor closing...")
-
-        else:
-            # If m1m3ts is disabled, just sleep.
-            while True:
+        try:
+            await asyncio.gather(
+                self.follow_ess_indoor(),
+                self.wait_for_sunrise(),
+            )
+        finally:
+            if not self.top_end_task.done():
+                self.top_end_task.cancel()
                 try:
-                    await asyncio.sleep(DORMANT_TIME)
+                    await self.top_end_task
                 except asyncio.CancelledError:
-                    self.log.debug("monitor cancelled")
-                    raise
+                    pass  # Expected
+
+            self.monitor_start_event.clear()
+
+        self.log.debug("TmaModel.monitor closing...")
 
     async def apply_setpoints(self, setpoint: float) -> None:
         if "m1m3ts" not in self.features_to_disable:
@@ -420,6 +410,10 @@ additionalProperties: false
         self.monitor_start_event.set()
 
         while self.diurnal_timer.is_running:
+            if "m1m3ts" in self.features_to_disable and "top_end" in self.features_to_disable:
+                await asyncio.sleep(DORMANT_TIME)
+                continue
+
             if "require_dome_open" not in self.features_to_disable:
                 # Wait for some dome telemetry to arrive to avoid
                 # an unnecessary wait of `after_open_delay` seconds.

@@ -27,6 +27,7 @@ import typing
 from types import SimpleNamespace
 
 from lsst.ts import salobj, utils
+from lsst.ts.xml.enums.EAS import ControlFeature
 
 from . import __version__
 from .config_schema import CONFIG_SCHEMA
@@ -75,6 +76,18 @@ class EasCsc(salobj.ConfigurableCsc):
 
     valid_simulation_modes = (0, 1)
     version = __version__
+    _disable_feature_map = {
+        ControlFeature.ROOM_SETPOINT: "room_setpoint",
+        ControlFeature.AHU: "ahu",
+        ControlFeature.VEC04: "vec04",
+        ControlFeature.GLYCOL_CHILLERS: "glycol_chillers",
+        ControlFeature.FANSPEED: "fanspeed",
+        ControlFeature.M1M3TS: "m1m3ts",
+        ControlFeature.REQUIRE_DOME_OPEN: "require_dome_open",
+    }
+    _disable_feature_mask = ControlFeature(0)
+    for _flag in _disable_feature_map:
+        _disable_feature_mask |= _flag
 
     def __init__(
         self,
@@ -163,7 +176,8 @@ class EasCsc(salobj.ConfigurableCsc):
         """Override of the handle_summary_state function to
         set up the control loop.
         """
-        self.log.debug(f"handle_summary_state {salobj.State(self.summary_state).name}")
+        summary_state = salobj.State(self.summary_state)
+        self.log.debug(f"handle_summary_state {summary_state.name}")
 
         if self.disabled_or_enabled:
             if self.health_monitor_task.done():
@@ -171,6 +185,9 @@ class EasCsc(salobj.ConfigurableCsc):
 
         else:
             await self.shutdown_health_monitor()
+
+    def _allow_send(self) -> bool:
+        return self.summary_state != salobj.State.DISABLED
 
     async def shutdown_health_monitor(self) -> None:
         """Cancel the health monitor task and waits for completion."""
@@ -284,6 +301,7 @@ class EasCsc(salobj.ConfigurableCsc):
             weather_model=self.weather_model,
             hvac_remote=self.hvac_remote,
             features_to_disable=self.config.features_to_disable,
+            allow_send=self._allow_send,
             **self.config.hvac,
         )
         self.tma_model = TmaModel(
@@ -295,8 +313,58 @@ class EasCsc(salobj.ConfigurableCsc):
             m1m3ts_remote=self.mtm1m3ts_remote,
             mtmount_remote=self.mtmount_remote,
             features_to_disable=self.config.features_to_disable,
+            allow_send=self._allow_send,
             **self.config.tma,
         )
+
+    def _get_disable_feature_names(self, feature: int) -> list[str]:
+        if feature == 0:
+            raise salobj.ExpectedError("ControlFeature value cannot be 0.")
+        enum_value = ControlFeature(feature)
+        if enum_value & ~self._disable_feature_mask:
+            raise salobj.ExpectedError(f"Invalid ControlFeature value: {feature}")
+        return [self._disable_feature_map[flag] for flag in self._disable_feature_map if flag in enum_value]
+
+    def _get_disable_feature_list(self) -> list[str]:
+        if self.config is None:
+            raise salobj.ExpectedError("EAS is not configured.")
+        return self.config.features_to_disable
+
+    async def do_disableFeatures(self, data: salobj.type_hints.BaseMsgType) -> None:
+        """Implement the ``disableFeatures`` command.
+
+        This command modifies `self.config.features_to_disable`. This list
+        is referenced by each of the model classes, which use the list
+        to filter out certain behaviors.
+
+        Parameters
+        ----------
+        data : `~salobj.type_hints.BaseMsgType`
+            The data object sent with the command.
+        """
+        self.assert_enabled()
+        feature_names = self._get_disable_feature_names(data.features)
+        disable_list = self._get_disable_feature_list()
+        for feature_name in feature_names:
+            if feature_name not in disable_list:
+                disable_list.append(feature_name)
+
+    async def do_enableFeatures(self, data: salobj.type_hints.BaseMsgType) -> None:
+        """Implement the ``enableFeatures`` command.
+
+        This command modifies `self.config.features_to_disable`.
+
+        Parameters
+        ----------
+        data : `~salobj.type_hints.BaseMsgType`
+            The data object sent with the command.
+        """
+        self.assert_enabled()
+        feature_names = self._get_disable_feature_names(data.features)
+        disable_list = self._get_disable_feature_list()
+        for feature_name in feature_names:
+            while feature_name in disable_list:
+                disable_list.remove(feature_name)
 
     def connect_callbacks(self) -> None:
         """Connects callbacks to their remotes."""
