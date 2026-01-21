@@ -158,6 +158,9 @@ class TmaModel:
         self.fast_cooling_rate = fast_cooling_rate
         self.features_to_disable = features_to_disable
 
+        # Fan-driven adjustment applied on top of the configured glycol delta.
+        self.glycol_setpoint_delta_adjustment: float = 0.0
+
         # If true, applySetpoints needs to be called to
         # refresh the setpoints on M1M3
         self.m1m3_setpoints_are_stale: bool = True
@@ -332,7 +335,7 @@ additionalProperties: false
 
     async def apply_setpoints(self, setpoint: float) -> None:
         if "m1m3ts" not in self.features_to_disable:
-            glycol_setpoint = setpoint + self.glycol_setpoint_delta
+            glycol_setpoint = setpoint + self.glycol_setpoint_delta + self.glycol_setpoint_delta_adjustment
             heaters_setpoint = setpoint + self.heater_setpoint_delta
             self.log.debug(f"Setting MTM1MTS: {glycol_setpoint=:.2f}°C {heaters_setpoint=:.2f}°C")
             await self.send_apply_setpoints(
@@ -396,9 +399,13 @@ additionalProperties: false
             )
             glycol_offset = glycol_offset_slope * (fan_speed - self.fan_speed_min)
             glycol_offset += self.fan_glycol_heater_offset_min
-            self.glycol_setpoint_delta = self.heater_setpoint_delta + glycol_offset
+            self.glycol_setpoint_delta_adjustment = (
+                self.heater_setpoint_delta + glycol_offset - self.glycol_setpoint_delta
+            )
         else:
-            self.glycol_setpoint_delta = self.heater_setpoint_delta + self.fan_glycol_heater_offset_min
+            self.glycol_setpoint_delta_adjustment = (
+                self.heater_setpoint_delta + self.fan_glycol_heater_offset_min - self.glycol_setpoint_delta
+            )
 
         self.m1m3_setpoints_are_stale = True
 
@@ -542,6 +549,7 @@ additionalProperties: false
                         "Sunrise M1M3TS and top end is set based on twilight temperature: "
                         f"{last_twilight_temperature:.2f}°C"
                     )
+                    self.glycol_setpoint_delta_adjustment = 0.0
                     await self.apply_setpoints(last_twilight_temperature)
 
                     if "top_end" not in self.features_to_disable:

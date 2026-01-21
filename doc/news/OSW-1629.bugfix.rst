@@ -1,0 +1,1 @@
+Ensured sunrise M1M3TS setpoints ignore fan-driven glycol adjustments and reset any prior tuning.

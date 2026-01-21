@@ -201,6 +201,35 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             places=4,
         )
 
+    async def test_m1m3ts_applysetpoints_ignores_fan_adjustment(self) -> None:
+        """Sunrise applySetpoints should ignore the fan-driven adjustment."""
+        glycol_setpoint_delta = -3.0
+        heater_setpoint_delta = -1.0
+        top_end_setpoint_delta = -0.5
+
+        glycol_setpoint, _, _, _ = await self.run_with_parameters(
+            indoor_temperature=10,
+            glycol_setpoint_delta=glycol_setpoint_delta,
+            heater_setpoint_delta=heater_setpoint_delta,
+            top_end_setpoint_delta=top_end_setpoint_delta,
+            signal_sunrise=True,
+            features_to_disable=[],
+        )
+
+        assert self.last_twilight_temperature is not None and glycol_setpoint is not None
+        self.assertAlmostEqual(
+            glycol_setpoint,
+            self.last_twilight_temperature + glycol_setpoint_delta,
+            places=4,
+        )
+        self.assertNotAlmostEqual(
+            glycol_setpoint,
+            self.last_twilight_temperature
+            + heater_setpoint_delta
+            + self.tma_model.fan_glycol_heater_offset_min,
+            places=4,
+        )
+
     async def test_disabled_m1m3ts(self) -> None:
         """The applySetpoint should not be called when m1m3ts is disabled."""
         glycol_setpoint_delta = -2
@@ -314,8 +343,10 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(STD_SLEEP)
             self.assertEqual(mock_m1m3ts.fan_rpm, [fan_minimum] * 96)
             self.assertEqual(
-                tma_model.glycol_setpoint_delta,
-                tma_model.fan_glycol_heater_offset_min + heater_setpoint_delta,
+                tma_model.glycol_setpoint_delta_adjustment,
+                tma_model.fan_glycol_heater_offset_min
+                + heater_setpoint_delta
+                - tma_model.glycol_setpoint_delta,
             )
 
             # Difference of +1°C between glass and setpoint (with offset):
@@ -326,8 +357,10 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(STD_SLEEP)
             self.assertEqual(mock_m1m3ts.fan_rpm, [fan_maximum] * 96)
             self.assertEqual(
-                tma_model.glycol_setpoint_delta,
-                tma_model.fan_glycol_heater_offset_min + heater_setpoint_delta,
+                tma_model.glycol_setpoint_delta_adjustment,
+                tma_model.fan_glycol_heater_offset_min
+                + heater_setpoint_delta
+                - tma_model.glycol_setpoint_delta,
             )
 
             # Difference of -1°C between glass and setpoint (with offset):
@@ -337,8 +370,10 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             await tma_model.set_fan_speed(setpoint=0.0)
             self.assertEqual(mock_m1m3ts.fan_rpm, [fan_maximum] * 96)
             self.assertEqual(
-                tma_model.glycol_setpoint_delta,
-                tma_model.fan_glycol_heater_offset_max + heater_setpoint_delta,
+                tma_model.glycol_setpoint_delta_adjustment,
+                tma_model.fan_glycol_heater_offset_max
+                + heater_setpoint_delta
+                - tma_model.glycol_setpoint_delta,
             )
 
     async def test_after_open_delay(self) -> None:
