@@ -304,6 +304,11 @@ additionalProperties: false
             if shutter_closed is None:
                 await asyncio.sleep(0.1)
                 continue
+            elif shutter_closed and not cached_shutter_closed:
+                # Reset the cache and time of previous VEC-04 operation
+                # so that action will be taken on dome re-open.
+                cached_wind_threshold = None
+                self.last_vec04_time = 0
 
             enable_device_list = []
             disable_device_list = []

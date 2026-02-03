@@ -404,8 +404,8 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 positionActual=(0.0, 0.0),
             )
             await self.mtdome.tel_louvers.set_write(positionActual=[0.0] * 34)
-            # Give the telemetry time to propagate into the EAS CSC
-            await asyncio.sleep(STD_SLEEP)
+
+            await self.wait_for_all_hvac_events()
             await self.csc.close_tasks()
 
         self.assertAlmostEqual(self.csc.average_windspeed, self.wind_data["speed"].mean(), delta=0.1)
@@ -589,8 +589,8 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             await self.mtdome.tel_apertureShutter.set_write(
                 positionActual=(100.0, 100.0),
             )
-            # Give the telemetry time to propagate into the EAS CSC
-            await asyncio.sleep(STD_SLEEP)
+
+            await self.wait_for_all_hvac_events()
             await self.csc.close_tasks()
 
         mask = self.wind_data["speed"] < 100
