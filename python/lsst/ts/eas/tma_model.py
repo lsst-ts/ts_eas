@@ -34,11 +34,12 @@ from lsst.ts import salobj, utils
 from lsst.ts.xml.enums.MTMount import ThermalCommandState
 
 from .cmdwrapper import close_command_tasks, command_wrapper
-from .delay_controller import DelayController, make_delay_policy_from_config
-from .diurnal_timer import DiurnalTimer
+from .delay_controller import DelayController, DelayState, make_delay_policy_from_config
+from .diurnal_timer import DiurnalTimer, get_local_noon_time
 from .dome_model import DomeModel
 from .glass_temperature_model import GlassTemperatureModel
 from .weather_model import WeatherModel
+from .weatherforecast_model import WeatherForecastModel
 
 STD_TIMEOUT = 10  # seconds
 DORMANT_TIME = 100  # Time to wait while sleeping, seconds
@@ -62,6 +63,8 @@ class TmaModel:
     weather_model : `WeatherModel`
         A model for the outdoor weather station, which records the last
         twilight temperature observed while the dome was opened.
+    weatherforecast_model : `WeatherForecastModel`
+        A model representing forecast conditions used for upcoming twilight.
     m1m3ts_remote : `~salobj.Remote`
         The Remote for the MTM1M3TS interface.
     mtmount_remote : `~salobj.Remote`
@@ -83,7 +86,7 @@ class TmaModel:
     top_end_setpoint_delta_closedatnite : `float`
         The difference between the indoor temperature and the top-end
         setpoint during nighttime closed-dome operation.
-    m1m3_setpoint_cadence : `float`
+    m1m3_setpoint_cadence : `float`
         The cadence at which applySetpoints commands should be sent to
         MTM1M3TS (seconds).
     m1m3ts_delay_mode : `dict`
@@ -111,6 +114,9 @@ class TmaModel:
         be used:
          * m1m3ts
          * top_end
+         * forecast
+         * forecast_m1m3ts
+         * forecast_top_end
         Any other values are ignored.
     """
 
@@ -121,6 +127,7 @@ class TmaModel:
         diurnal_timer: DiurnalTimer,
         dome_model: DomeModel,
         weather_model: WeatherModel,
+        weatherforecast_model: WeatherForecastModel,
         glass_temperature_model: GlassTemperatureModel,
         m1m3ts_remote: salobj.Remote,
         mtmount_remote: salobj.Remote,
@@ -138,6 +145,9 @@ class TmaModel:
         fast_cooling_rate: float,
         fan_speed: dict[str, float],
         features_to_disable: list[str],
+        forecast_glycol_setpoint_delta: float | None = None,
+        forecast_heater_setpoint_delta: float | None = None,
+        forecast_top_end_setpoint_delta: float | None = None,
         allow_send: Callable[[], bool] | None = None,
     ) -> None:
         self.log = log
@@ -148,6 +158,7 @@ class TmaModel:
         self.diurnal_timer = diurnal_timer
         self.dome_model = dome_model
         self.weather_model = weather_model
+        self.weatherforecast_model = weatherforecast_model
         self.glass_temperature_model = glass_temperature_model
 
         # Remotes used by command decorators.
@@ -158,6 +169,24 @@ class TmaModel:
         self.glycol_setpoint_delta = glycol_setpoint_delta
         self.heater_setpoint_delta = heater_setpoint_delta
         self.top_end_setpoint_delta = top_end_setpoint_delta
+
+        # Forecast-specific delta overrides
+        # (fall back to standard values when absent):
+        self.forecast_glycol_setpoint_delta = (
+            forecast_glycol_setpoint_delta
+            if forecast_glycol_setpoint_delta is not None
+            else glycol_setpoint_delta
+        )
+        self.forecast_heater_setpoint_delta = (
+            forecast_heater_setpoint_delta
+            if forecast_heater_setpoint_delta is not None
+            else heater_setpoint_delta
+        )
+        self.forecast_top_end_setpoint_delta = (
+            forecast_top_end_setpoint_delta
+            if forecast_top_end_setpoint_delta is not None
+            else top_end_setpoint_delta
+        )
         self.m1m3_extra_delta_closedatnite = m1m3_extra_delta_closedatnite
         self.top_end_setpoint_delta_closedatnite = top_end_setpoint_delta_closedatnite
         self.m1m3_setpoint_cadence = m1m3_setpoint_cadence
@@ -183,6 +212,12 @@ class TmaModel:
 
         self.top_end_task = utils.make_done_future()
         self.top_end_task_warned: bool = False
+        self.twilight_forecast_callback_id: int | None = None
+
+        # True while a forecast-driven setpoint is active. When True,
+        # follow_ess_indoor will not issue new setpoints, giving the forecast
+        # precedence until twilight clears the flag.
+        self.tma_forecast_active: bool = False
 
         # Fan speed configuration
         self.fan_speed_min: float = fan_speed["fan_speed_min"]
@@ -304,6 +339,24 @@ properties:
         while observing.
     type: number
     default: 10.0
+  forecast_glycol_setpoint_delta:
+    type: [number, "null"]
+    default: null
+    description: >-
+      M1M3TS glycol setpoint offset (°C) used when driven by forecast. If absent,
+      glycol_setpoint_delta is used.
+  forecast_heater_setpoint_delta:
+    type: [number, "null"]
+    default: null
+    description: >-
+      M1M3TS heater setpoint offset (°C) used when driven by forecast. If absent,
+      heater_setpoint_delta is used.
+  forecast_top_end_setpoint_delta:
+    type: [number, "null"]
+    default: null
+    description: >-
+      Top-end chiller setpoint offset (°C) used when driven by forecast. If absent,
+      top_end_setpoint_delta is used.
   fan_speed:
     description: Parameters controlling the M1M3TS fan speed response.
     type: object
@@ -317,11 +370,11 @@ properties:
         type: number
         default: 2000.0
       fan_glycol_heater_offset_min:
-        description: Glycol–heater temperature offset (°C) at fan_speed_min.
+        description: Glycol heater temperature offset (°C) at fan_speed_min.
         type: number
         default: -1.0
       fan_glycol_heater_offset_max:
-        description: Glycol–heater temperature offset (°C) at fan_speed_max.
+        description: Glycol heater temperature offset (°C) at fan_speed_max.
         type: number
         default: -4.0
       fan_throttle_turn_on_temp_diff:
@@ -359,7 +412,9 @@ additionalProperties: false
         )
 
     @command_wrapper(
-        remote_attr="m1m3ts_remote", command_attr="cmd_applySetpoints", command_timeout=STD_TIMEOUT
+        remote_attr="m1m3ts_remote",
+        command_attr="cmd_applySetpoints",
+        command_timeout=STD_TIMEOUT,
     )
     async def send_apply_setpoints(
         self,
@@ -373,7 +428,9 @@ additionalProperties: false
         }
 
     @command_wrapper(
-        remote_attr="m1m3ts_remote", command_attr="cmd_heaterFanDemand", command_timeout=STD_TIMEOUT
+        remote_attr="m1m3ts_remote",
+        command_attr="cmd_heaterFanDemand",
+        command_timeout=STD_TIMEOUT,
     )
     async def send_heater_fan_demand(
         self,
@@ -383,7 +440,11 @@ additionalProperties: false
     ) -> dict[str, Any]:
         return {"heaterPWM": heater_pwm, "fanRPM": fan_rpm}
 
-    @command_wrapper(remote_attr="mtmount_remote", command_attr="cmd_setThermal", command_timeout=STD_TIMEOUT)
+    @command_wrapper(
+        remote_attr="mtmount_remote",
+        command_attr="cmd_setThermal",
+        command_timeout=STD_TIMEOUT,
+    )
     async def send_set_thermal(
         self,
         *,
@@ -402,6 +463,7 @@ additionalProperties: false
             await asyncio.gather(
                 self.follow_ess_indoor(),
                 self.apply_setpoint_at_night(),
+                self.monitor_twilight_forecast(),
                 self.wait_for_sunrise(),
             )
         finally:
@@ -412,19 +474,26 @@ additionalProperties: false
                 except asyncio.CancelledError:
                     pass  # Expected
 
+            self.clear_twilight_forecast_callback()
             self.monitor_start_event.clear()
 
         self.log.debug("TmaModel.monitor closing...")
 
-    async def apply_setpoints(self, setpoint: float, *, delta_adjustment: float = 0.0) -> None:
+    async def apply_setpoints(
+        self,
+        setpoint: float,
+        *,
+        delta_adjustment: float = 0.0,
+        glycol_setpoint_delta: float | None = None,
+        heater_setpoint_delta: float | None = None,
+    ) -> None:
+        glycol_delta = self.glycol_setpoint_delta if glycol_setpoint_delta is None else glycol_setpoint_delta
+        heater_delta = self.heater_setpoint_delta if heater_setpoint_delta is None else heater_setpoint_delta
         if "m1m3ts" not in self.features_to_disable:
             glycol_setpoint = (
-                setpoint
-                + self.glycol_setpoint_delta
-                + self.glycol_setpoint_delta_adjustment
-                + delta_adjustment
+                setpoint + glycol_delta + self.glycol_setpoint_delta_adjustment + delta_adjustment
             )
-            heaters_setpoint = setpoint + self.heater_setpoint_delta + delta_adjustment
+            heaters_setpoint = setpoint + heater_delta + delta_adjustment
             self.log.debug(f"Setting MTM1MTS: {glycol_setpoint=:.2f}°C {heaters_setpoint=:.2f}°C")
             await self.send_apply_setpoints(
                 glycol_setpoint=glycol_setpoint,
@@ -433,7 +502,13 @@ additionalProperties: false
 
         self.m1m3_setpoints_are_stale = False
 
-    async def set_fan_speed(self, *, setpoint: float) -> None:
+    async def set_fan_speed(
+        self,
+        *,
+        setpoint: float,
+        glycol_setpoint_delta: float | None = None,
+        heater_setpoint_delta: float | None = None,
+    ) -> None:
         """Compute and send the FCU fan speed based on glass temperature.
 
         The commanded fan speed is determined by the absolute difference
@@ -452,6 +527,8 @@ additionalProperties: false
         setpoint : `float`
             Demand temperature (°C) before applying any offsets.
         """
+        glycol_delta = self.glycol_setpoint_delta if glycol_setpoint_delta is None else glycol_setpoint_delta
+        heater_delta = self.heater_setpoint_delta if heater_setpoint_delta is None else heater_setpoint_delta
         glass_temperature = self.glass_temperature_model.median_temperature
 
         if (
@@ -461,11 +538,11 @@ additionalProperties: false
         ):
             return
 
-        setpoint += self.heater_setpoint_delta
+        control_setpoint = setpoint + heater_delta
         slope = (self.fan_speed_max - self.fan_speed_min) / (
             self.fan_throttle_max_temp_diff - self.fan_throttle_turn_on_temp_diff
         )
-        temperature_difference = abs(glass_temperature - setpoint)
+        temperature_difference = abs(glass_temperature - control_setpoint)
 
         fan_speed = self.fan_speed_min + slope * (
             temperature_difference - self.fan_throttle_turn_on_temp_diff
@@ -478,7 +555,7 @@ additionalProperties: false
             fan_rpm=[fan_rpm] * 96,
         )
 
-        if glass_temperature > setpoint:
+        if glass_temperature > control_setpoint:
             # Adjust glycol offset based on fan speed:
             #   Fan speed of 700 (minimum) -> glycol offset of -1 from heater
             #   Fan speed of 2000 (maximum) -> glycol offset of -4 from heater
@@ -487,12 +564,10 @@ additionalProperties: false
             )
             glycol_offset = glycol_offset_slope * (fan_speed - self.fan_speed_min)
             glycol_offset += self.fan_glycol_heater_offset_min
-            self.glycol_setpoint_delta_adjustment = (
-                self.heater_setpoint_delta + glycol_offset - self.glycol_setpoint_delta
-            )
+            self.glycol_setpoint_delta_adjustment = heater_delta + glycol_offset - glycol_delta
         else:
             self.glycol_setpoint_delta_adjustment = (
-                self.heater_setpoint_delta + self.fan_glycol_heater_offset_min - self.glycol_setpoint_delta
+                heater_delta + self.fan_glycol_heater_offset_min - glycol_delta
             )
 
         self.m1m3_setpoints_are_stale = True
@@ -539,6 +614,17 @@ additionalProperties: false
                 continue
             else:
                 n_failures = 0
+
+            if self.tma_forecast_active and self.delay_controller.state != DelayState.IDLE:
+                self.log.info(
+                    "Discontinuing forecast-driven M1M3TS setpoints because "
+                    f"delay controller state is {self.delay_controller.state.name}."
+                )
+                self.tma_forecast_active = False
+
+            if self.tma_forecast_active:
+                await asyncio.sleep(self.m1m3_setpoint_cadence)
+                continue
 
             if "top_end" not in self.features_to_disable:
                 await self.send_set_thermal(
@@ -710,6 +796,104 @@ additionalProperties: false
 
             await asyncio.sleep(self.m1m3_setpoint_cadence)
 
+    def clear_twilight_forecast_callback(self) -> None:
+        if self.twilight_forecast_callback_id is None:
+            return
+        self.weatherforecast_model.remove_callback(self.twilight_forecast_callback_id)
+        self.twilight_forecast_callback_id = None
+        self.tma_forecast_active = False
+
+    def set_twilight_forecast_callback(self) -> None:
+        self.clear_twilight_forecast_callback()
+        twilight_time = self.diurnal_timer.get_twilight_time(after=Time.now())
+        callback_id = self.weatherforecast_model.add_callback(
+            twilight_time.tai.unix,
+            self.handle_twilight_forecast,
+        )
+        self.twilight_forecast_callback_id = callback_id
+
+    def handle_twilight_forecast(self, predicted_temperature: float) -> None:
+        if not self.diurnal_timer.is_running:
+            return
+        if "forecast" in self.features_to_disable:
+            return
+        if "forecast_m1m3ts" in self.features_to_disable and "forecast_top_end" in self.features_to_disable:
+            return
+        if self.delay_controller.state != DelayState.IDLE:
+            self.log.info(
+                "Skipping forecast-driven M1M3TS setpoints because delay "
+                f"controller state is {self.delay_controller.state.name}."
+            )
+            return
+        self.log.info(
+            f"Applying TMA setpoints based on forecast twilight temperature: {predicted_temperature:.2f}°C"
+        )
+        asyncio.create_task(self.apply_forecast_setpoints(predicted_temperature))
+
+    async def apply_forecast_setpoints(self, predicted_temperature: float) -> None:
+        if self.delay_controller.state != DelayState.IDLE:
+            self.log.info(
+                "Skipping forecast-driven M1M3TS setpoints because delay "
+                f"controller state is {self.delay_controller.state.name}."
+            )
+            self.tma_forecast_active = False
+            return
+        m1m3_forecast_engaged = False
+        if "forecast" not in self.features_to_disable and "forecast_m1m3ts" not in self.features_to_disable:
+            if "m1m3ts" not in self.features_to_disable:
+                if "fanspeed" not in self.features_to_disable:
+                    await self.set_fan_speed(
+                        setpoint=predicted_temperature,
+                        glycol_setpoint_delta=self.forecast_glycol_setpoint_delta,
+                        heater_setpoint_delta=self.forecast_heater_setpoint_delta,
+                    )
+                await self.apply_setpoints(
+                    predicted_temperature,
+                    glycol_setpoint_delta=self.forecast_glycol_setpoint_delta,
+                    heater_setpoint_delta=self.forecast_heater_setpoint_delta,
+                )
+                m1m3_forecast_engaged = True
+            self.m1m3_setpoints_are_stale = False
+
+        if (
+            "forecast" not in self.features_to_disable
+            and "forecast_top_end" not in self.features_to_disable
+            and "top_end" not in self.features_to_disable
+        ):
+            chiller_setpoint = predicted_temperature + self.forecast_top_end_setpoint_delta
+            await self.send_set_thermal(
+                top_end_chiller_setpoint=chiller_setpoint,
+                top_end_chiller_state=ThermalCommandState.ON,
+            )
+
+        self.tma_forecast_active = m1m3_forecast_engaged
+
+    async def monitor_twilight_forecast(self) -> None:
+        """Run forecast callback between noon and evening twilight."""
+        # If started between noon and twilight, begin operating immediately
+        # without waiting for noon.
+        next_noon = get_local_noon_time()
+        if (
+            self.diurnal_timer.is_running
+            and self.diurnal_timer.twilight_time is not None
+            and self.diurnal_timer.twilight_time < next_noon
+        ):
+            self.set_twilight_forecast_callback()
+            async with self.diurnal_timer.twilight_condition:
+                await self.diurnal_timer.twilight_condition.wait()
+            self.clear_twilight_forecast_callback()
+
+        while self.diurnal_timer.is_running:
+            async with self.diurnal_timer.noon_condition:
+                await self.diurnal_timer.noon_condition.wait()
+            if not self.diurnal_timer.is_running:
+                break
+            self.set_twilight_forecast_callback()
+            async with self.diurnal_timer.twilight_condition:
+                await self.diurnal_timer.twilight_condition.wait()
+            self.clear_twilight_forecast_callback()
+
     async def close(self) -> None:
         """Cancel any in-flight command tasks."""
+        self.clear_twilight_forecast_callback()
         await close_command_tasks(self)
