@@ -36,6 +36,7 @@ from .cmdwrapper import close_command_tasks, command_wrapper
 from .diurnal_timer import DiurnalTimer
 from .dome_model import DomeModel
 from .weather_model import WeatherModel
+from .weatherforecast_model import WeatherForecastModel
 
 HVAC_SLEEP_TIME = 60.0  # How often to check the HVAC state (seconds)
 STD_TIMEOUT = 5  # seconds
@@ -55,6 +56,8 @@ class HvacModel:
         A model representing the dome state.
     weather_model : `WeatherModel`
         A model representing weather conditions.
+    weatherforecast_model : `WeatherForecastModel`
+        A model representing forecast conditions used for upcoming twilight.
     ahu_setpoint_delta : `float`
         The offset that will be added to the measured temperature in
         selecting a setpoint for the HVAC air handling units (AHUs/UMAs)
@@ -109,6 +112,7 @@ class HvacModel:
         diurnal_timer: DiurnalTimer,
         dome_model: DomeModel,
         weather_model: WeatherModel,
+        weatherforecast_model: WeatherForecastModel,
         hvac_remote: salobj.Remote,
         ahu_setpoint_delta: float,
         setpoint_lower_limit: float,
@@ -135,6 +139,7 @@ class HvacModel:
         # Configuration parameters:
         self.dome_model = dome_model
         self.weather_model = weather_model
+        self.weatherforecast_model = weatherforecast_model
         self.ahu_setpoint_delta = ahu_setpoint_delta
         self.setpoint_lower_limit = setpoint_lower_limit
         self.wind_threshold = wind_threshold
@@ -156,6 +161,8 @@ class HvacModel:
 
         # The remote
         self.hvac_remote = hvac_remote
+
+        self.twilight_forecast_callback_id: int | None = None
 
     @classmethod
     def get_config_schema(cls) -> str:
@@ -273,6 +280,7 @@ additionalProperties: false
         tasks = [
             self.control_ahus_and_vec04(),
             self.wait_for_sunrise(),
+            self.monitor_twilight_forecast(),
             self.apply_setpoint_at_night(),
             self.adjust_glycol_chillers_at_noon(),
             self.monitor_glycol_chillers(),
@@ -292,6 +300,7 @@ additionalProperties: false
 
     async def close(self) -> None:
         """Cancel any in-flight command tasks."""
+        self.clear_twilight_forecast_callback()
         await close_command_tasks(self)
 
     async def control_ahus_and_vec04(self) -> None:
@@ -382,7 +391,6 @@ additionalProperties: false
                             last_twilight_temperature + self.ahu_setpoint_delta,
                             self.setpoint_lower_limit,
                         )
-
                         await self.config_lower_ahu(
                             [
                                 {
@@ -400,6 +408,67 @@ additionalProperties: false
                                 )
                             ]
                         )
+
+    def clear_twilight_forecast_callback(self) -> None:
+        if self.twilight_forecast_callback_id is None:
+            return
+        self.weatherforecast_model.remove_callback(self.twilight_forecast_callback_id)
+        self.twilight_forecast_callback_id = None
+
+    def set_twilight_forecast_callback(self) -> None:
+        self.clear_twilight_forecast_callback()
+        twilight_time = self.diurnal_timer.get_twilight_time(after=Time.now())
+        callback_id = self.weatherforecast_model.add_callback(
+            twilight_time.tai.unix,
+            self.handle_twilight_forecast,
+        )
+        self.twilight_forecast_callback_id = callback_id
+
+    def handle_twilight_forecast(self, predicted_temperature: float) -> None:
+        if not self.diurnal_timer.is_running:
+            return
+        if "room_setpoint" in self.features_to_disable:
+            return
+        self.log.info(
+            "Applying HVAC AHU setpoint based on forecast twilight temperature: "
+            f"{predicted_temperature:.2f}°C"
+        )
+        asyncio.create_task(self.apply_forecast_setpoint(predicted_temperature))
+
+    async def apply_forecast_setpoint(self, predicted_temperature: float) -> None:
+        setpoint = max(
+            predicted_temperature + self.ahu_setpoint_delta,
+            self.setpoint_lower_limit,
+        )
+        await self.config_lower_ahu(
+            [
+                {
+                    "device_id": device_id,
+                    "workingSetpoint": setpoint,
+                    "maxFanSetpoint": math.nan,
+                    "minFanSetpoint": math.nan,
+                    "antiFreezeTemperature": math.nan,
+                }
+                for device_id in (
+                    DeviceId.lowerAHU01P05,
+                    DeviceId.lowerAHU02P05,
+                    DeviceId.lowerAHU03P05,
+                    DeviceId.lowerAHU04P05,
+                )
+            ]
+        )
+
+    async def monitor_twilight_forecast(self) -> None:
+        """Run forecast callback between noon and evening twilight."""
+        while self.diurnal_timer.is_running:
+            async with self.diurnal_timer.noon_condition:
+                await self.diurnal_timer.noon_condition.wait()
+            if not self.diurnal_timer.is_running:
+                break
+            self.set_twilight_forecast_callback()
+            async with self.diurnal_timer.twilight_condition:
+                await self.diurnal_timer.twilight_condition.wait()
+            self.clear_twilight_forecast_callback()
 
     def compute_glycol_setpoints(self, ambient_temperature: float) -> tuple[float, float]:
         """Compute staggered glycol chiller setpoints.
