@@ -29,6 +29,7 @@ import astropy
 
 from lsst.ts import salobj
 from lsst.ts.eas import hvac_model
+from lsst.ts.eas.weatherforecast_model import WeatherForecastModel
 from lsst.ts.xml.enums.HVAC import DeviceId
 
 STD_TIMEOUT = 10
@@ -158,6 +159,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             nightly_minimum_temperature=6.0,
             nightly_maximum_indoor_dew_point=-10.0,
         )
+        self.weatherforecast = WeatherForecastModel(log=self.log)
 
     def make_model(self, **overrides: float | list[str] | None) -> hvac_model.HvacModel:
         params = dict(
@@ -181,6 +183,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             diurnal_timer=self.diurnal,
             dome_model=self.dome,
             weather_model=self.weather,
+            weatherforecast_model=self.weatherforecast,
             hvac_remote=self.remote,
             **params,
         )

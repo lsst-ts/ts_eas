@@ -27,6 +27,7 @@ from collections import deque
 from types import SimpleNamespace
 
 from lsst.ts import eas, salobj
+from lsst.ts.eas.weatherforecast_model import WeatherForecastModel
 
 STD_TIMEOUT = 60
 STD_SLEEP = 0.5
@@ -127,6 +128,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 dome_model=self.dome_model,
                 glass_temperature_model=SimpleNamespace(median_temperature=0.0),
                 weather_model=self.weather_model,
+                weatherforecast_model=WeatherForecastModel(log=mock_m1m3ts.log),
                 m1m3ts_remote=m1m3ts_remote,
                 mtmount_remote=mtmount_remote,
                 glycol_setpoint_delta=model_args["glycol_setpoint_delta"],
@@ -311,6 +313,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 dome_model=dome_model,
                 glass_temperature_model=SimpleNamespace(median_temperature=0.0),
                 weather_model=weather_model,
+                weatherforecast_model=WeatherForecastModel(log=mock_m1m3ts.log),
                 m1m3ts_remote=m1m3ts_remote,
                 mtmount_remote=mtmount_remote,
                 glycol_setpoint_delta=-2,
@@ -403,6 +406,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 dome_model=dome_model,
                 glass_temperature_model=SimpleNamespace(median_temperature=0.0),
                 weather_model=weather_model,
+                weatherforecast_model=WeatherForecastModel(log=mock_m1m3ts.log),
                 m1m3ts_remote=m1m3ts_remote,
                 mtmount_remote=mtmount_remote,
                 glycol_setpoint_delta=-2,

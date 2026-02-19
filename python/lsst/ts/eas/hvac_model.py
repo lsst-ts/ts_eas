@@ -101,6 +101,8 @@ class HvacModel:
          * vec04
          * ahu
          * room_setpoint
+         * forecast
+         * forecast_ahu
          * glycol_chillers
         Any other values are ignored.
     """
@@ -427,7 +429,11 @@ additionalProperties: false
     def handle_twilight_forecast(self, predicted_temperature: float) -> None:
         if not self.diurnal_timer.is_running:
             return
-        if "room_setpoint" in self.features_to_disable:
+        if (
+            "room_setpoint" in self.features_to_disable
+            or "forecast" in self.features_to_disable
+            or "forecast_ahu" in self.features_to_disable
+        ):
             return
         self.log.info(
             "Applying HVAC AHU setpoint based on forecast twilight temperature: "

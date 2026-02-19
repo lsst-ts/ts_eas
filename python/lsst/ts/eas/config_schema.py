@@ -48,6 +48,10 @@ CONFIG_SCHEMA = yaml.safe_load(
         description: >-
           List of EAS functionalities to disable. Options are:
             * `room_setpoint`: HVAC setpoints will not be applied.
+            * `forecast`: All forecast-based setpoints will not be applied.
+            * `forecast_ahu`: HVAC forecast-based AHU setpoints will not be applied.
+            * `forecast_m1m3ts`: TMA forecast-based M1M3TS setpoints will not be applied.
+            * `forecast_top_end`: TMA forecast-based top end setpoints will not be applied.
             * `ahu`: HVAC AHUs will not be enabled / disabled.
             * `vec04`: VEC-04 exhaust fan will not be enabled / disabled.
             * `glycol_chillers`: Glycol chillers will not be controlled in HVAC.
@@ -58,7 +62,11 @@ CONFIG_SCHEMA = yaml.safe_load(
         items:
           type: string
           enum:
+            - forecast
             - room_setpoint
+            - forecast_ahu
+            - forecast_m1m3ts
+            - forecast_top_end
             - ahu
             - vec04
             - glycol_chillers
