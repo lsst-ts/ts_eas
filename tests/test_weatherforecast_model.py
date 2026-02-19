@@ -49,6 +49,16 @@ def _prediction(time: float) -> float:
     return m * time + b
 
 
+class CallbackRecorder:
+    """Collect callback values for assertions."""
+
+    def __init__(self) -> None:
+        self.values: list[float] = []
+
+    def __call__(self, value: float) -> None:
+        self.values.append(value)
+
+
 class TestWeatherForecastModel(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.log = logging.getLogger("weatherforecast")
@@ -56,10 +66,7 @@ class TestWeatherForecastModel(unittest.IsolatedAsyncioTestCase):
 
     async def test_single_callback_lifecycle(self) -> None:
         """The forecast model should call a callback and respect removal."""
-        callback_values: list[float] = []
-
-        def callback(value: float) -> None:
-            callback_values.append(value)
+        callback = CallbackRecorder()
 
         target_time = timestamp0 + 47.5 * 60
 
@@ -72,9 +79,9 @@ class TestWeatherForecastModel(unittest.IsolatedAsyncioTestCase):
         )
 
         await self.model.hourly_trend_callback(telemetry)
-        self.assertEqual(len(callback_values), 1)
+        self.assertEqual(len(callback.values), 1)
         expected = _prediction(target_time)
-        self.assertAlmostEqual(callback_values[0], expected)
+        self.assertAlmostEqual(callback.values[0], expected)
 
         self.model.remove_callback(callback_id)
         self.assertDictEqual(self.model.callbacks, {})
@@ -86,20 +93,18 @@ class TestWeatherForecastModel(unittest.IsolatedAsyncioTestCase):
             private_sndStamp=timestamp2,
         )
         await self.model.hourly_trend_callback(telemetry2)
-        self.assertEqual(len(callback_values), 1)
+        self.assertEqual(len(callback.values), 1)
 
     async def test_two_callbacks_lifecycle(self) -> None:
-        """The forecast model should handle multiple callbacks."""
-        callback_values: list[float] = []
-
-        def callback(value: float) -> None:
-            callback_values.append(value)
+        """The forecast model should call two callbacks and respect removal."""
+        callback_1 = CallbackRecorder()
+        callback_2 = CallbackRecorder()
 
         target_time_1 = timestamp0 + 46 * 60
         target_time_2 = timestamp0 + 56 * 60
 
-        callback_id_1 = self.model.add_callback(target_time_1, callback)
-        callback_id_2 = self.model.add_callback(target_time_2, callback)
+        callback_id_1 = self.model.add_callback(target_time_1, callback_1)
+        callback_id_2 = self.model.add_callback(target_time_2, callback_2)
 
         temperatures = [_prediction(timestamp0 + (idx + 1) * DELTA_TIME) for idx in range(12)]
         telemetry = SimpleNamespace(
@@ -108,11 +113,12 @@ class TestWeatherForecastModel(unittest.IsolatedAsyncioTestCase):
         )
 
         await self.model.hourly_trend_callback(telemetry)
-        self.assertEqual(len(callback_values), 2)
+        self.assertEqual(len(callback_1.values), 1)
+        self.assertEqual(len(callback_2.values), 1)
         expected_1 = _prediction(target_time_1)
         expected_2 = _prediction(target_time_2)
-        self.assertAlmostEqual(callback_values[0], expected_1)
-        self.assertAlmostEqual(callback_values[1], expected_2)
+        self.assertAlmostEqual(callback_1.values[0], expected_1)
+        self.assertAlmostEqual(callback_2.values[0], expected_2)
 
         self.model.remove_callback(callback_id_1)
         self.model.remove_callback(callback_id_2)
@@ -125,14 +131,12 @@ class TestWeatherForecastModel(unittest.IsolatedAsyncioTestCase):
             private_sndStamp=timestamp2,
         )
         await self.model.hourly_trend_callback(telemetry2)
-        self.assertEqual(len(callback_values), 2)
+        self.assertEqual(len(callback_1.values), 1)
+        self.assertEqual(len(callback_2.values), 1)
 
     async def test_callback_not_called_when_target_in_past(self) -> None:
         """The model should not call a callback when target time has passed."""
-        callback_values: list[float] = []
-
-        def callback(value: float) -> None:
-            callback_values.append(value)
+        callback = CallbackRecorder()
 
         target_time = timestamp0 - 60.0
         self.model.add_callback(target_time, callback)
@@ -144,7 +148,7 @@ class TestWeatherForecastModel(unittest.IsolatedAsyncioTestCase):
         )
 
         await self.model.hourly_trend_callback(telemetry)
-        self.assertEqual(len(callback_values), 0)
+        self.assertEqual(len(callback.values), 0)
 
     async def test_remove_missing_callback_noop(self) -> None:
         """Removing a non-existent callback should be a no-op."""
