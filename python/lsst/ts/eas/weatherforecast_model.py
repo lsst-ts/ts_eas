@@ -119,6 +119,4 @@ class WeatherForecastModel:
         return callback_id
 
     def remove_callback(self, callback_id: int) -> None:
-        if callback_id not in self.callbacks:
-            raise KeyError(f"Callback id {callback_id} not found.")
-        del self.callbacks[callback_id]
+        self.callbacks.pop(callback_id, None)

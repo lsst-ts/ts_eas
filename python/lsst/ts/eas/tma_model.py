@@ -39,6 +39,7 @@ from .diurnal_timer import DiurnalTimer
 from .dome_model import DomeModel
 from .glass_temperature_model import GlassTemperatureModel
 from .weather_model import WeatherModel
+from .weatherforecast_model import WeatherForecastModel
 
 STD_TIMEOUT = 10  # seconds
 DORMANT_TIME = 100  # Time to wait while sleeping, seconds
@@ -62,6 +63,8 @@ class TmaModel:
     weather_model : `WeatherModel`
         A model for the outdoor weather station, which records the last
         twilight temperature observed while the dome was opened.
+    weatherforecast_model : `WeatherForecastModel`
+        A model representing forecast conditions used for upcoming twilight.
     m1m3ts_remote : `~salobj.Remote`
         The Remote for the MTM1M3TS interface.
     mtmount_remote : `~salobj.Remote`
@@ -111,6 +114,9 @@ class TmaModel:
         be used:
          * m1m3ts
          * top_end
+         * forecast
+         * forecast_m1m3ts
+         * forecast_top_end
         Any other values are ignored.
     """
 
@@ -121,6 +127,7 @@ class TmaModel:
         diurnal_timer: DiurnalTimer,
         dome_model: DomeModel,
         weather_model: WeatherModel,
+        weatherforecast_model: WeatherForecastModel,
         glass_temperature_model: GlassTemperatureModel,
         m1m3ts_remote: salobj.Remote,
         mtmount_remote: salobj.Remote,
@@ -148,6 +155,7 @@ class TmaModel:
         self.diurnal_timer = diurnal_timer
         self.dome_model = dome_model
         self.weather_model = weather_model
+        self.weatherforecast_model = weatherforecast_model
         self.glass_temperature_model = glass_temperature_model
 
         # Remotes used by command decorators.
@@ -183,6 +191,7 @@ class TmaModel:
 
         self.top_end_task = utils.make_done_future()
         self.top_end_task_warned: bool = False
+        self.twilight_forecast_callback_id: int | None = None
 
         # Fan speed configuration
         self.fan_speed_min: float = fan_speed["fan_speed_min"]
@@ -402,6 +411,7 @@ additionalProperties: false
             await asyncio.gather(
                 self.follow_ess_indoor(),
                 self.apply_setpoint_at_night(),
+                self.monitor_twilight_forecast(),
                 self.wait_for_sunrise(),
             )
         finally:
@@ -412,6 +422,7 @@ additionalProperties: false
                 except asyncio.CancelledError:
                     pass  # Expected
 
+            self.clear_twilight_forecast_callback()
             self.monitor_start_event.clear()
 
         self.log.debug("TmaModel.monitor closing...")
@@ -710,6 +721,61 @@ additionalProperties: false
 
             await asyncio.sleep(self.m1m3_setpoint_cadence)
 
+    def clear_twilight_forecast_callback(self) -> None:
+        if self.twilight_forecast_callback_id is None:
+            return
+        self.weatherforecast_model.remove_callback(self.twilight_forecast_callback_id)
+        self.twilight_forecast_callback_id = None
+
+    def set_twilight_forecast_callback(self) -> None:
+        self.clear_twilight_forecast_callback()
+        twilight_time = self.diurnal_timer.get_twilight_time(after=Time.now())
+        callback_id = self.weatherforecast_model.add_callback(
+            twilight_time.tai.unix,
+            self.handle_twilight_forecast,
+        )
+        self.twilight_forecast_callback_id = callback_id
+
+    def handle_twilight_forecast(self, predicted_temperature: float) -> None:
+        if not self.diurnal_timer.is_running:
+            return
+        if "forecast" in self.features_to_disable:
+            return
+        if "forecast_m1m3ts" in self.features_to_disable and "forecast_top_end" in self.features_to_disable:
+            return
+        self.log.info(
+            f"Applying TMA setpoints based on forecast twilight temperature: {predicted_temperature:.2f}°C"
+        )
+        asyncio.create_task(self.apply_forecast_setpoints(predicted_temperature))
+
+    async def apply_forecast_setpoints(self, predicted_temperature: float) -> None:
+        if "forecast" not in self.features_to_disable and "forecast_m1m3ts" not in self.features_to_disable:
+            await self.apply_setpoints(predicted_temperature)
+
+        if (
+            "forecast" not in self.features_to_disable
+            and "forecast_top_end" not in self.features_to_disable
+            and "top_end" not in self.features_to_disable
+        ):
+            chiller_setpoint = predicted_temperature + self.top_end_setpoint_delta
+            await self.send_set_thermal(
+                top_end_chiller_setpoint=chiller_setpoint,
+                top_end_chiller_state=ThermalCommandState.ON,
+            )
+
+    async def monitor_twilight_forecast(self) -> None:
+        """Run forecast callback between noon and evening twilight."""
+        while self.diurnal_timer.is_running:
+            async with self.diurnal_timer.noon_condition:
+                await self.diurnal_timer.noon_condition.wait()
+            if not self.diurnal_timer.is_running:
+                break
+            self.set_twilight_forecast_callback()
+            async with self.diurnal_timer.twilight_condition:
+                await self.diurnal_timer.twilight_condition.wait()
+            self.clear_twilight_forecast_callback()
+
     async def close(self) -> None:
         """Cancel any in-flight command tasks."""
+        self.clear_twilight_forecast_callback()
         await close_command_tasks(self)
