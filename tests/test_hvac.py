@@ -19,20 +19,22 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+import astropy
 import asyncio
 import logging
 import math
 import types
 import unittest
-from pathlib import Path
-from typing import NotRequired, TypedDict
-
-import astropy
 import yaml
+
+from astropy.time import Time, TimeDelta
+from pathlib import Path
+from types import SimpleNamespace
+from typing import NotRequired, TypedDict
 
 from lsst.ts import salobj
 from lsst.ts.eas import hvac_model
-from lsst.ts.eas.weatherforecast_model import WeatherForecastModel
+from lsst.ts.eas.weatherforecast_model import DELTA_TIME, WeatherForecastModel
 from lsst.ts.xml.enums.HVAC import DeviceId
 
 STD_TIMEOUT = 10
@@ -73,9 +75,16 @@ class DiurnalTimerMock:
         self._night = night
         self.noon_condition = asyncio.Condition()
         self.sunrise_condition = asyncio.Condition()
+        self.twilight_condition = asyncio.Condition()
+        self._twilight_time_override: Time | None = None
 
     def is_night(self, time: astropy.time.Time) -> bool:
         return self._night
+
+    def get_twilight_time(self, *, after: Time) -> Time:
+        if self._twilight_time_override is not None:
+            return self._twilight_time_override
+        return after + TimeDelta(45 * 60, format="sec")
 
     async def stop(self) -> None:
         self.is_running = False
@@ -83,6 +92,8 @@ class DiurnalTimerMock:
             self.noon_condition.notify_all()
         async with self.sunrise_condition:
             self.sunrise_condition.notify_all()
+        async with self.twilight_condition:
+            self.twilight_condition.notify_all()
 
 
 async def signal_noon(timer: DiurnalTimerMock) -> None:
@@ -104,6 +115,20 @@ async def signal_sunrise(timer: DiurnalTimerMock) -> None:
         await asyncio.sleep(STD_SLEEP)
         async with timer.sunrise_condition:
             timer.sunrise_condition.notify_all()
+        await asyncio.sleep(STD_SLEEP)
+        await timer.stop()
+
+    await asyncio.wait_for(
+        asyncio.create_task(signal_coroutine()),
+        timeout=STD_TIMEOUT,
+    )
+
+
+async def signal_twilight(timer: DiurnalTimerMock) -> None:
+    async def signal_coroutine() -> None:
+        await asyncio.sleep(STD_SLEEP)
+        async with timer.twilight_condition:
+            timer.twilight_condition.notify_all()
         await asyncio.sleep(STD_SLEEP)
         await timer.stop()
 
@@ -254,7 +279,10 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         # Nominal average would be 7.5, but dew point 7.625 + margin 1 = 8.625
         #   --> average raised to 8.625.
         s1, s2 = model.compute_glycol_setpoints(self.weather.current_indoor_temperature)
-        self.assertAlmostEqual((s1 + s2) / 2.0, 8.625, places=6)
+        assert s1 is not None
+        assert s2 is not None
+        setpoints_avg = (s1 + s2) / 2.0
+        self.assertAlmostEqual(setpoints_avg, 8.625, places=6)
 
     def test_absolute_minimum_enforced(self) -> None:
         """Setpoints should not drop below the configured absolute minimum."""
@@ -767,6 +795,84 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             with self.subTest(config_path=filename):
                 validated = validator.validate(vars(self.get_config(filename)))
                 self.assertEqual(validated["ahu_control"], expected_ahu_control)
+
+    async def test_forecast_ahu_applies_setpoint(self) -> None:
+        """Forecast-based AHU setpoints should be applied."""
+        self.diurnal.is_running = True
+        model = self.make_model(ahu_setpoint_delta=-1.0, setpoint_lower_limit=6.0)
+
+        model.handle_twilight_forecast(7.0)
+        await asyncio.sleep(STD_SLEEP)
+
+        expected = 6.0
+        for ahu in (
+            DeviceId.lowerAHU01P05,
+            DeviceId.lowerAHU02P05,
+            DeviceId.lowerAHU03P05,
+            DeviceId.lowerAHU04P05,
+        ):
+            setpoint = self.hvac.ahu_setpoints.get(ahu)
+            assert setpoint is not None
+            self.assertAlmostEqual(setpoint, expected, places=6)
+
+        self.hvac.ahu_setpoints.clear()
+
+    async def test_forecast_ahu_disabled_flags(self) -> None:
+        """Forecast-based AHU setpoints should honor disable flags."""
+        for feature in ("forecast_ahu", "forecast"):
+            with self.subTest(feature=feature):
+                self.diurnal.is_running = True
+                model = self.make_model(features_to_disable=[feature])
+
+                self.hvac.ahu_setpoints.clear()
+                model.handle_twilight_forecast(10.0)
+                await asyncio.sleep(STD_SLEEP)
+
+                self.assertDictEqual(self.hvac.ahu_setpoints, {})
+
+        self.hvac.ahu_setpoints.clear()
+
+    async def test_monitor_twilight_forecast_applies_setpoint(self) -> None:
+        """Forecast callback should apply AHU setpoints during the window."""
+        self.diurnal.is_running = True
+        self.diurnal._twilight_time_override = Time.now() + TimeDelta(45 * 60, format="sec")
+        model = self.make_model(ahu_setpoint_delta=0.0, setpoint_lower_limit=-100.0)
+
+        task = asyncio.create_task(model.monitor_twilight_forecast())
+
+        async with self.diurnal.noon_condition:
+            self.diurnal.noon_condition.notify_all()
+        await asyncio.sleep(STD_SLEEP)
+
+        target_time = self.diurnal._twilight_time_override
+        timestamp = target_time.unix - 6 * DELTA_TIME
+
+        def prediction(time: float) -> float:
+            return 10.0 + (time - (timestamp + DELTA_TIME)) / DELTA_TIME
+
+        temperatures = [prediction(timestamp + (idx + 1) * DELTA_TIME) for idx in range(12)]
+        telemetry = SimpleNamespace(
+            temperature=temperatures,
+            private_sndStamp=timestamp,
+        )
+        await self.weatherforecast.hourly_trend_callback(telemetry)
+        await asyncio.sleep(STD_SLEEP)
+
+        expected = prediction(target_time.unix)
+        for ahu in (
+            DeviceId.lowerAHU01P05,
+            DeviceId.lowerAHU02P05,
+            DeviceId.lowerAHU03P05,
+            DeviceId.lowerAHU04P05,
+        ):
+            setpoint = self.hvac.ahu_setpoints.get(ahu)
+            assert setpoint is not None
+            self.assertAlmostEqual(setpoint, expected, places=6)
+
+        await signal_twilight(self.diurnal)
+        await asyncio.wait_for(task, timeout=STD_TIMEOUT)
+
+        self.hvac.ahu_setpoints.clear()
 
     def basic_make_csc(
         self,
