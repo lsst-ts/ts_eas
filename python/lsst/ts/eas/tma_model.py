@@ -34,6 +34,7 @@ from lsst.ts import salobj, utils
 from lsst.ts.xml.enums.MTMount import ThermalCommandState
 
 from .cmdwrapper import close_command_tasks, command_wrapper
+from .delay_controller import DelayController, make_delay_policy_from_config
 from .diurnal_timer import DiurnalTimer
 from .dome_model import DomeModel
 from .glass_temperature_model import GlassTemperatureModel
@@ -79,8 +80,8 @@ class TmaModel:
     m1m3_setpoint_cadence : `float`
         The cadence at which applySetpoints commands should be sent to
         MTM1M3TS (seconds).
-    after_open_delay : `float`
-        Time (s) after opening to wait before applying setpoints.
+    m1m3ts_delay_mode : `dict`
+        Configuration for the delay controller policy after dome opening.
     setpoint_deadband_heating : `float`
         Deadband for M1M3TS heating. If the the new setpoint exceeds the
         previous setpoint by less than this amount, no new command is sent.
@@ -121,7 +122,7 @@ class TmaModel:
         heater_setpoint_delta: float,
         top_end_setpoint_delta: float,
         m1m3_setpoint_cadence: float,
-        after_open_delay: float,
+        m1m3ts_delay_mode: dict,
         setpoint_deadband_heating: float,
         setpoint_deadband_cooling: float,
         maximum_heating_rate: float,
@@ -150,7 +151,7 @@ class TmaModel:
         self.heater_setpoint_delta = heater_setpoint_delta
         self.top_end_setpoint_delta = top_end_setpoint_delta
         self.m1m3_setpoint_cadence = m1m3_setpoint_cadence
-        self.after_open_delay = after_open_delay
+        self.m1m3ts_delay_mode = m1m3ts_delay_mode
         self.setpoint_deadband_heating = setpoint_deadband_heating
         self.setpoint_deadband_cooling = setpoint_deadband_cooling
         self.maximum_heating_rate = maximum_heating_rate
@@ -164,6 +165,11 @@ class TmaModel:
         # If true, applySetpoints needs to be called to
         # refresh the setpoints on M1M3
         self.m1m3_setpoints_are_stale: bool = True
+
+        self.delay_controller: DelayController = DelayController(
+            policy=make_delay_policy_from_config(self.m1m3ts_delay_mode),
+            log=self.log,
+        )
 
         self.top_end_task = utils.make_done_future()
         self.top_end_task_warned: bool = False
@@ -200,10 +206,58 @@ properties:
     description: Time (s) between successive assessments of the TMA setpoint.
     type: number
     default: 300.0
-  after_open_delay:
-    description: Time (s) after opening to wait before applying setpoints.
-    type: number
-    default: 1800.0
+  m1m3ts_delay_mode:
+    description: Behavior after dome opening before resuming M1M3TS ambient tracking.
+    type: object
+    oneOf:
+      - description: Time delay configuration object.
+        properties:
+          mode:
+            const: time_delay
+          delay:
+            type: number
+            description: Time (s) after opening to wait before applying setpoints.
+        required: [mode, delay]
+        additionalProperties: false
+
+      - description: Wait for convergence configuration object.
+        properties:
+          mode:
+            const: wait_for_convergence
+          tolerance_positive:
+            type: number
+            description: Allowed positive deviation (°C) of mirror relative to target.
+          tolerance_negative:
+            type: number
+            description: Allowed negative deviation (°C) of mirror relative to target.
+          timeout:
+            type:
+              - number
+              - "null"
+            description: Max time (s) to wait before resuming tracking. Omit or set null for no timeout.
+        required: [mode, tolerance_positive, tolerance_negative]
+        additionalProperties: false
+
+      - description: Evening controlled convergence configuration object.
+        properties:
+          mode:
+            const: evening_controlled_convergence
+          tolerance_positive:
+            type: number
+            description: Allowed positive deviation (°C) of mirror relative to target.
+          tolerance_negative:
+            type: number
+            description: Allowed negative deviation (°C) of mirror relative to target.
+          slew_rate:
+            type: number
+            description: Slew rate (°C/hour) to command while converging.
+          timeout:
+            type:
+              - number
+              - "null"
+            description: Max time (s) to wait before resuming tracking. Omit or set null for no timeout.
+        required: [mode, tolerance_positive, tolerance_negative, slew_rate]
+        additionalProperties: false
   setpoint_deadband_heating:
     description: Allowed upward deviation (°C) of MTM1M3TS setpoint before it is re-applied.
     type: number
@@ -269,7 +323,7 @@ required:
   - heater_setpoint_delta
   - top_end_setpoint_delta
   - m1m3_setpoint_cadence
-  - after_open_delay
+  - m1m3ts_delay_mode
   - setpoint_deadband_heating
   - setpoint_deadband_cooling
   - maximum_heating_rate
@@ -280,7 +334,9 @@ additionalProperties: false
 """
         )
 
-    @command_wrapper(remote_attr="m1m3ts_remote", command_attr="cmd_applySetpoints")
+    @command_wrapper(
+        remote_attr="m1m3ts_remote", command_attr="cmd_applySetpoints", command_timeout=STD_TIMEOUT
+    )
     async def send_apply_setpoints(
         self,
         *,
@@ -292,7 +348,9 @@ additionalProperties: false
             "heatersSetpoint": heaters_setpoint,
         }
 
-    @command_wrapper(remote_attr="m1m3ts_remote", command_attr="cmd_heaterFanDemand")
+    @command_wrapper(
+        remote_attr="m1m3ts_remote", command_attr="cmd_heaterFanDemand", command_timeout=STD_TIMEOUT
+    )
     async def send_heater_fan_demand(
         self,
         *,
@@ -301,7 +359,7 @@ additionalProperties: false
     ) -> dict[str, Any]:
         return {"heaterPWM": heater_pwm, "fanRPM": fan_rpm}
 
-    @command_wrapper(remote_attr="mtmount_remote", command_attr="cmd_setThermal")
+    @command_wrapper(remote_attr="mtmount_remote", command_attr="cmd_setThermal", command_timeout=STD_TIMEOUT)
     async def send_set_thermal(
         self,
         *,
@@ -422,17 +480,17 @@ additionalProperties: false
                 continue
 
             if "require_dome_open" not in self.features_to_disable:
-                # Wait for some dome telemetry to arrive to avoid
-                # an unnecessary wait of `after_open_delay` seconds.
+                # Wait for some dome telemetry to arrive before gating.
                 while self.dome_model.is_closed is None:
                     await asyncio.sleep(STD_TIMEOUT)
 
-                while self.dome_model.is_closed is not False:
-                    event = asyncio.Event()
-                    self.dome_model.on_open.append((event, self.after_open_delay))
+                if self.dome_model.is_closed is not False:
+                    self.delay_controller.reset()
                     self.log.debug("Waiting for dome open.")
-                    await event.wait()
+                    await self.delay_controller.wait_for_open(self.dome_model)
                     self.log.debug("Dome has been opened.")
+                elif self.delay_controller.open_time is None:
+                    await self.delay_controller.wait_for_open(self.dome_model)
 
             indoor_temperature = self.weather_model.current_indoor_temperature
 
@@ -460,6 +518,19 @@ additionalProperties: false
                 last_m1m3ts_setpoint = None
             else:
                 last_m1m3ts_setpoint = msg.heatersSetpoint - self.heater_setpoint_delta
+
+            if "m1m3ts" in self.features_to_disable or "require_dome_open" in self.features_to_disable:
+                delay_ready = True
+            else:
+                delay_ready = await self.delay_controller.gate(
+                    target_setpoint=indoor_temperature,
+                    last_m1m3ts_setpoint=last_m1m3ts_setpoint,
+                    cadence=self.m1m3_setpoint_cadence,
+                    apply_setpoints_callback=self.apply_setpoints,
+                )
+            if not delay_ready:
+                await asyncio.sleep(self.m1m3_setpoint_cadence)
+                continue
 
             # Apply the new setpoint to change fan speed.
             if "fanspeed" not in self.features_to_disable and not math.isnan(indoor_temperature):

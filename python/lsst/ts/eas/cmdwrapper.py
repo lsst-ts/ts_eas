@@ -65,6 +65,7 @@ async def _run_command(
     command: salobj.topics.RemoteCommand,
     kwargs_list: list[dict[str, Any]],
     timeout: float | None,
+    command_timeout: float,
     dormant_time: float,
     allow_send: Callable[[], bool] | None,
     exception_callback: ExceptionCallback | None,
@@ -84,6 +85,8 @@ async def _run_command(
     timeout : `float` | `None`
         Maximum time (seconds) to wait for ENABLED, or None to wait
         indefinitely.
+    command_timeout : `float`
+        Maximum time (seconds) to wait for command acknowledgement.
     dormant_time : `float`
         Sleep interval between summary state checks.
     allow_send : `Callable` | `None`
@@ -104,7 +107,7 @@ async def _run_command(
             summary_state = remote.evt_summaryState.get()
             if summary_state is not None and summary_state.summaryState == salobj.State.ENABLED:
                 for kwargs in kwargs_list:
-                    await command.set_start(**kwargs)
+                    await command.set_start(timeout=command_timeout, **kwargs)
                 return
             await asyncio.sleep(dormant_time)
 
@@ -158,6 +161,7 @@ def command_wrapper(
     remote_attr: str,
     command_attr: str,
     timeout: float | None = None,
+    command_timeout: float = salobj.topics.remote_command.DEFAULT_TIMEOUT,
     dormant_time: float = DEFAULT_DORMANT_TIME,
     allow_send_attr: str = "allow_send",
     exception_callback_attr: str = "command_exception_callback",
@@ -172,6 +176,9 @@ def command_wrapper(
         Attribute name on the remote that resolves to the command topic.
     timeout : `float` | `None`
         Maximum time to wait for ENABLED, or None to wait indefinitely.
+    command_timeout : `float`
+        Maximum time to wait for command acknowledgement, or omit to use
+        the default `set_start` timeout.
     dormant_time : `float`
         Sleep interval between summary state checks.
     allow_send_attr : `str`
@@ -232,6 +239,7 @@ def command_wrapper(
                     command=command,
                     kwargs_list=kwargs_list,
                     timeout=timeout,
+                    command_timeout=command_timeout,
                     dormant_time=dormant_time,
                     allow_send=allow_send,
                     exception_callback=exception_callback,
