@@ -1,3 +1,19 @@
+v0.13.0 (2026-03-02)
+====================
+
+New Features
+------------
+
+- Implemented multiple delay modes. (`OSW-1496 <https://rubinobs.atlassian.net//browse/OSW-1496>`_)
+
+
+Bug Fixes
+---------
+
+- Ensured sunrise M1M3TS setpoints ignore fan-driven glycol adjustments and reset any prior tuning. (`OSW-1629 <https://rubinobs.atlassian.net//browse/OSW-1629>`_)
+- Added clear of cached values when dome closes, to ensure VEC-04 operates when re-opened. (`OSW-1780 <https://rubinobs.atlassian.net//browse/OSW-1780>`_)
+
+
 v0.12.0 (2026-01-20)
 ====================
 

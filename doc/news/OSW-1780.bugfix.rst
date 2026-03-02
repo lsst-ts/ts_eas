@@ -1,1 +1,0 @@
-Added clear of cached values when dome closes, to ensure VEC-04 operates when re-opened.
