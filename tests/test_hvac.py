@@ -397,7 +397,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         model = self.make_model()
         task = asyncio.create_task(model.control_ahus_and_vec04())
 
-        await asyncio.sleep(STD_SLEEP)  # Allow enough time for 5 SAL commands.
+        await asyncio.sleep(5 * STD_SLEEP)  # Allow enough time for 5 SAL commands.
 
         task.cancel()
         try:
