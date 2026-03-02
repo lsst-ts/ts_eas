@@ -20,8 +20,10 @@ tma:
   top_end_setpoint_delta: -1.0
   m1m3_setpoint_cadence: 30
   m1m3ts_delay_mode:
-    mode: time_delay
-    delay: 0.0
+    mode: wait_for_convergence
+    tolerance_positive: 0.2
+    tolerance_negative: 0.2
+    timeout: null
   setpoint_deadband_heating: 0.05
   setpoint_deadband_cooling: 0.05
   maximum_heating_rate: 1.0

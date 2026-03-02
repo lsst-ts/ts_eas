@@ -21,7 +21,7 @@ tma:
   m1m3_setpoint_cadence: 30
   m1m3ts_delay_mode:
     mode: time_delay
-    delay: 0.0
+    delay: 1800.0
   setpoint_deadband_heating: 0.05
   setpoint_deadband_cooling: 0.05
   maximum_heating_rate: 1.0

@@ -120,6 +120,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         ):
             await mock_mtmount.evt_summaryState.set_write(summaryState=salobj.State.ENABLED)
 
+            m1m3ts_delay_mode = model_args.get("m1m3ts_delay_mode", {"mode": "time_delay", "delay": 0.0})
             self.tma_model = eas.tma_model.TmaModel(
                 log=mock_m1m3ts.log,
                 diurnal_timer=self.diurnal_timer,
@@ -145,7 +146,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                     "fan_throttle_turn_on_temp_diff": 0.0,
                     "fan_throttle_max_temp_diff": 1.0,
                 },
-                after_open_delay=0.0,
+                m1m3ts_delay_mode=m1m3ts_delay_mode,
                 features_to_disable=model_args["features_to_disable"],
             )
             monitor_task = asyncio.create_task(self.tma_model.monitor())
@@ -198,6 +199,35 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(
             heater_setpoint,
             self.last_twilight_temperature + heater_setpoint_delta,
+            places=4,
+        )
+
+    async def test_m1m3ts_applysetpoints_ignores_fan_adjustment(self) -> None:
+        """Sunrise applySetpoints should ignore the fan-driven adjustment."""
+        glycol_setpoint_delta = -3.0
+        heater_setpoint_delta = -1.0
+        top_end_setpoint_delta = -0.5
+
+        glycol_setpoint, _, _, _ = await self.run_with_parameters(
+            indoor_temperature=10,
+            glycol_setpoint_delta=glycol_setpoint_delta,
+            heater_setpoint_delta=heater_setpoint_delta,
+            top_end_setpoint_delta=top_end_setpoint_delta,
+            signal_sunrise=True,
+            features_to_disable=[],
+        )
+
+        assert self.last_twilight_temperature is not None and glycol_setpoint is not None
+        self.assertAlmostEqual(
+            glycol_setpoint,
+            self.last_twilight_temperature + glycol_setpoint_delta,
+            places=4,
+        )
+        self.assertNotAlmostEqual(
+            glycol_setpoint,
+            self.last_twilight_temperature
+            + heater_setpoint_delta
+            + self.tma_model.fan_glycol_heater_offset_min,
             places=4,
         )
 
@@ -300,7 +330,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                     "fan_throttle_turn_on_temp_diff": 0.0,
                     "fan_throttle_max_temp_diff": 1.0,
                 },
-                after_open_delay=0.0,
+                m1m3ts_delay_mode={"mode": "time_delay", "delay": 0.0},
                 features_to_disable=[],
             )
 
@@ -314,8 +344,10 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(STD_SLEEP)
             self.assertEqual(mock_m1m3ts.fan_rpm, [fan_minimum] * 96)
             self.assertEqual(
-                tma_model.glycol_setpoint_delta,
-                tma_model.fan_glycol_heater_offset_min + heater_setpoint_delta,
+                tma_model.glycol_setpoint_delta_adjustment,
+                tma_model.fan_glycol_heater_offset_min
+                + heater_setpoint_delta
+                - tma_model.glycol_setpoint_delta,
             )
 
             # Difference of +1°C between glass and setpoint (with offset):
@@ -326,8 +358,10 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(STD_SLEEP)
             self.assertEqual(mock_m1m3ts.fan_rpm, [fan_maximum] * 96)
             self.assertEqual(
-                tma_model.glycol_setpoint_delta,
-                tma_model.fan_glycol_heater_offset_min + heater_setpoint_delta,
+                tma_model.glycol_setpoint_delta_adjustment,
+                tma_model.fan_glycol_heater_offset_min
+                + heater_setpoint_delta
+                - tma_model.glycol_setpoint_delta,
             )
 
             # Difference of -1°C between glass and setpoint (with offset):
@@ -337,12 +371,16 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             await tma_model.set_fan_speed(setpoint=0.0)
             self.assertEqual(mock_m1m3ts.fan_rpm, [fan_maximum] * 96)
             self.assertEqual(
-                tma_model.glycol_setpoint_delta,
-                tma_model.fan_glycol_heater_offset_max + heater_setpoint_delta,
+                tma_model.glycol_setpoint_delta_adjustment,
+                tma_model.fan_glycol_heater_offset_max
+                + heater_setpoint_delta
+                - tma_model.glycol_setpoint_delta,
             )
 
-    async def test_after_open_delay(self) -> None:
-        after_open_delay = 123.0
+    async def test_delay_policy_time_delay(self) -> None:
+        """Delay policy should gate tracking until the time delay elapses."""
+        delay_seconds = 5.0
+        cadence = 0.05
 
         async with (
             M1M3TSMock() as mock_m1m3ts,
@@ -370,7 +408,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 glycol_setpoint_delta=-2,
                 heater_setpoint_delta=0.0,
                 top_end_setpoint_delta=-1,
-                m1m3_setpoint_cadence=10,
+                m1m3_setpoint_cadence=cadence,
                 setpoint_deadband_heating=0,
                 setpoint_deadband_cooling=0,
                 maximum_heating_rate=100,
@@ -384,40 +422,47 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                     "fan_throttle_turn_on_temp_diff": 0.0,
                     "fan_throttle_max_temp_diff": 1.0,
                 },
-                after_open_delay=after_open_delay,
+                m1m3ts_delay_mode={"mode": "time_delay", "delay": delay_seconds},
                 features_to_disable=[],
             )
 
             task = asyncio.create_task(tma_model.follow_ess_indoor())
             await asyncio.sleep(0)  # Give the task a chance to start.
 
-            # An event has been added to notify when the dome opens.
+            # Delay controller has registered an open event.
             self.assertEqual(len(dome_model.on_open), 1)
-            event, delay = dome_model.on_open.pop()
-            self.assertEqual(delay, after_open_delay)
+            event, delay = dome_model.on_open.popleft()
+            self.assertEqual(delay, 0.0)
 
             # Fire the event, but dome is still closed.
             # (This occurs if the dome is re-closed before the delay time.)
             event.set()
             await asyncio.sleep(STD_SLEEP)
-            self.assertIsNone(mock_mtmount.top_end_setpoint)
+            self.assertIsNone(mock_m1m3ts.heater_setpoint)
+            self.assertIsNone(mock_m1m3ts.glycol_setpoint)
 
             # TmaModel should have queued up a new event.
             self.assertEqual(len(dome_model.on_open), 1)
-            event, delay = dome_model.on_open.pop()
-            self.assertEqual(delay, after_open_delay)
+            event, delay = dome_model.on_open.popleft()
+            self.assertEqual(delay, 0.0)
 
             # Fire the event, but this time the dome is open.
             dome_model.is_closed = False
             event.set()
-            await asyncio.sleep(STD_SLEEP)
-            self.assertIsNotNone(mock_mtmount.top_end_setpoint)
+            await asyncio.sleep(cadence)
+            self.assertIsNone(mock_m1m3ts.heater_setpoint)
+            self.assertIsNone(mock_m1m3ts.glycol_setpoint)
+
+            # After the delay elapses, the controller should allow tracking.
+            await asyncio.sleep(delay_seconds + cadence)
+
+            self.assertIsNotNone(mock_m1m3ts.heater_setpoint)
+            self.assertIsNotNone(mock_m1m3ts.glycol_setpoint)
 
             task.cancel()
-            try:
-                await asyncio.wait_for(task, timeout=STD_TIMEOUT)
-            except asyncio.CancelledError:
-                pass  # expected
+            done, pending = await asyncio.wait({task}, timeout=STD_TIMEOUT)
+            if pending:
+                self.fail("follow_ess_indoor did not stop before timeout")
 
     def basic_make_csc(
         self,

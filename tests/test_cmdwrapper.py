@@ -65,7 +65,8 @@ class FakeCommand:
             await self._block.wait()
         if self._raise is not None:
             raise self._raise
-        self.calls.append(kwargs)
+        filtered_kwargs = {k: v for k, v in kwargs.items() if k != "timeout"}
+        self.calls.append(filtered_kwargs)
 
 
 def make_model(
