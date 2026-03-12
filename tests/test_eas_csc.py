@@ -110,6 +110,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             self.fake_time.offset,
             msg="Clock offset must increase monotonically.",
         )
+
         self.fake_time.offset = offset
 
     @contextlib.asynccontextmanager
@@ -511,6 +512,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
 
             # Increment by 20 minutes so that we have
             # enough historical data.
+            await asyncio.sleep(STD_SLEEP)  # Allow pending SAL messages to come through.
             self.offset_clock(1200)
             await self.ess.tel_airFlow.set_write(
                 speed=0,

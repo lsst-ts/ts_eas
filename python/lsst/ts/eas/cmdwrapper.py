@@ -58,6 +58,34 @@ def _command_label(remote: salobj.Remote, command: salobj.topics.RemoteCommand) 
     return f"{remote_name}.{command_name}"
 
 
+def _get_remote_lock(instance: Any, remote_attr: str) -> asyncio.Lock:
+    """Return a per-instance lock for a remote command stream.
+
+    The lock is retrieved from the specified object. It will be created if it
+    does not exist. The retrieved lock should be used for gating of access to
+    commands on a SALobj Remote.
+
+    Parameters
+    ----------
+    instance : `Any`
+        The object from which to retrieve a lock instance.
+    remote_attr : `str`
+        The name of the lock attribute.
+
+    Returns
+    -------
+    lock : `asyncio.Lock`
+        An asyncio lock for ensuring commands are sent to the Remote one at a
+        time.
+    """
+    lock_attr = f"_{remote_attr}_command_lock"
+    lock = getattr(instance, lock_attr, None)
+    if lock is None:
+        lock = asyncio.Lock()
+        setattr(instance, lock_attr, lock)
+    return lock
+
+
 async def _run_command(
     *,
     log: logging.Logger,
@@ -69,6 +97,7 @@ async def _run_command(
     dormant_time: float,
     allow_send: Callable[[], bool] | None,
     exception_callback: ExceptionCallback | None,
+    send_lock: asyncio.Lock,
 ) -> None:
     """Wait for ENABLED, issue command calls, and handle errors.
 
@@ -103,13 +132,14 @@ async def _run_command(
         return
 
     try:
-        while deadline is None or deadline > current_tai():
-            summary_state = remote.evt_summaryState.get()
-            if summary_state is not None and summary_state.summaryState == salobj.State.ENABLED:
-                for kwargs in kwargs_list:
-                    await command.set_start(timeout=command_timeout, **kwargs)
-                return
-            await asyncio.sleep(dormant_time)
+        async with send_lock:
+            while deadline is None or deadline > current_tai():
+                summary_state = remote.evt_summaryState.get()
+                if summary_state is not None and summary_state.summaryState == salobj.State.ENABLED:
+                    for kwargs in kwargs_list:
+                        await command.set_start(timeout=command_timeout, **kwargs)
+                    return
+                await asyncio.sleep(dormant_time)
 
         log.warning(f"Command {label} timed out waiting for CSC to be enabled.")
 
@@ -230,6 +260,7 @@ def command_wrapper(
             log = getattr(self, "log", logging.getLogger(__name__))
             allow_send = getattr(self, allow_send_attr, None)
             exception_callback = getattr(self, exception_callback_attr, None)
+            send_lock = _get_remote_lock(self, remote_attr)
 
             old_task = getattr(self, task_attr, None)
             new_task = asyncio.create_task(
@@ -243,6 +274,7 @@ def command_wrapper(
                     dormant_time=dormant_time,
                     allow_send=allow_send,
                     exception_callback=exception_callback,
+                    send_lock=send_lock,
                 )
             )
             setattr(self, task_attr, new_task)
@@ -260,8 +292,16 @@ def command_wrapper(
                 old_task.cancel("superseded")
                 try:
                     await old_task
-                except asyncio.CancelledError:
-                    pass
+                except asyncio.CancelledError as e:
+                    # If the exception contains "superseded", then it was
+                    # cancelled by the call above and the exception should
+                    # not be propagated. If not, it was cancelled by some
+                    # other mechanism and the exception must be propagated
+                    # upward.
+                    if e.args and e.args[0] == "superseded":
+                        pass
+                    else:
+                        raise
 
         setattr(wrapped, "_command_task_attr", task_attr)
         return wrapped

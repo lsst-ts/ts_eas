@@ -103,8 +103,30 @@ def make_model(
     return FakeModel(remote, log)
 
 
-async def spin_until(pred: Callable[[], bool], *, timeout: float = 0.5, step: float = 0.01) -> None:
-    """Poll `pred()` until true or timeout."""
+async def spin_until(pred: Callable[[], bool], *, timeout: float = 5.0, step: float = 0.01) -> None:
+    """Poll `pred()` until true or timeout.
+
+    Parameters
+    ----------
+    pred : `Callable`[[], `bool`]
+        A predicate to test. When it returns true, the test procedure may
+        continue.
+    timeout : `float`
+        Maximum time (seconds) to wait. If exceeded, a TimeoutError is raised.
+        The default of 5 seconds allows plenty of time for the SAL
+        command-acknowledge timescale which regularly runs as high as
+        about 1 second.
+    step : `float`
+        Amount of time (seconds) to wait between successive polls of the
+        test predicate. The default of 0.01 seconds is effective for even
+        small predicates in reducing the CPU load while keeping the spin
+        highly responsive.
+
+    Raises
+    ------
+    `TimeoutError`
+        If the predicate is not satisfied before the timeout elapses.
+    """
     deadline = asyncio.get_running_loop().time() + timeout
     while asyncio.get_running_loop().time() < deadline:
         if pred():

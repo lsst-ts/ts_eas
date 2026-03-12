@@ -459,6 +459,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(mock_m1m3ts.heater_setpoint)
             self.assertIsNotNone(mock_m1m3ts.glycol_setpoint)
 
+            await tma_model.close()
             task.cancel()
             done, pending = await asyncio.wait({task}, timeout=STD_TIMEOUT)
             if pending:
