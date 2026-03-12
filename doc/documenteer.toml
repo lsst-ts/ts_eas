@@ -1,0 +1,18 @@
+[project]
+title = "EAS"
+# Copyright information displayed on the footer of each page
+copyright = "2019-2024 Association of Universities for Research in Astronomy, Inc. (AURA)"
+
+[project.python]
+# pyproject.toml package name, fills out unseen metadata
+package = "ts_eas"
+documentation_url_key = "documentation"
+github_url_key = "source_code"
+
+[sphinx]
+extensions = ["sphinx-jsonschema"]
+
+[sphinx.intersphinx.projects]
+ts-xml = "https://ts-xml.lsst.io"
+salobj = "https://ts-salobj.lsst.io"
+python = "https://docs.python.org/3.13/"
