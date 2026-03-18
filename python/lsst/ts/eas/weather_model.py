@@ -240,7 +240,11 @@ additionalProperties: false
             return self.last_twilight_temperature
 
         of_date = Time.now()
-        efd_client = lsst_efd_client.EfdClient(self.efd_name)
+        try:
+            efd_client = lsst_efd_client.EfdClient(self.efd_name)
+        except Exception:
+            return None
+
         for days_ago in range(DAYS_TO_SEARCH_FOR_TWILIGHT_TEMPERATURE):
             # Get time of twilight of interest.
             of_date -= DAY
