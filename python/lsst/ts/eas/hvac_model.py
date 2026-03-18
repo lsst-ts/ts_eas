@@ -59,6 +59,9 @@ class HvacModel:
         The offset that will be added to the measured temperature in
         selecting a setpoint for the HVAC air handling units (AHUs/UMAs)
         measured in °C.
+    ahu_control : `list`[`int`]
+        The AHU numbers that EAS is allowed to control. Values correspond
+        to AHUs 1 through 4.
     setpoint_lower_limit : `float`
         The minimum allowed setpoint for thermal control. If a lower setpoint
         than this is indicated from the ESS temperature readings, this setpoint
@@ -111,6 +114,7 @@ class HvacModel:
         weather_model: WeatherModel,
         hvac_remote: salobj.Remote,
         ahu_setpoint_delta: float,
+        ahu_control: list[int],
         setpoint_lower_limit: float,
         wind_threshold: float,
         vec04_hold_time: float,
@@ -136,6 +140,7 @@ class HvacModel:
         self.dome_model = dome_model
         self.weather_model = weather_model
         self.ahu_setpoint_delta = ahu_setpoint_delta
+        self.ahu_control = ahu_control
         self.setpoint_lower_limit = setpoint_lower_limit
         self.wind_threshold = wind_threshold
         self.vec04_hold_time = vec04_hold_time
@@ -157,6 +162,21 @@ class HvacModel:
         # The remote
         self.hvac_remote = hvac_remote
 
+    def get_controlled_ahus(self) -> tuple[DeviceId, ...]:
+        """Return the AHU device IDs configured for EAS control.
+
+        Returns
+        -------
+        device_tuple : `tuple`[`DeviceId`, ...]
+        """
+        device_ids = {
+            1: DeviceId.lowerAHU01P05,
+            2: DeviceId.lowerAHU02P05,
+            3: DeviceId.lowerAHU03P05,
+            4: DeviceId.lowerAHU04P05,
+        }
+        return tuple(device_ids[ahu] for ahu in self.ahu_control)
+
     @classmethod
     def get_config_schema(cls) -> str:
         return yaml.safe_load(
@@ -172,6 +192,14 @@ properties:
       The offset that will be applied to the measured temperature in
       selecting a setpoint for the HVAC air handling units (AHUs/UMAs)
       measured in °C.
+  ahu_control:
+    type: array
+    default: [1, 2, 3, 4]
+    description: AHU numbers that EAS is allowed to control.
+    items:
+      type: integer
+      enum: [1, 2, 3, 4]
+    uniqueItems: true
   setpoint_lower_limit:
     type: number
     default: 6.0
@@ -219,6 +247,7 @@ properties:
     description: Absolute maximum setpoint (°C) allowed for the warmer glycol chiller.
 required:
   - ahu_setpoint_delta
+  - ahu_control
   - setpoint_lower_limit
   - wind_threshold
   - vec04_hold_time
@@ -335,15 +364,10 @@ additionalProperties: false
 
             if shutter_closed != cached_shutter_closed:
                 cached_shutter_closed = shutter_closed
-                ahus = (
-                    DeviceId.lowerAHU04P05,
-                    DeviceId.lowerAHU03P05,
-                    DeviceId.lowerAHU02P05,
-                    DeviceId.lowerAHU01P05,
-                )
+                ahus = self.get_controlled_ahus()
                 if shutter_closed:
                     if "ahu" not in self.features_to_disable:
-                        # Enable the four AHUs
+                        # Enable the configured AHUs
                         self.log.info("Enabling HVAC AHUs!")
                         enable_device_list.extend(ahus)
 
@@ -392,12 +416,7 @@ additionalProperties: false
                                     "minFanSetpoint": math.nan,
                                     "antiFreezeTemperature": math.nan,
                                 }
-                                for device_id in (
-                                    DeviceId.lowerAHU01P05,
-                                    DeviceId.lowerAHU02P05,
-                                    DeviceId.lowerAHU03P05,
-                                    DeviceId.lowerAHU04P05,
-                                )
+                                for device_id in self.get_controlled_ahus()
                             ]
                         )
 
@@ -620,7 +639,7 @@ additionalProperties: false
                         warned_no_temperature = True
 
                 else:
-                    # Apply setpoint for each of the 4 AHUs
+                    # Apply setpoint for each configured AHU
                     await self.config_lower_ahu(
                         [
                             {
@@ -630,12 +649,7 @@ additionalProperties: false
                                 "minFanSetpoint": math.nan,
                                 "antiFreezeTemperature": math.nan,
                             }
-                            for device_id in (
-                                DeviceId.lowerAHU01P05,
-                                DeviceId.lowerAHU02P05,
-                                DeviceId.lowerAHU03P05,
-                                DeviceId.lowerAHU04P05,
-                            )
+                            for device_id in self.get_controlled_ahus()
                         ]
                     )
 

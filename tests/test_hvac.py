@@ -159,9 +159,10 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             nightly_maximum_indoor_dew_point=-10.0,
         )
 
-    def make_model(self, **overrides: float | list[str] | None) -> hvac_model.HvacModel:
+    def make_model(self, **overrides: float | list[int] | list[str] | None) -> hvac_model.HvacModel:
         params = dict(
             ahu_setpoint_delta=0.0,
+            ahu_control=[1, 2, 3, 4],
             setpoint_lower_limit=6.0,
             wind_threshold=10.0,
             vec04_hold_time=0.0,
@@ -489,6 +490,33 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             # AHUs enabled on close
             self.assertIn(ahu, self.hvac.enable_called)
 
+    async def test_ahu_control_limits_shutter_commands(self) -> None:
+        """Only configured AHUs should be enabled and disabled."""
+        hvac_model.HVAC_SLEEP_TIME = STD_SLEEP
+        self.dome.is_closed = False
+        self.weather.average_windspeed = 3.0
+
+        model = self.make_model(ahu_control=[2, 4])
+        task = asyncio.create_task(model.control_ahus_and_vec04())
+
+        await asyncio.sleep(STD_SLEEP)
+        self.dome.is_closed = True
+        await asyncio.sleep(STD_SLEEP)
+
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass  # expected
+
+        for ahu in (DeviceId.lowerAHU02P05, DeviceId.lowerAHU04P05):
+            self.assertIn(ahu, self.hvac.disable_called)
+            self.assertIn(ahu, self.hvac.enable_called)
+
+        for ahu in (DeviceId.lowerAHU01P05, DeviceId.lowerAHU03P05):
+            self.assertNotIn(ahu, self.hvac.disable_called)
+            self.assertNotIn(ahu, self.hvac.enable_called)
+
     async def test_vec04_disabled(self) -> None:
         """VEC04 commands are not sent if 'vec04' in `features_to_disable`."""
         self.dome.is_closed = False
@@ -693,6 +721,44 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self.hvac.ahu_setpoints, case["expect_setpoints"])
                 # reset for next scenario
                 self.hvac.ahu_setpoints.clear()
+
+    def test_config_schema_ahu_control(self) -> None:
+        validator = salobj.DefaultingValidator(hvac_model.HvacModel.get_config_schema())
+
+        validated = validator.validate(
+            dict(
+                ahu_setpoint_delta=0.0,
+                setpoint_lower_limit=6.0,
+                wind_threshold=10.0,
+                vec04_hold_time=0.0,
+                glycol_band_low=-10.0,
+                glycol_band_high=-5.0,
+                glycol_average_offset=-7.5,
+                glycol_dew_point_margin=1.0,
+                glycol_setpoints_delta=1.0,
+                glycol_absolute_minimum=-10.0,
+                glycol_absolute_maximum=10.0,
+            )
+        )
+        self.assertEqual(validated["ahu_control"], [1, 2, 3, 4])
+
+        validated = validator.validate(
+            dict(
+                ahu_setpoint_delta=0.0,
+                ahu_control=[1, 3],
+                setpoint_lower_limit=6.0,
+                wind_threshold=10.0,
+                vec04_hold_time=0.0,
+                glycol_band_low=-10.0,
+                glycol_band_high=-5.0,
+                glycol_average_offset=-7.5,
+                glycol_dew_point_margin=1.0,
+                glycol_setpoints_delta=1.0,
+                glycol_absolute_minimum=-10.0,
+                glycol_absolute_maximum=10.0,
+            )
+        )
+        self.assertEqual(validated["ahu_control"], [1, 3])
 
     def basic_make_csc(
         self,
