@@ -32,6 +32,18 @@ from astropy.time import Time
 from lsst.ts import salobj, utils
 from lsst.ts.xml.enums.HVAC import DeviceId
 
+try:
+    from lsst.ts.xml.enums.EAS import AHU
+except ImportError:
+    import enum
+
+    class AHU(enum.IntEnum):  # type: ignore[no-redef]
+        lowerAHU01P05 = 1
+        lowerAHU02P05 = 2
+        lowerAHU03P05 = 3
+        lowerAHU04P05 = 4
+
+
 from .cmdwrapper import close_command_tasks, command_wrapper
 from .diurnal_timer import DiurnalTimer
 from .dome_model import DomeModel
@@ -169,13 +181,7 @@ class HvacModel:
         -------
         device_tuple : `tuple`[`DeviceId`, ...]
         """
-        device_ids = {
-            1: DeviceId.lowerAHU01P05,
-            2: DeviceId.lowerAHU02P05,
-            3: DeviceId.lowerAHU03P05,
-            4: DeviceId.lowerAHU04P05,
-        }
-        return tuple(device_ids[ahu] for ahu in self.ahu_control)
+        return tuple(DeviceId[AHU(ahu).name] for ahu in self.ahu_control)
 
     @classmethod
     def get_config_schema(cls) -> str:
