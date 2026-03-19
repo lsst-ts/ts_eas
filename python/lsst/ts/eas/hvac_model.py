@@ -32,6 +32,7 @@ from astropy.time import Time
 from lsst.ts import salobj, utils
 from lsst.ts.xml.enums.HVAC import DeviceId
 
+# TODO: OSW-2022 remove this fallback when it becomes available from ts_xml.
 try:
     from lsst.ts.xml.enums.EAS import AHU
 except ImportError:
@@ -201,7 +202,10 @@ properties:
   ahu_control:
     type: array
     default: [1, 2, 3, 4]
-    description: AHU numbers that EAS is allowed to control.
+    description: >-
+      AHU numbers that EAS is allowed to control. These numbers refer
+      to the devices `lowerAHU01P05` - `lowerAHU04P05` in
+      :class:`~lsst.ts.xml.enums.HVAC.DeviceId`.
     items:
       type: integer
       enum: [1, 2, 3, 4]
@@ -253,7 +257,6 @@ properties:
     description: Absolute maximum setpoint (°C) allowed for the warmer glycol chiller.
 required:
   - ahu_setpoint_delta
-  - ahu_control
   - setpoint_lower_limit
   - wind_threshold
   - vec04_hold_time
