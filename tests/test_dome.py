@@ -136,6 +136,22 @@ class TestDomeModel(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(event.is_set())
         self.assertFalse(self.model.delayed_events)
 
+    async def test_multiple_pending_events_all_fired_on_open(self) -> None:
+        """All events registered in on_open should fire when the dome opens."""
+        event1 = asyncio.Event()
+        event2 = asyncio.Event()
+        delay = 0.01
+
+        self.model.on_open.append((event1, delay))
+        self.model.on_open.append((event2, delay))
+
+        await self.model.aperture_shutter_callback(get_open_shutter_telemetry())
+        await asyncio.sleep(STD_SLEEP)
+
+        self.assertTrue(event1.is_set(), "event1 was not set")
+        self.assertTrue(event2.is_set(), "event2 was not set")
+        self.assertFalse(self.model.delayed_events)
+
     async def test_is_closed_true_when_shutter_and_louvers_closed(self) -> None:
         """Dome is closed when shutter AND all louvers are closed."""
         await self.model.aperture_shutter_callback(get_closed_shutter_telemetry())

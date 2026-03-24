@@ -129,9 +129,9 @@ required:
 
             for event, delay in events_to_signal:
 
-                def fire_event() -> None:
-                    event.set()
-                    self.delayed_events.pop(event)
+                def fire_event(ev: asyncio.Event = event) -> None:
+                    ev.set()
+                    self.delayed_events.pop(ev)
 
                 handle = loop.call_later(delay, fire_event)
                 self.delayed_events[event] = handle
