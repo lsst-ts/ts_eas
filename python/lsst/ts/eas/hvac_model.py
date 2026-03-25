@@ -72,6 +72,10 @@ class HvacModel:
         The offset that will be added to the measured temperature in
         selecting a setpoint for the HVAC air handling units (AHUs/UMAs)
         measured in °C.
+    ahu_setpoint_delta_closedatnite : `float`
+        The offset that will be added to the measured temperature in
+        selecting a setpoint for the HVAC air handling units (AHUs/UMAs)
+        during nighttime closed-dome operation, measured in °C.
     ahu_control : `list`[`int`]
         The AHU numbers that EAS is allowed to control. Values correspond
         to AHUs 1 through 4.
@@ -127,6 +131,7 @@ class HvacModel:
         weather_model: WeatherModel,
         hvac_remote: salobj.Remote,
         ahu_setpoint_delta: float,
+        ahu_setpoint_delta_closedatnite: float,
         ahu_control: list[int],
         setpoint_lower_limit: float,
         wind_threshold: float,
@@ -153,6 +158,7 @@ class HvacModel:
         self.dome_model = dome_model
         self.weather_model = weather_model
         self.ahu_setpoint_delta = ahu_setpoint_delta
+        self.ahu_setpoint_delta_closedatnite = ahu_setpoint_delta_closedatnite
         self.ahu_control = ahu_control
         self.setpoint_lower_limit = setpoint_lower_limit
         self.wind_threshold = wind_threshold
@@ -199,6 +205,13 @@ properties:
       The offset that will be applied to the measured temperature in
       selecting a setpoint for the HVAC air handling units (AHUs/UMAs)
       measured in °C.
+  ahu_setpoint_delta_closedatnite:
+    type: number
+    default: -1.0
+    description: >-
+      The offset that will be applied to the measured temperature in
+      selecting a setpoint for the HVAC air handling units (AHUs/UMAs)
+      during nighttime closed-dome operation measured in °C.
   ahu_control:
     type: array
     default: [1, 2, 3, 4]
@@ -633,13 +646,17 @@ additionalProperties: false
         warned_no_temperature = False
 
         while self.diurnal_timer.is_running:
+            if "closedatnite" in self.features_to_disable:
+                await asyncio.sleep(HVAC_SLEEP_TIME)
+                continue
+
             if self.diurnal_timer.is_night(Time.now()) and self.dome_model.is_closed:
                 if "room_setpoint" in self.features_to_disable:
                     await asyncio.sleep(HVAC_SLEEP_TIME)
                     continue
 
                 setpoint = max(
-                    self.weather_model.current_temperature + self.ahu_setpoint_delta,
+                    self.weather_model.current_temperature + self.ahu_setpoint_delta_closedatnite,
                     self.setpoint_lower_limit,
                 )
                 if math.isnan(setpoint):
