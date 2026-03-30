@@ -325,11 +325,11 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
 
         # HVAC setpoints should match model setpoints.
         self.assertAlmostEqual(
-            self.hvac.chiller_setpoints[DeviceId.chiller01P01],
+            self.hvac.chiller_setpoints[DeviceId.coldGlycolChiller01],
             model.glycol_setpoint1,
         )
         self.assertAlmostEqual(
-            self.hvac.chiller_setpoints[DeviceId.chiller02P01],
+            self.hvac.chiller_setpoints[DeviceId.coldGlycolChiller02],
             model.glycol_setpoint2,
         )
 
@@ -378,8 +378,8 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         # `current_indoor_temperature` in the weather model.
         average = sum(self.hvac.chiller_setpoints.values()) / len(self.hvac.chiller_setpoints)
         difference = (
-            self.hvac.chiller_setpoints[DeviceId.chiller01P01]
-            - self.hvac.chiller_setpoints[DeviceId.chiller02P01]
+            self.hvac.chiller_setpoints[DeviceId.coldGlycolChiller01]
+            - self.hvac.chiller_setpoints[DeviceId.coldGlycolChiller02]
         )
         self.assertAlmostEqual(difference, model.glycol_setpoints_delta)
         self.assertAlmostEqual(
@@ -403,11 +403,11 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
 
         # Setpoints should NOT be recalculated
         self.assertAlmostEqual(
-            self.hvac.chiller_setpoints[DeviceId.chiller01P01],
+            self.hvac.chiller_setpoints[DeviceId.coldGlycolChiller01],
             initial_setpoint1,
         )
         self.assertAlmostEqual(
-            self.hvac.chiller_setpoints[DeviceId.chiller02P01],
+            self.hvac.chiller_setpoints[DeviceId.coldGlycolChiller02],
             initial_setpoint2,
         )
 
@@ -432,14 +432,14 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             pass  # expected
 
         # VEC-04 was enabled
-        self.assertIn(DeviceId.loadingBayFan04P04, self.hvac.enable_called)
-        self.assertNotIn(DeviceId.loadingBayFan04P04, self.hvac.disable_called)
+        self.assertIn(DeviceId.airExtractionFan04Dome, self.hvac.enable_called)
+        self.assertNotIn(DeviceId.airExtractionFan04Dome, self.hvac.disable_called)
 
         for ahu in (
-            DeviceId.lowerAHU01P05,
-            DeviceId.lowerAHU02P05,
-            DeviceId.lowerAHU03P05,
-            DeviceId.lowerAHU04P05,
+            DeviceId.airHandlingUnit01Dome,
+            DeviceId.airHandlingUnit02Dome,
+            DeviceId.airHandlingUnit03Dome,
+            DeviceId.airHandlingUnit04Dome,
         ):
             # All 4 AHUs should have been disabled when dome opened
             self.assertIn(ahu, self.hvac.disable_called)
@@ -458,13 +458,13 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
 
         # Let it enable VEC-04
         await asyncio.sleep(STD_SLEEP)
-        self.assertIn(DeviceId.loadingBayFan04P04, self.hvac.enable_called)
-        self.assertNotIn(DeviceId.loadingBayFan04P04, self.hvac.disable_called)
+        self.assertIn(DeviceId.airExtractionFan04Dome, self.hvac.enable_called)
+        self.assertNotIn(DeviceId.airExtractionFan04Dome, self.hvac.disable_called)
 
         # Wind rises above threshold --> should disable VEC-04
         self.weather.average_windspeed = 12.0
         await asyncio.sleep(STD_SLEEP)
-        self.assertIn(DeviceId.loadingBayFan04P04, self.hvac.disable_called)
+        self.assertIn(DeviceId.airExtractionFan04Dome, self.hvac.disable_called)
 
         task.cancel()
         try:
@@ -485,10 +485,10 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(STD_SLEEP)
 
         for ahu in (
-            DeviceId.lowerAHU01P05,
-            DeviceId.lowerAHU02P05,
-            DeviceId.lowerAHU03P05,
-            DeviceId.lowerAHU04P05,
+            DeviceId.airHandlingUnit01Dome,
+            DeviceId.airHandlingUnit02Dome,
+            DeviceId.airHandlingUnit03Dome,
+            DeviceId.airHandlingUnit04Dome,
         ):
             # AHUs not enabled because dome is open.
             self.assertNotIn(ahu, self.hvac.enable_called)
@@ -504,13 +504,13 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             pass  # expected
 
         # VEC-04 forced OFF on close
-        self.assertIn(DeviceId.loadingBayFan04P04, self.hvac.disable_called)
+        self.assertIn(DeviceId.airExtractionFan04Dome, self.hvac.disable_called)
 
         for ahu in (
-            DeviceId.lowerAHU01P05,
-            DeviceId.lowerAHU02P05,
-            DeviceId.lowerAHU03P05,
-            DeviceId.lowerAHU04P05,
+            DeviceId.airHandlingUnit01Dome,
+            DeviceId.airHandlingUnit02Dome,
+            DeviceId.airHandlingUnit03Dome,
+            DeviceId.airHandlingUnit04Dome,
         ):
             # AHUs enabled on close
             self.assertIn(ahu, self.hvac.enable_called)
@@ -534,11 +534,11 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         except asyncio.CancelledError:
             pass  # expected
 
-        for ahu in (DeviceId.lowerAHU02P05, DeviceId.lowerAHU04P05):
+        for ahu in (DeviceId.airHandlingUnit02Dome, DeviceId.airHandlingUnit04Dome):
             self.assertIn(ahu, self.hvac.disable_called)
             self.assertIn(ahu, self.hvac.enable_called)
 
-        for ahu in (DeviceId.lowerAHU01P05, DeviceId.lowerAHU03P05):
+        for ahu in (DeviceId.airHandlingUnit01Dome, DeviceId.airHandlingUnit03Dome):
             self.assertNotIn(ahu, self.hvac.disable_called)
             self.assertNotIn(ahu, self.hvac.enable_called)
 
@@ -558,8 +558,8 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         except asyncio.CancelledError:
             pass  # expected
 
-        self.assertNotIn(DeviceId.loadingBayFan04P04, self.hvac.enable_called)
-        self.assertNotIn(DeviceId.loadingBayFan04P04, self.hvac.disable_called)
+        self.assertNotIn(DeviceId.airExtractionFan04Dome, self.hvac.enable_called)
+        self.assertNotIn(DeviceId.airExtractionFan04Dome, self.hvac.disable_called)
 
     async def test_ahu_disabled(self) -> None:
         """AHU commands are not sent if 'ahu' in `features_to_disable`."""
@@ -580,10 +580,10 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             pass  # expected
 
         for ahu in (
-            DeviceId.lowerAHU01P05,
-            DeviceId.lowerAHU02P05,
-            DeviceId.lowerAHU03P05,
-            DeviceId.lowerAHU04P05,
+            DeviceId.airHandlingUnit01Dome,
+            DeviceId.airHandlingUnit02Dome,
+            DeviceId.airHandlingUnit03Dome,
+            DeviceId.airHandlingUnit04Dome,
         ):
             # No commands sent to lower AHUs
             self.assertNotIn(ahu, self.hvac.enable_called)
@@ -603,10 +603,10 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 "last_twilight": 10.0,
                 "features_to_disable": [],
                 "expect_setpoints": {
-                    DeviceId.lowerAHU01P05: 10.0,
-                    DeviceId.lowerAHU02P05: 10.0,
-                    DeviceId.lowerAHU03P05: 10.0,
-                    DeviceId.lowerAHU04P05: 10.0,
+                    DeviceId.airHandlingUnit01Dome: 10.0,
+                    DeviceId.airHandlingUnit02Dome: 10.0,
+                    DeviceId.airHandlingUnit03Dome: 10.0,
+                    DeviceId.airHandlingUnit04Dome: 10.0,
                 },
             },
             {
@@ -614,10 +614,10 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 "last_twilight": 4.0,
                 "features_to_disable": [],
                 "expect_setpoints": {
-                    DeviceId.lowerAHU01P05: 6.0,
-                    DeviceId.lowerAHU02P05: 6.0,
-                    DeviceId.lowerAHU03P05: 6.0,
-                    DeviceId.lowerAHU04P05: 6.0,
+                    DeviceId.airHandlingUnit01Dome: 6.0,
+                    DeviceId.airHandlingUnit02Dome: 6.0,
+                    DeviceId.airHandlingUnit03Dome: 6.0,
+                    DeviceId.airHandlingUnit04Dome: 6.0,
                 },
             },
             {
@@ -626,10 +626,10 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 "features_to_disable": [],
                 "ahu_setpoint_delta": -1.0,
                 "expect_setpoints": {
-                    DeviceId.lowerAHU01P05: 8.0,
-                    DeviceId.lowerAHU02P05: 8.0,
-                    DeviceId.lowerAHU03P05: 8.0,
-                    DeviceId.lowerAHU04P05: 8.0,
+                    DeviceId.airHandlingUnit01Dome: 8.0,
+                    DeviceId.airHandlingUnit02Dome: 8.0,
+                    DeviceId.airHandlingUnit03Dome: 8.0,
+                    DeviceId.airHandlingUnit04Dome: 8.0,
                 },
             },
             {
@@ -683,10 +683,10 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 "expect_setpoints": {
                     ahu: 6.0
                     for ahu in (
-                        DeviceId.lowerAHU01P05,
-                        DeviceId.lowerAHU02P05,
-                        DeviceId.lowerAHU03P05,
-                        DeviceId.lowerAHU04P05,
+                        DeviceId.airHandlingUnit01Dome,
+                        DeviceId.airHandlingUnit02Dome,
+                        DeviceId.airHandlingUnit03Dome,
+                        DeviceId.airHandlingUnit04Dome,
                     )
                 },
             },
@@ -699,10 +699,10 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 "expect_setpoints": {
                     ahu: 8.0
                     for ahu in (
-                        DeviceId.lowerAHU01P05,
-                        DeviceId.lowerAHU02P05,
-                        DeviceId.lowerAHU03P05,
-                        DeviceId.lowerAHU04P05,
+                        DeviceId.airHandlingUnit01Dome,
+                        DeviceId.airHandlingUnit02Dome,
+                        DeviceId.airHandlingUnit03Dome,
+                        DeviceId.airHandlingUnit04Dome,
                     )
                 },
             },

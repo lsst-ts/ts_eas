@@ -122,11 +122,11 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         self.vec04_state: bool | None = None
 
         self.hvac_events = {
-            DeviceId.lowerAHU01P05: asyncio.Event(),
-            DeviceId.lowerAHU02P05: asyncio.Event(),
-            DeviceId.lowerAHU03P05: asyncio.Event(),
-            DeviceId.lowerAHU04P05: asyncio.Event(),
-            DeviceId.loadingBayFan04P04: asyncio.Event(),
+            DeviceId.airHandlingUnit01Dome: asyncio.Event(),
+            DeviceId.airHandlingUnit02Dome: asyncio.Event(),
+            DeviceId.airHandlingUnit03Dome: asyncio.Event(),
+            DeviceId.airHandlingUnit04Dome: asyncio.Event(),
+            DeviceId.airExtractionFan04Dome: asyncio.Event(),
         }
 
         self.mtdome = salobj.Controller("MTDome")
@@ -196,15 +196,15 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         """Callback for HVAC.cmd_enableDevice."""
         self.log.info(f"enable_callback {message.device_id=}")
         match message.device_id:
-            case DeviceId.lowerAHU01P05:
+            case DeviceId.airHandlingUnit01Dome:
                 self.ahu1_state = True
-            case DeviceId.lowerAHU02P05:
+            case DeviceId.airHandlingUnit02Dome:
                 self.ahu2_state = True
-            case DeviceId.lowerAHU03P05:
+            case DeviceId.airHandlingUnit03Dome:
                 self.ahu3_state = True
-            case DeviceId.lowerAHU04P05:
+            case DeviceId.airHandlingUnit04Dome:
                 self.ahu4_state = True
-            case DeviceId.loadingBayFan04P04:
+            case DeviceId.airExtractionFan04Dome:
                 self.vec04_state = True
 
         self.hvac_events[message.device_id].set()
@@ -213,15 +213,15 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         """Callback for HVAC.cmd_disableDevice."""
         self.log.info(f"disable_callback {message.device_id=}")
         match message.device_id:
-            case DeviceId.lowerAHU01P05:
+            case DeviceId.airHandlingUnit01Dome:
                 self.ahu1_state = False
-            case DeviceId.lowerAHU02P05:
+            case DeviceId.airHandlingUnit02Dome:
                 self.ahu2_state = False
-            case DeviceId.lowerAHU03P05:
+            case DeviceId.airHandlingUnit03Dome:
                 self.ahu3_state = False
-            case DeviceId.lowerAHU04P05:
+            case DeviceId.airHandlingUnit04Dome:
                 self.ahu4_state = False
-            case DeviceId.loadingBayFan04P04:
+            case DeviceId.airExtractionFan04Dome:
                 self.vec04_state = False
 
         self.hvac_events[message.device_id].set()
@@ -527,7 +527,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             # And in the next run of the control loop, the
             # VEC-04 fan is enabled.
             await asyncio.wait_for(
-                self.hvac_events[DeviceId.loadingBayFan04P04].wait(),
+                self.hvac_events[DeviceId.airExtractionFan04Dome].wait(),
                 timeout=STD_TIMEOUT,
             )
 
