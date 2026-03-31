@@ -39,10 +39,10 @@ except ImportError:
     import enum
 
     class AHU(enum.IntEnum):  # type: ignore[no-redef]
-        lowerAHU01P05 = 1
-        lowerAHU02P05 = 2
-        lowerAHU03P05 = 3
-        lowerAHU04P05 = 4
+        airHandlingUnit01Dome = 1
+        airHandlingUnit02Dome = 2
+        airHandlingUnit03Dome = 3
+        airHandlingUnit04Dome = 4
 
 
 from .cmdwrapper import close_command_tasks, command_wrapper
@@ -204,7 +204,7 @@ properties:
     default: [1, 2, 3, 4]
     description: >-
       AHU numbers that EAS is allowed to control. These numbers refer
-      to the devices `lowerAHU01P05` - `lowerAHU04P05` in
+      to the devices `airHandlingUnit01Dome` - `airHandlingUnit04Dome` in
       :class:`~lsst.ts.xml.enums.HVAC.DeviceId`.
     items:
       type: integer
@@ -366,10 +366,10 @@ additionalProperties: false
                     self.last_vec04_time = utils.current_tai()
                     if wind_threshold:
                         self.log.info(f"Turning on VEC-04 fan! {change_message}")
-                        enable_device_list.append(DeviceId.loadingBayFan04P04)
+                        enable_device_list.append(DeviceId.airExtractionFan04Dome)
                     else:
                         self.log.info(f"Turning off VEC-04 fan! {change_message}")
-                        disable_device_list.append(DeviceId.loadingBayFan04P04)
+                        disable_device_list.append(DeviceId.airExtractionFan04Dome)
 
             if shutter_closed != cached_shutter_closed:
                 cached_shutter_closed = shutter_closed
@@ -383,7 +383,7 @@ additionalProperties: false
                     if "vec04" not in self.features_to_disable:
                         # Disable the VEC-04 fan
                         self.log.info("Turning off VEC-04 fan!")
-                        disable_device_list.append(DeviceId.loadingBayFan04P04)
+                        disable_device_list.append(DeviceId.airExtractionFan04Dome)
                         self.last_vec04_time = utils.current_tai()
                 else:
                     if "ahu" not in self.features_to_disable:
@@ -563,14 +563,14 @@ additionalProperties: false
                 if self.glycol_setpoint1 is not None:
                     chiller_commands.append(
                         {
-                            "device_id": DeviceId.chiller01P01,
+                            "device_id": DeviceId.coldGlycolChiller01,
                             "activeSetpoint": self.glycol_setpoint1,
                         }
                     )
                 if self.glycol_setpoint2 is not None:
                     chiller_commands.append(
                         {
-                            "device_id": DeviceId.chiller02P01,
+                            "device_id": DeviceId.coldGlycolChiller02,
                             "activeSetpoint": self.glycol_setpoint2,
                         }
                     )
@@ -612,11 +612,11 @@ additionalProperties: false
                 await self.config_chiller(
                     [
                         {
-                            "device_id": DeviceId.chiller01P01,
+                            "device_id": DeviceId.coldGlycolChiller01,
                             "activeSetpoint": self.glycol_setpoint1,
                         },
                         {
-                            "device_id": DeviceId.chiller02P01,
+                            "device_id": DeviceId.coldGlycolChiller02,
                             "activeSetpoint": self.glycol_setpoint2,
                         },
                     ]
