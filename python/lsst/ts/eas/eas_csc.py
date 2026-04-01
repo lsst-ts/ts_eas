@@ -272,7 +272,7 @@ class EasCsc(salobj.ConfigurableCsc):
         await self.diurnal_timer.start()
 
         if self.dome_model is not None:
-            self.dome_model.cancel_pending_events()
+            self.dome_model.set_pending_events()
 
         self.glass_temperature_model = GlassTemperatureModel(log=self.log)
 

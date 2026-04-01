@@ -61,8 +61,7 @@ class DomeModel:
         # Most recent tel_louvers
         self.louvers_telemetry: salobj.BaseMsgType | None = None
 
-        self.on_open: deque[tuple[asyncio.Event, float]] = deque()
-        self.delayed_events: dict[asyncio.Event, asyncio.Handle] = dict()
+        self.on_open: deque[asyncio.Event] = deque()
         self.was_closed: bool | None = None
 
         self.log = log
@@ -84,22 +83,6 @@ required:
   - dome_open_threshold
 """
         )
-
-    def cancel_pending_events(self) -> None:
-        """Cancels all pending handles scheduled to set events.
-
-        Any events waiting to be set will be set at this time.
-        The handles associated with the waiting events will be
-        cancelled.
-        """
-        if not self.delayed_events:
-            return
-
-        delayed_events = dict(self.delayed_events)
-        self.delayed_events.clear()
-        for event, handle in delayed_events.items():
-            handle.cancel()
-            event.set()
 
     async def aperture_shutter_callback(self, aperture_shutter_telemetry: salobj.BaseMsgType) -> None:
         """Callback for MTDome.tel_apertureShutter.
@@ -125,21 +108,24 @@ required:
         if self.was_closed is not False and is_closed is False:
             events_to_signal = list(self.on_open)
             self.on_open.clear()
-            loop = asyncio.get_running_loop()
 
-            for event, delay in events_to_signal:
-
-                def fire_event(ev: asyncio.Event = event) -> None:
-                    ev.set()
-                    self.delayed_events.pop(ev)
-
-                handle = loop.call_later(delay, fire_event)
-                self.delayed_events[event] = handle
-
-        elif is_closed and self.delayed_events:
-            self.cancel_pending_events()
+            for event in events_to_signal:
+                event.set()
 
         self.was_closed = is_closed
+
+    def set_pending_events(self) -> None:
+        """Sets all events in the `on_open` deque.
+
+        Any events waiting to be set will be set at this time.
+        This gives waiting coroutines an opportunity to close
+        gracefully.
+        """
+        events_to_signal = list(self.on_open)
+        self.on_open.clear()
+
+        for event in events_to_signal:
+            event.set()
 
     @property
     def is_closed(self) -> bool | None:

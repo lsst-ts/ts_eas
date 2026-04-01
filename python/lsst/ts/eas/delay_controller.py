@@ -400,14 +400,13 @@ class DelayController:
 
         while dome_model.is_closed is not False:
             event = asyncio.Event()
-            on_open_event = (event, 0.0)
-            dome_model.on_open.append(on_open_event)
+            dome_model.on_open.append(event)
 
             # Recheck after registering the waiter so an open transition
             # between the loop condition and append cannot be lost.
             if dome_model.is_closed is False:
                 try:
-                    dome_model.on_open.remove(on_open_event)
+                    dome_model.on_open.remove(event)
                 except ValueError:
                     pass
                 break

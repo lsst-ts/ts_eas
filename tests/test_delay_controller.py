@@ -291,12 +291,12 @@ class TestDelayControllerConfig(unittest.TestCase):
 class FakeDomeModel:
     def __init__(self) -> None:
         self.is_closed: bool | None = True
-        self.on_open: deque[tuple[asyncio.Event, float]] = deque()
+        self.on_open: deque[asyncio.Event] = deque()
 
     def open(self) -> None:
         """Change dome state to opened."""
         self.is_closed = False
-        for event, _ in list(self.on_open):
+        for event in list(self.on_open):
             event.set()
         self.on_open.clear()
 

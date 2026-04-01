@@ -72,26 +72,18 @@ class TestDomeModel(unittest.IsolatedAsyncioTestCase):
         await self.model.aperture_shutter_callback(get_closed_shutter_telemetry())
         await self.model.louvers_callback(get_closed_louver_telemetry())
 
-    async def test_cancel_pending_events_cancels_and_sets_events(self) -> None:
+    async def test_cancel_pending_events_sets_events(self) -> None:
         event = asyncio.Event()
 
-        self.model.on_open.append((event, 1000.0))
+        self.model.on_open.append(event)
         await self.model.aperture_shutter_callback(get_open_shutter_telemetry())
 
-        handle = self.model.delayed_events.get(event)
-        self.model.cancel_pending_events()
-
-        # Handle should be cancelled
-        self.assertTrue(handle.cancelled())
         # Event should have been set
         self.assertTrue(event.is_set())
-        # Internal bookkeeping cleared
-        self.assertFalse(self.model.delayed_events)
 
     async def test_aperture_shutter_callback_schedules_delayed_events(self) -> None:
         event = asyncio.Event()
-        delay = 0.01
-        self.model.on_open.append((event, delay))
+        self.model.on_open.append(event)
 
         # Open the dome
         await self.model.aperture_shutter_callback(get_open_shutter_telemetry())
@@ -99,58 +91,23 @@ class TestDomeModel(unittest.IsolatedAsyncioTestCase):
         # on_open should be cleared
         self.assertFalse(self.model.on_open)
 
-        # One handle per event
-        self.assertEqual(len(self.model.delayed_events), 1)
-
-        # Event should be set after the delay
+        # Event should be set
         await asyncio.wait_for(event.wait(), timeout=0.2)
         self.assertTrue(event.is_set())
-
-    async def test_aperture_shutter_callback_cancels_pending_on_close(self) -> None:
-        event = asyncio.Event()
-        delay = 1000.0
-        self.model.on_open.append((event, delay))
-
-        # Open the dome...
-        await self.model.aperture_shutter_callback(get_open_shutter_telemetry())
-
-        self.assertEqual(len(self.model.delayed_events), 1)
-        await asyncio.sleep(0)
-
-        # Close the dome before the delay expires...
-        await self.model.aperture_shutter_callback(get_closed_shutter_telemetry())
-        await asyncio.sleep(0)
-
-        self.assertTrue(event.is_set())
-        self.assertFalse(self.model.delayed_events)
-
-    async def test_delayed_events_cleared_as_tasks_complete(self) -> None:
-        event = asyncio.Event()
-        delay = 0.01
-        self.model.on_open.append((event, delay))
-
-        # Open the dome...
-        await self.model.aperture_shutter_callback(get_open_shutter_telemetry())
-        await asyncio.sleep(STD_SLEEP)
-
-        self.assertTrue(event.is_set())
-        self.assertFalse(self.model.delayed_events)
 
     async def test_multiple_pending_events_all_fired_on_open(self) -> None:
         """All events registered in on_open should fire when the dome opens."""
         event1 = asyncio.Event()
         event2 = asyncio.Event()
-        delay = 0.01
 
-        self.model.on_open.append((event1, delay))
-        self.model.on_open.append((event2, delay))
+        self.model.on_open.append(event1)
+        self.model.on_open.append(event2)
 
         await self.model.aperture_shutter_callback(get_open_shutter_telemetry())
         await asyncio.sleep(STD_SLEEP)
 
         self.assertTrue(event1.is_set(), "event1 was not set")
         self.assertTrue(event2.is_set(), "event2 was not set")
-        self.assertFalse(self.model.delayed_events)
 
     async def test_is_closed_true_when_shutter_and_louvers_closed(self) -> None:
         """Dome is closed when shutter AND all louvers are closed."""

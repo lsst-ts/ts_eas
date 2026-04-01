@@ -1,0 +1,1 @@
+Removed no-longer-used delay in dome_model in favor of DelayController.

@@ -93,7 +93,7 @@ class WeatherModelMock:
 class DomeModelMock:
     def __init__(self, is_closed: bool) -> None:
         self.is_closed = is_closed
-        self.on_open: deque[tuple[asyncio.Event, float]] = deque()
+        self.on_open: deque[asyncio.Event] = deque()
 
 
 class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
@@ -542,7 +542,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
 
             # Delay controller has registered an open event.
             self.assertEqual(len(dome_model.on_open), 1)
-            event, _ = dome_model.on_open.popleft()
+            event = dome_model.on_open.popleft()
 
             # Fire the event, but dome is still closed.
             # (This occurs if the dome is re-closed before the delay time.)
@@ -553,7 +553,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
 
             # TmaModel should have queued up a new event.
             self.assertEqual(len(dome_model.on_open), 1)
-            event, _ = dome_model.on_open.popleft()
+            event = dome_model.on_open.popleft()
 
             # Fire the event, but this time the dome is open.
             dome_model.is_closed = False
