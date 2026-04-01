@@ -187,6 +187,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
     def make_model(self, **overrides: float | list[int] | list[str] | None) -> hvac_model.HvacModel:
         params = dict(
             ahu_setpoint_delta=0.0,
+            ahu_setpoint_delta_closedatnite=0.0,
             ahu_control=[1, 2, 3, 4],
             setpoint_lower_limit=6.0,
             wind_threshold=10.0,
@@ -671,6 +672,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             night: bool
             closed: bool
             ahu_setpoint_delta: NotRequired[float]
+            ahu_setpoint_delta_closedatnite: NotRequired[float]
             temp: float
             expect_setpoints: dict[str, float]
 
@@ -695,9 +697,10 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 "night": True,
                 "closed": True,
                 "temp": 9.0,
-                "ahu_setpoint_delta": -1.0,
+                "ahu_setpoint_delta": 0.0,
+                "ahu_setpoint_delta_closedatnite": -1.5,
                 "expect_setpoints": {
-                    ahu: 8.0
+                    ahu: 7.5
                     for ahu in (
                         DeviceId.airHandlingUnit01Dome,
                         DeviceId.airHandlingUnit02Dome,
@@ -736,7 +739,10 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 self.dome.is_closed = case["closed"]
                 self.weather.current_temperature = case["temp"]
 
-                model = self.make_model(ahu_setpoint_delta=case.get("ahu_setpoint_delta", 0.0))
+                model = self.make_model(
+                    ahu_setpoint_delta=case.get("ahu_setpoint_delta", 0.0),
+                    ahu_setpoint_delta_closedatnite=case.get("ahu_setpoint_delta_closedatnite", 0.0),
+                )
                 task = asyncio.create_task(model.apply_setpoint_at_night())
 
                 await asyncio.sleep(STD_SLEEP)
