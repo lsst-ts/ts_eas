@@ -516,6 +516,9 @@ additionalProperties: false
 
                 if self.dome_model.is_closed is not False:
                     self.delay_controller.reset()
+                    # Force a setpoint resend once tracking is allowed again
+                    # after a dome closure/reopen cycle.
+                    self.m1m3_setpoints_are_stale = True
                     self.log.debug("Waiting for dome open.")
                     await self.delay_controller.wait_for_open(self.dome_model)
                     self.log.debug("Dome has been opened.")
