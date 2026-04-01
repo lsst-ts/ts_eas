@@ -30,20 +30,8 @@ import yaml
 from astropy.time import Time
 
 from lsst.ts import salobj, utils
+from lsst.ts.xml.enums.EAS import AHU
 from lsst.ts.xml.enums.HVAC import DeviceId
-
-# TODO: OSW-2022 remove this fallback when it becomes available from ts_xml.
-try:
-    from lsst.ts.xml.enums.EAS import AHU
-except ImportError:
-    import enum
-
-    class AHU(enum.IntEnum):  # type: ignore[no-redef]
-        airHandlingUnit01Dome = 1
-        airHandlingUnit02Dome = 2
-        airHandlingUnit03Dome = 3
-        airHandlingUnit04Dome = 4
-
 
 from .cmdwrapper import close_command_tasks, command_wrapper
 from .diurnal_timer import DiurnalTimer
