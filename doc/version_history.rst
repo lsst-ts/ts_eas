@@ -1,3 +1,22 @@
+v0.14.0 (2026-04-01)
+====================
+
+New Features
+------------
+
+- Added M1M3 and topend closedatnite and HVAC params. (`OSW-1372 <https://rubinobs.atlassian.net//browse/OSW-1372>`_)
+- Made active AHUs an EAS configuration. (`OSW-1999 <https://rubinobs.atlassian.net//browse/OSW-1999>`_)
+- Updated EAS to use the renamed HVAC enumeration entries. (`OSW-2085 <https://rubinobs.atlassian.net//browse/OSW-2085>`_)
+
+
+Bug Fixes
+---------
+
+- Added prevention of multiple simultaneous commands to a remote. (`OSW-1906 <https://rubinobs.atlassian.net//browse/OSW-1906>`_)
+- Fixed documentation build. (`OSW-1906 <https://rubinobs.atlassian.net//browse/OSW-1906>`_)
+- Re-raise CancelledError when it originates externally. (`OSW-1906 <https://rubinobs.atlassian.net//browse/OSW-1906>`_)
+
+
 v0.13.0 (2026-03-02)
 ====================
 
