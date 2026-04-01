@@ -21,6 +21,7 @@
 
 import asyncio
 import logging
+import math
 import typing
 import unittest
 from collections import deque
@@ -82,6 +83,7 @@ class MTMountMock(salobj.BaseCsc):
 class WeatherModelMock:
     def __init__(self, last_twilight_temperature: float) -> None:
         self.last_twilight_temperature = last_twilight_temperature
+        self.current_temperature: float | None = 10
         self.current_indoor_temperature: float | None = 10
 
     async def get_last_twilight_temperature(self) -> float:
@@ -103,14 +105,20 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         self,
         indoor_temperature: float | None = 10,
         signal_sunrise: bool = False,
+        night: bool = False,
+        dome_closed: bool = False,
+        run_monitor: bool = True,
         **model_args: typing.Any,
     ) -> tuple[float | None, float | None, float | None, list[float] | None]:
         self.diurnal_timer = eas.diurnal_timer.DiurnalTimer()
         self.diurnal_timer.is_running = True
+        self.diurnal_timer.is_night = lambda _: night
 
         self.weather_model = WeatherModelMock(self.last_twilight_temperature)
+        self.weather_model.current_temperature = indoor_temperature
         self.weather_model.current_indoor_temperature = indoor_temperature
-        self.dome_model = DomeModelMock(is_closed=False)
+        self.dome_model = DomeModelMock(is_closed=dome_closed)
+        cadence = 10 if run_monitor else STD_SLEEP
 
         async with (
             M1M3TSMock() as mock_m1m3ts,
@@ -132,7 +140,11 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 glycol_setpoint_delta=model_args["glycol_setpoint_delta"],
                 heater_setpoint_delta=model_args["heater_setpoint_delta"],
                 top_end_setpoint_delta=model_args["top_end_setpoint_delta"],
-                m1m3_setpoint_cadence=10,
+                m1m3_extra_delta_closedatnite=model_args.get("m1m3_extra_delta_closedatnite", 0.0),
+                top_end_setpoint_delta_closedatnite=model_args.get(
+                    "top_end_setpoint_delta_closedatnite", model_args["top_end_setpoint_delta"]
+                ),
+                m1m3_setpoint_cadence=cadence,
                 setpoint_deadband_heating=0,
                 setpoint_deadband_cooling=0,
                 maximum_heating_rate=100,
@@ -149,22 +161,29 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 m1m3ts_delay_mode=m1m3ts_delay_mode,
                 features_to_disable=model_args["features_to_disable"],
             )
-            monitor_task = asyncio.create_task(self.tma_model.monitor())
+            if run_monitor:
+                model_task = asyncio.create_task(self.tma_model.monitor())
+            else:
+                model_task = asyncio.create_task(self.tma_model.apply_setpoint_at_night())
 
-            await asyncio.sleep(15)
+            await asyncio.sleep(2 * cadence)
 
             if signal_sunrise:
+                self.diurnal_timer.is_night = lambda _: False
+                self.dome_model.is_closed = True
                 async with self.diurnal_timer.sunrise_condition:
                     self.diurnal_timer.sunrise_condition.notify_all()
-                await asyncio.sleep(1)
-            else:
-                await asyncio.sleep(20)
 
-            monitor_task.cancel()
+            await asyncio.sleep(2 * cadence)
+
+            model_task.cancel()
             try:
-                await monitor_task
+                await asyncio.wait_for(model_task, timeout=STD_TIMEOUT)
             except asyncio.CancelledError:
                 pass
+            except TimeoutError:
+                task_name = "TmaModel.monitor" if run_monitor else "TmaModel.apply_setpoint_at_night"
+                self.fail(f"{task_name} did not stop before timeout")
 
             return (
                 mock_m1m3ts.glycol_setpoint,
@@ -172,6 +191,94 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 mock_mtmount.top_end_setpoint,
                 mock_m1m3ts.fan_rpm,
             )
+
+    async def test_apply_setpoint_at_night(self) -> None:
+        """Nighttime closed-dome control should mirror the HVAC behavior."""
+
+        class SubtestCase(typing.TypedDict):
+            name: str
+            night: bool
+            dome_closed: bool
+            indoor_temperature: float
+            expect_m1m3: bool
+            expect_top_end: bool
+
+        scenarios: list[SubtestCase] = [
+            {
+                "name": "night closed apply setpoints",
+                "night": True,
+                "dome_closed": True,
+                "indoor_temperature": 6.0,
+                "expect_m1m3": True,
+                "expect_top_end": True,
+            },
+            {
+                "name": "night open no setpoints",
+                "night": True,
+                "dome_closed": False,
+                "indoor_temperature": 9.0,
+                "expect_m1m3": False,
+                "expect_top_end": False,
+            },
+            {
+                "name": "day closed no setpoints",
+                "night": False,
+                "dome_closed": True,
+                "indoor_temperature": 12.0,
+                "expect_m1m3": False,
+                "expect_top_end": False,
+            },
+            {
+                "name": "night closed NaN temp no setpoints",
+                "night": True,
+                "dome_closed": True,
+                "indoor_temperature": math.nan,
+                "expect_m1m3": False,
+                "expect_top_end": False,
+            },
+        ]
+
+        glycol_setpoint_delta = -2.0
+        heater_setpoint_delta = -1.0
+        top_end_setpoint_delta = -0.5
+        m1m3_extra_delta_closedatnite = 0.5
+        top_end_setpoint_delta_closedatnite = -1.5
+
+        for case in scenarios:
+            with self.subTest(case=case["name"]):
+                glycol_setpoint, heater_setpoint, top_end_setpoint, _ = await self.run_with_parameters(
+                    indoor_temperature=case["indoor_temperature"],
+                    night=case["night"],
+                    dome_closed=case["dome_closed"],
+                    run_monitor=False,
+                    glycol_setpoint_delta=glycol_setpoint_delta,
+                    heater_setpoint_delta=heater_setpoint_delta,
+                    top_end_setpoint_delta=top_end_setpoint_delta,
+                    m1m3_extra_delta_closedatnite=m1m3_extra_delta_closedatnite,
+                    top_end_setpoint_delta_closedatnite=top_end_setpoint_delta_closedatnite,
+                    features_to_disable=[],
+                )
+
+                if case["expect_m1m3"]:
+                    self.assertEqual(
+                        glycol_setpoint,
+                        case["indoor_temperature"] + glycol_setpoint_delta + m1m3_extra_delta_closedatnite,
+                    )
+                    self.assertEqual(
+                        heater_setpoint,
+                        case["indoor_temperature"] + heater_setpoint_delta + m1m3_extra_delta_closedatnite,
+                    )
+                else:
+                    self.assertIsNone(glycol_setpoint)
+                    self.assertIsNone(heater_setpoint)
+
+                if case["expect_top_end"]:
+                    self.assertEqual(
+                        top_end_setpoint,
+                        case["indoor_temperature"] + top_end_setpoint_delta_closedatnite,
+                    )
+                else:
+                    self.assertIsNone(top_end_setpoint)
 
     async def test_m1m3ts_applysetpoints(self) -> None:
         """M1M3TS.applySetpoint should be called at sunrise."""
@@ -316,6 +423,8 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 glycol_setpoint_delta=-2,
                 heater_setpoint_delta=heater_setpoint_delta,
                 top_end_setpoint_delta=-1,
+                m1m3_extra_delta_closedatnite=0.0,
+                top_end_setpoint_delta_closedatnite=-1,
                 m1m3_setpoint_cadence=10,
                 setpoint_deadband_heating=0,
                 setpoint_deadband_cooling=0,
@@ -379,8 +488,8 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
 
     async def test_delay_policy_time_delay(self) -> None:
         """Delay policy should gate tracking until the time delay elapses."""
-        delay_seconds = 5.0
         cadence = 0.05
+        delay_seconds = 10 * cadence
 
         async with (
             M1M3TSMock() as mock_m1m3ts,
@@ -408,6 +517,8 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 glycol_setpoint_delta=-2,
                 heater_setpoint_delta=0.0,
                 top_end_setpoint_delta=-1,
+                m1m3_extra_delta_closedatnite=0.0,
+                top_end_setpoint_delta_closedatnite=-1,
                 m1m3_setpoint_cadence=cadence,
                 setpoint_deadband_heating=0,
                 setpoint_deadband_cooling=0,
@@ -431,8 +542,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
 
             # Delay controller has registered an open event.
             self.assertEqual(len(dome_model.on_open), 1)
-            event, delay = dome_model.on_open.popleft()
-            self.assertEqual(delay, 0.0)
+            event, _ = dome_model.on_open.popleft()
 
             # Fire the event, but dome is still closed.
             # (This occurs if the dome is re-closed before the delay time.)
@@ -443,8 +553,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
 
             # TmaModel should have queued up a new event.
             self.assertEqual(len(dome_model.on_open), 1)
-            event, delay = dome_model.on_open.popleft()
-            self.assertEqual(delay, 0.0)
+            event, _ = dome_model.on_open.popleft()
 
             # Fire the event, but this time the dome is open.
             dome_model.is_closed = False
@@ -454,11 +563,12 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(mock_m1m3ts.glycol_setpoint)
 
             # After the delay elapses, the controller should allow tracking.
-            await asyncio.sleep(delay_seconds + cadence)
+            await asyncio.sleep(2 * (cadence + delay_seconds))
 
             self.assertIsNotNone(mock_m1m3ts.heater_setpoint)
             self.assertIsNotNone(mock_m1m3ts.glycol_setpoint)
 
+            await tma_model.close()
             task.cancel()
             done, pending = await asyncio.wait({task}, timeout=STD_TIMEOUT)
             if pending:

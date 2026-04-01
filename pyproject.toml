@@ -7,7 +7,7 @@ name = "ts_eas"
 description = "Interface to control the EAS system."
 license = { text = "GPL" }
 classifiers = [ "Programming Language :: Python :: 3" ]
-urls = { documentation = "https://ts-eas.lsst.io", repository = "https://github.com/lsst-ts/ts_eas" }
+urls = { documentation = "https://ts-eas.lsst.io", source_code = "https://github.com/lsst-ts/ts_eas" }
 dynamic = [ "version" ]
 
 [tool.setuptools.dynamic]

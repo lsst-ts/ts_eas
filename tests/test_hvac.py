@@ -22,10 +22,13 @@
 import asyncio
 import logging
 import math
+import types
 import unittest
+from pathlib import Path
 from typing import NotRequired, TypedDict
 
 import astropy
+import yaml
 
 from lsst.ts import salobj
 from lsst.ts.eas import hvac_model
@@ -33,6 +36,7 @@ from lsst.ts.xml.enums.HVAC import DeviceId
 
 STD_TIMEOUT = 10
 STD_SLEEP = 2
+CONFIG_PATH = Path(__file__).parent / "config"
 
 
 class WeatherModelMock:
@@ -138,6 +142,27 @@ class HvacMock(salobj.BaseCsc):
 
 
 class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
+    def get_config(self, filename: str) -> types.SimpleNamespace:
+        """Get a config dict from tests/data.
+
+        This should always be a good config,
+        because validation is done by the ESS CSC,
+        not the data client.
+
+        Parameters
+        ----------
+        filename : `str` or `pathlib.Path`
+            Name of config file, including ".yaml" suffix.
+
+        Returns
+        -------
+        config : types.SimpleNamespace
+            The config dict.
+        """
+        with open(CONFIG_PATH / filename, "r") as f:
+            config_dict = yaml.safe_load(f.read())
+        return types.SimpleNamespace(**config_dict)
+
     async def asyncSetUp(self) -> None:
         await super().asyncSetUp()
 
@@ -159,9 +184,11 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             nightly_maximum_indoor_dew_point=-10.0,
         )
 
-    def make_model(self, **overrides: float | list[str] | None) -> hvac_model.HvacModel:
+    def make_model(self, **overrides: float | list[int] | list[str] | None) -> hvac_model.HvacModel:
         params = dict(
             ahu_setpoint_delta=0.0,
+            ahu_setpoint_delta_closedatnite=0.0,
+            ahu_control=[1, 2, 3, 4],
             setpoint_lower_limit=6.0,
             wind_threshold=10.0,
             vec04_hold_time=0.0,
@@ -299,11 +326,11 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
 
         # HVAC setpoints should match model setpoints.
         self.assertAlmostEqual(
-            self.hvac.chiller_setpoints[DeviceId.chiller01P01],
+            self.hvac.chiller_setpoints[DeviceId.coldGlycolChiller01],
             model.glycol_setpoint1,
         )
         self.assertAlmostEqual(
-            self.hvac.chiller_setpoints[DeviceId.chiller02P01],
+            self.hvac.chiller_setpoints[DeviceId.coldGlycolChiller02],
             model.glycol_setpoint2,
         )
 
@@ -352,8 +379,8 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         # `current_indoor_temperature` in the weather model.
         average = sum(self.hvac.chiller_setpoints.values()) / len(self.hvac.chiller_setpoints)
         difference = (
-            self.hvac.chiller_setpoints[DeviceId.chiller01P01]
-            - self.hvac.chiller_setpoints[DeviceId.chiller02P01]
+            self.hvac.chiller_setpoints[DeviceId.coldGlycolChiller01]
+            - self.hvac.chiller_setpoints[DeviceId.coldGlycolChiller02]
         )
         self.assertAlmostEqual(difference, model.glycol_setpoints_delta)
         self.assertAlmostEqual(
@@ -377,11 +404,11 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
 
         # Setpoints should NOT be recalculated
         self.assertAlmostEqual(
-            self.hvac.chiller_setpoints[DeviceId.chiller01P01],
+            self.hvac.chiller_setpoints[DeviceId.coldGlycolChiller01],
             initial_setpoint1,
         )
         self.assertAlmostEqual(
-            self.hvac.chiller_setpoints[DeviceId.chiller02P01],
+            self.hvac.chiller_setpoints[DeviceId.coldGlycolChiller02],
             initial_setpoint2,
         )
 
@@ -397,7 +424,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         model = self.make_model()
         task = asyncio.create_task(model.control_ahus_and_vec04())
 
-        await asyncio.sleep(STD_SLEEP)  # Allow enough time for 5 SAL commands.
+        await asyncio.sleep(5 * STD_SLEEP)  # Allow enough time for 5 SAL commands.
 
         task.cancel()
         try:
@@ -406,14 +433,14 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             pass  # expected
 
         # VEC-04 was enabled
-        self.assertIn(DeviceId.loadingBayFan04P04, self.hvac.enable_called)
-        self.assertNotIn(DeviceId.loadingBayFan04P04, self.hvac.disable_called)
+        self.assertIn(DeviceId.airExtractionFan04Dome, self.hvac.enable_called)
+        self.assertNotIn(DeviceId.airExtractionFan04Dome, self.hvac.disable_called)
 
         for ahu in (
-            DeviceId.lowerAHU01P05,
-            DeviceId.lowerAHU02P05,
-            DeviceId.lowerAHU03P05,
-            DeviceId.lowerAHU04P05,
+            DeviceId.airHandlingUnit01Dome,
+            DeviceId.airHandlingUnit02Dome,
+            DeviceId.airHandlingUnit03Dome,
+            DeviceId.airHandlingUnit04Dome,
         ):
             # All 4 AHUs should have been disabled when dome opened
             self.assertIn(ahu, self.hvac.disable_called)
@@ -432,13 +459,13 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
 
         # Let it enable VEC-04
         await asyncio.sleep(STD_SLEEP)
-        self.assertIn(DeviceId.loadingBayFan04P04, self.hvac.enable_called)
-        self.assertNotIn(DeviceId.loadingBayFan04P04, self.hvac.disable_called)
+        self.assertIn(DeviceId.airExtractionFan04Dome, self.hvac.enable_called)
+        self.assertNotIn(DeviceId.airExtractionFan04Dome, self.hvac.disable_called)
 
         # Wind rises above threshold --> should disable VEC-04
         self.weather.average_windspeed = 12.0
         await asyncio.sleep(STD_SLEEP)
-        self.assertIn(DeviceId.loadingBayFan04P04, self.hvac.disable_called)
+        self.assertIn(DeviceId.airExtractionFan04Dome, self.hvac.disable_called)
 
         task.cancel()
         try:
@@ -459,10 +486,10 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(STD_SLEEP)
 
         for ahu in (
-            DeviceId.lowerAHU01P05,
-            DeviceId.lowerAHU02P05,
-            DeviceId.lowerAHU03P05,
-            DeviceId.lowerAHU04P05,
+            DeviceId.airHandlingUnit01Dome,
+            DeviceId.airHandlingUnit02Dome,
+            DeviceId.airHandlingUnit03Dome,
+            DeviceId.airHandlingUnit04Dome,
         ):
             # AHUs not enabled because dome is open.
             self.assertNotIn(ahu, self.hvac.enable_called)
@@ -478,16 +505,43 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             pass  # expected
 
         # VEC-04 forced OFF on close
-        self.assertIn(DeviceId.loadingBayFan04P04, self.hvac.disable_called)
+        self.assertIn(DeviceId.airExtractionFan04Dome, self.hvac.disable_called)
 
         for ahu in (
-            DeviceId.lowerAHU01P05,
-            DeviceId.lowerAHU02P05,
-            DeviceId.lowerAHU03P05,
-            DeviceId.lowerAHU04P05,
+            DeviceId.airHandlingUnit01Dome,
+            DeviceId.airHandlingUnit02Dome,
+            DeviceId.airHandlingUnit03Dome,
+            DeviceId.airHandlingUnit04Dome,
         ):
             # AHUs enabled on close
             self.assertIn(ahu, self.hvac.enable_called)
+
+    async def test_ahu_control_limits_shutter_commands(self) -> None:
+        """Only configured AHUs should be enabled and disabled."""
+        hvac_model.HVAC_SLEEP_TIME = STD_SLEEP
+        self.dome.is_closed = False
+        self.weather.average_windspeed = 3.0
+
+        model = self.make_model(ahu_control=[2, 4])
+        task = asyncio.create_task(model.control_ahus_and_vec04())
+
+        await asyncio.sleep(STD_SLEEP)
+        self.dome.is_closed = True
+        await asyncio.sleep(STD_SLEEP)
+
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass  # expected
+
+        for ahu in (DeviceId.airHandlingUnit02Dome, DeviceId.airHandlingUnit04Dome):
+            self.assertIn(ahu, self.hvac.disable_called)
+            self.assertIn(ahu, self.hvac.enable_called)
+
+        for ahu in (DeviceId.airHandlingUnit01Dome, DeviceId.airHandlingUnit03Dome):
+            self.assertNotIn(ahu, self.hvac.disable_called)
+            self.assertNotIn(ahu, self.hvac.enable_called)
 
     async def test_vec04_disabled(self) -> None:
         """VEC04 commands are not sent if 'vec04' in `features_to_disable`."""
@@ -505,8 +559,8 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         except asyncio.CancelledError:
             pass  # expected
 
-        self.assertNotIn(DeviceId.loadingBayFan04P04, self.hvac.enable_called)
-        self.assertNotIn(DeviceId.loadingBayFan04P04, self.hvac.disable_called)
+        self.assertNotIn(DeviceId.airExtractionFan04Dome, self.hvac.enable_called)
+        self.assertNotIn(DeviceId.airExtractionFan04Dome, self.hvac.disable_called)
 
     async def test_ahu_disabled(self) -> None:
         """AHU commands are not sent if 'ahu' in `features_to_disable`."""
@@ -527,10 +581,10 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             pass  # expected
 
         for ahu in (
-            DeviceId.lowerAHU01P05,
-            DeviceId.lowerAHU02P05,
-            DeviceId.lowerAHU03P05,
-            DeviceId.lowerAHU04P05,
+            DeviceId.airHandlingUnit01Dome,
+            DeviceId.airHandlingUnit02Dome,
+            DeviceId.airHandlingUnit03Dome,
+            DeviceId.airHandlingUnit04Dome,
         ):
             # No commands sent to lower AHUs
             self.assertNotIn(ahu, self.hvac.enable_called)
@@ -550,10 +604,10 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 "last_twilight": 10.0,
                 "features_to_disable": [],
                 "expect_setpoints": {
-                    DeviceId.lowerAHU01P05: 10.0,
-                    DeviceId.lowerAHU02P05: 10.0,
-                    DeviceId.lowerAHU03P05: 10.0,
-                    DeviceId.lowerAHU04P05: 10.0,
+                    DeviceId.airHandlingUnit01Dome: 10.0,
+                    DeviceId.airHandlingUnit02Dome: 10.0,
+                    DeviceId.airHandlingUnit03Dome: 10.0,
+                    DeviceId.airHandlingUnit04Dome: 10.0,
                 },
             },
             {
@@ -561,10 +615,10 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 "last_twilight": 4.0,
                 "features_to_disable": [],
                 "expect_setpoints": {
-                    DeviceId.lowerAHU01P05: 6.0,
-                    DeviceId.lowerAHU02P05: 6.0,
-                    DeviceId.lowerAHU03P05: 6.0,
-                    DeviceId.lowerAHU04P05: 6.0,
+                    DeviceId.airHandlingUnit01Dome: 6.0,
+                    DeviceId.airHandlingUnit02Dome: 6.0,
+                    DeviceId.airHandlingUnit03Dome: 6.0,
+                    DeviceId.airHandlingUnit04Dome: 6.0,
                 },
             },
             {
@@ -573,10 +627,10 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 "features_to_disable": [],
                 "ahu_setpoint_delta": -1.0,
                 "expect_setpoints": {
-                    DeviceId.lowerAHU01P05: 8.0,
-                    DeviceId.lowerAHU02P05: 8.0,
-                    DeviceId.lowerAHU03P05: 8.0,
-                    DeviceId.lowerAHU04P05: 8.0,
+                    DeviceId.airHandlingUnit01Dome: 8.0,
+                    DeviceId.airHandlingUnit02Dome: 8.0,
+                    DeviceId.airHandlingUnit03Dome: 8.0,
+                    DeviceId.airHandlingUnit04Dome: 8.0,
                 },
             },
             {
@@ -618,6 +672,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             night: bool
             closed: bool
             ahu_setpoint_delta: NotRequired[float]
+            ahu_setpoint_delta_closedatnite: NotRequired[float]
             temp: float
             expect_setpoints: dict[str, float]
 
@@ -630,10 +685,10 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 "expect_setpoints": {
                     ahu: 6.0
                     for ahu in (
-                        DeviceId.lowerAHU01P05,
-                        DeviceId.lowerAHU02P05,
-                        DeviceId.lowerAHU03P05,
-                        DeviceId.lowerAHU04P05,
+                        DeviceId.airHandlingUnit01Dome,
+                        DeviceId.airHandlingUnit02Dome,
+                        DeviceId.airHandlingUnit03Dome,
+                        DeviceId.airHandlingUnit04Dome,
                     )
                 },
             },
@@ -642,14 +697,15 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 "night": True,
                 "closed": True,
                 "temp": 9.0,
-                "ahu_setpoint_delta": -1.0,
+                "ahu_setpoint_delta": 0.0,
+                "ahu_setpoint_delta_closedatnite": -1.5,
                 "expect_setpoints": {
-                    ahu: 8.0
+                    ahu: 7.5
                     for ahu in (
-                        DeviceId.lowerAHU01P05,
-                        DeviceId.lowerAHU02P05,
-                        DeviceId.lowerAHU03P05,
-                        DeviceId.lowerAHU04P05,
+                        DeviceId.airHandlingUnit01Dome,
+                        DeviceId.airHandlingUnit02Dome,
+                        DeviceId.airHandlingUnit03Dome,
+                        DeviceId.airHandlingUnit04Dome,
                     )
                 },
             },
@@ -683,7 +739,10 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 self.dome.is_closed = case["closed"]
                 self.weather.current_temperature = case["temp"]
 
-                model = self.make_model(ahu_setpoint_delta=case.get("ahu_setpoint_delta", 0.0))
+                model = self.make_model(
+                    ahu_setpoint_delta=case.get("ahu_setpoint_delta", 0.0),
+                    ahu_setpoint_delta_closedatnite=case.get("ahu_setpoint_delta_closedatnite", 0.0),
+                )
                 task = asyncio.create_task(model.apply_setpoint_at_night())
 
                 await asyncio.sleep(STD_SLEEP)
@@ -693,6 +752,18 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self.hvac.ahu_setpoints, case["expect_setpoints"])
                 # reset for next scenario
                 self.hvac.ahu_setpoints.clear()
+
+    def test_config_schema_ahu_control(self) -> None:
+        validator = salobj.DefaultingValidator(hvac_model.HvacModel.get_config_schema())
+        scenarios = [
+            ("hvac_ahu_control_default.yaml", [1, 2, 3, 4]),
+            ("hvac_ahu_control_custom.yaml", [1, 3]),
+        ]
+
+        for filename, expected_ahu_control in scenarios:
+            with self.subTest(config_path=filename):
+                validated = validator.validate(vars(self.get_config(filename)))
+                self.assertEqual(validated["ahu_control"], expected_ahu_control)
 
     def basic_make_csc(
         self,

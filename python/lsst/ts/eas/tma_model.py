@@ -77,6 +77,12 @@ class TmaModel:
     top_end_setpoint_delta : `float`
         The difference between the indoor (ESS:112) temperature and the
         setpoint to apply for the top end, via MTMount.setThermal.
+    m1m3_extra_delta_closedatnite : `float`
+        Extra temperature offset (°C) applied during nighttime closed-dome
+        operation on top of the configured glycol and heater setpoint deltas.
+    top_end_setpoint_delta_closedatnite : `float`
+        The difference between the indoor temperature and the top-end
+        setpoint during nighttime closed-dome operation.
     m1m3_setpoint_cadence : `float`
         The cadence at which applySetpoints commands should be sent to
         MTM1M3TS (seconds).
@@ -121,6 +127,8 @@ class TmaModel:
         glycol_setpoint_delta: float,
         heater_setpoint_delta: float,
         top_end_setpoint_delta: float,
+        m1m3_extra_delta_closedatnite: float,
+        top_end_setpoint_delta_closedatnite: float,
         m1m3_setpoint_cadence: float,
         m1m3ts_delay_mode: dict,
         setpoint_deadband_heating: float,
@@ -150,6 +158,8 @@ class TmaModel:
         self.glycol_setpoint_delta = glycol_setpoint_delta
         self.heater_setpoint_delta = heater_setpoint_delta
         self.top_end_setpoint_delta = top_end_setpoint_delta
+        self.m1m3_extra_delta_closedatnite = m1m3_extra_delta_closedatnite
+        self.top_end_setpoint_delta_closedatnite = top_end_setpoint_delta_closedatnite
         self.m1m3_setpoint_cadence = m1m3_setpoint_cadence
         self.m1m3ts_delay_mode = m1m3ts_delay_mode
         self.setpoint_deadband_heating = setpoint_deadband_heating
@@ -200,6 +210,18 @@ properties:
     default: -1.0
   top_end_setpoint_delta:
     description: Difference (°C) between the ambient temperature and MTMount thermal setpoint.
+    type: number
+    default: -1.0
+  m1m3_extra_delta_closedatnite:
+    description: >-
+      Additional difference (°C) applied during nighttime closed-dome operation
+      on top of the configured M1M3TS glycol and heater setpoint deltas.
+    type: number
+    default: 0.0
+  top_end_setpoint_delta_closedatnite:
+    description: >-
+      Difference (°C) between the ambient temperature and MTMount thermal setpoint
+      during nighttime closed-dome operation.
     type: number
     default: -1.0
   m1m3_setpoint_cadence:
@@ -322,6 +344,8 @@ required:
   - glycol_setpoint_delta
   - heater_setpoint_delta
   - top_end_setpoint_delta
+  - m1m3_extra_delta_closedatnite
+  - top_end_setpoint_delta_closedatnite
   - m1m3_setpoint_cadence
   - m1m3ts_delay_mode
   - setpoint_deadband_heating
@@ -377,6 +401,7 @@ additionalProperties: false
         try:
             await asyncio.gather(
                 self.follow_ess_indoor(),
+                self.apply_setpoint_at_night(),
                 self.wait_for_sunrise(),
             )
         finally:
@@ -391,10 +416,15 @@ additionalProperties: false
 
         self.log.debug("TmaModel.monitor closing...")
 
-    async def apply_setpoints(self, setpoint: float) -> None:
+    async def apply_setpoints(self, setpoint: float, *, delta_adjustment: float = 0.0) -> None:
         if "m1m3ts" not in self.features_to_disable:
-            glycol_setpoint = setpoint + self.glycol_setpoint_delta + self.glycol_setpoint_delta_adjustment
-            heaters_setpoint = setpoint + self.heater_setpoint_delta
+            glycol_setpoint = (
+                setpoint
+                + self.glycol_setpoint_delta
+                + self.glycol_setpoint_delta_adjustment
+                + delta_adjustment
+            )
+            heaters_setpoint = setpoint + self.heater_setpoint_delta + delta_adjustment
             self.log.debug(f"Setting MTM1MTS: {glycol_setpoint=:.2f}°C {heaters_setpoint=:.2f}°C")
             await self.send_apply_setpoints(
                 glycol_setpoint=glycol_setpoint,
@@ -614,6 +644,10 @@ additionalProperties: false
         while self.diurnal_timer.is_running:
             async with self.diurnal_timer.sunrise_condition:
                 await self.diurnal_timer.sunrise_condition.wait()
+
+                # Avoid stepping on setpoints from the closedatnite coroutine.
+                await asyncio.sleep(self.m1m3_setpoint_cadence)
+
                 last_twilight_temperature = await self.weather_model.get_last_twilight_temperature()
                 if self.diurnal_timer.is_running and last_twilight_temperature is not None:
                     self.log.info(
@@ -629,6 +663,49 @@ additionalProperties: false
                             top_end_chiller_setpoint=chiller_setpoint,
                             top_end_chiller_state=ThermalCommandState.ON,
                         )
+
+    async def apply_setpoint_at_night(self) -> None:
+        """Control M1M3TS and top-end setpoints during the night.
+
+        At night time (defined by `DiurnalTimer.is_night`) the M1M3TS and
+        top-end setpoints should be applied based on the current outdoor
+        temperature if the dome is closed. If the dome is open, this method
+        does not command either subsystem.
+        """
+        warned_no_temperature = False
+
+        while self.diurnal_timer.is_running:
+            # This coroutine should idle if "require_dome_open" is selected.
+            # Otherwise, there would be a conflict between this coroutine
+            # and the one that controls the setpoints based on an indoor
+            # temperature.
+            if "closedatnite" in self.features_to_disable or "require_dome_open" in self.features_to_disable:
+                await asyncio.sleep(self.m1m3_setpoint_cadence)
+                continue
+
+            if self.diurnal_timer.is_night(Time.now()) and self.dome_model.is_closed:
+                outdoor_temperature = self.weather_model.current_temperature
+
+                if outdoor_temperature is None or math.isnan(outdoor_temperature):
+                    if not warned_no_temperature:
+                        self.log.warning("Failed to collect a temperature sample for nighttime TMA setpoint.")
+                        warned_no_temperature = True
+                else:
+                    warned_no_temperature = False
+                    await self.apply_setpoints(
+                        outdoor_temperature,
+                        delta_adjustment=self.m1m3_extra_delta_closedatnite,
+                    )
+
+                    if "top_end" not in self.features_to_disable:
+                        await self.send_set_thermal(
+                            top_end_chiller_setpoint=(
+                                outdoor_temperature + self.top_end_setpoint_delta_closedatnite
+                            ),
+                            top_end_chiller_state=ThermalCommandState.ON,
+                        )
+
+            await asyncio.sleep(self.m1m3_setpoint_cadence)
 
     async def close(self) -> None:
         """Cancel any in-flight command tasks."""

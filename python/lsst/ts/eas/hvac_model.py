@@ -32,6 +32,19 @@ from astropy.time import Time
 from lsst.ts import salobj, utils
 from lsst.ts.xml.enums.HVAC import DeviceId
 
+# TODO: OSW-2022 remove this fallback when it becomes available from ts_xml.
+try:
+    from lsst.ts.xml.enums.EAS import AHU
+except ImportError:
+    import enum
+
+    class AHU(enum.IntEnum):  # type: ignore[no-redef]
+        airHandlingUnit01Dome = 1
+        airHandlingUnit02Dome = 2
+        airHandlingUnit03Dome = 3
+        airHandlingUnit04Dome = 4
+
+
 from .cmdwrapper import close_command_tasks, command_wrapper
 from .diurnal_timer import DiurnalTimer
 from .dome_model import DomeModel
@@ -59,6 +72,13 @@ class HvacModel:
         The offset that will be added to the measured temperature in
         selecting a setpoint for the HVAC air handling units (AHUs/UMAs)
         measured in °C.
+    ahu_setpoint_delta_closedatnite : `float`
+        The offset that will be added to the measured temperature in
+        selecting a setpoint for the HVAC air handling units (AHUs/UMAs)
+        during nighttime closed-dome operation, measured in °C.
+    ahu_control : `list`[`int`]
+        The AHU numbers that EAS is allowed to control. Values correspond
+        to AHUs 1 through 4.
     setpoint_lower_limit : `float`
         The minimum allowed setpoint for thermal control. If a lower setpoint
         than this is indicated from the ESS temperature readings, this setpoint
@@ -111,6 +131,8 @@ class HvacModel:
         weather_model: WeatherModel,
         hvac_remote: salobj.Remote,
         ahu_setpoint_delta: float,
+        ahu_setpoint_delta_closedatnite: float,
+        ahu_control: list[int],
         setpoint_lower_limit: float,
         wind_threshold: float,
         vec04_hold_time: float,
@@ -136,6 +158,8 @@ class HvacModel:
         self.dome_model = dome_model
         self.weather_model = weather_model
         self.ahu_setpoint_delta = ahu_setpoint_delta
+        self.ahu_setpoint_delta_closedatnite = ahu_setpoint_delta_closedatnite
+        self.ahu_control = ahu_control
         self.setpoint_lower_limit = setpoint_lower_limit
         self.wind_threshold = wind_threshold
         self.vec04_hold_time = vec04_hold_time
@@ -157,6 +181,15 @@ class HvacModel:
         # The remote
         self.hvac_remote = hvac_remote
 
+    def get_controlled_ahus(self) -> tuple[DeviceId, ...]:
+        """Return the AHU device IDs configured for EAS control.
+
+        Returns
+        -------
+        device_tuple : `tuple`[`DeviceId`, ...]
+        """
+        return tuple(DeviceId[AHU(ahu).name] for ahu in self.ahu_control)
+
     @classmethod
     def get_config_schema(cls) -> str:
         return yaml.safe_load(
@@ -172,6 +205,24 @@ properties:
       The offset that will be applied to the measured temperature in
       selecting a setpoint for the HVAC air handling units (AHUs/UMAs)
       measured in °C.
+  ahu_setpoint_delta_closedatnite:
+    type: number
+    default: -1.0
+    description: >-
+      The offset that will be applied to the measured temperature in
+      selecting a setpoint for the HVAC air handling units (AHUs/UMAs)
+      during nighttime closed-dome operation measured in °C.
+  ahu_control:
+    type: array
+    default: [1, 2, 3, 4]
+    description: >-
+      AHU numbers that EAS is allowed to control. These numbers refer
+      to the devices `airHandlingUnit01Dome` - `airHandlingUnit04Dome` in
+      :class:`~lsst.ts.xml.enums.HVAC.DeviceId`.
+    items:
+      type: integer
+      enum: [1, 2, 3, 4]
+    uniqueItems: true
   setpoint_lower_limit:
     type: number
     default: 6.0
@@ -328,29 +379,24 @@ additionalProperties: false
                     self.last_vec04_time = utils.current_tai()
                     if wind_threshold:
                         self.log.info(f"Turning on VEC-04 fan! {change_message}")
-                        enable_device_list.append(DeviceId.loadingBayFan04P04)
+                        enable_device_list.append(DeviceId.airExtractionFan04Dome)
                     else:
                         self.log.info(f"Turning off VEC-04 fan! {change_message}")
-                        disable_device_list.append(DeviceId.loadingBayFan04P04)
+                        disable_device_list.append(DeviceId.airExtractionFan04Dome)
 
             if shutter_closed != cached_shutter_closed:
                 cached_shutter_closed = shutter_closed
-                ahus = (
-                    DeviceId.lowerAHU04P05,
-                    DeviceId.lowerAHU03P05,
-                    DeviceId.lowerAHU02P05,
-                    DeviceId.lowerAHU01P05,
-                )
+                ahus = self.get_controlled_ahus()
                 if shutter_closed:
                     if "ahu" not in self.features_to_disable:
-                        # Enable the four AHUs
+                        # Enable the configured AHUs
                         self.log.info("Enabling HVAC AHUs!")
                         enable_device_list.extend(ahus)
 
                     if "vec04" not in self.features_to_disable:
                         # Disable the VEC-04 fan
                         self.log.info("Turning off VEC-04 fan!")
-                        disable_device_list.append(DeviceId.loadingBayFan04P04)
+                        disable_device_list.append(DeviceId.airExtractionFan04Dome)
                         self.last_vec04_time = utils.current_tai()
                 else:
                     if "ahu" not in self.features_to_disable:
@@ -392,12 +438,7 @@ additionalProperties: false
                                     "minFanSetpoint": math.nan,
                                     "antiFreezeTemperature": math.nan,
                                 }
-                                for device_id in (
-                                    DeviceId.lowerAHU01P05,
-                                    DeviceId.lowerAHU02P05,
-                                    DeviceId.lowerAHU03P05,
-                                    DeviceId.lowerAHU04P05,
-                                )
+                                for device_id in self.get_controlled_ahus()
                             ]
                         )
 
@@ -535,14 +576,14 @@ additionalProperties: false
                 if self.glycol_setpoint1 is not None:
                     chiller_commands.append(
                         {
-                            "device_id": DeviceId.chiller01P01,
+                            "device_id": DeviceId.coldGlycolChiller01,
                             "activeSetpoint": self.glycol_setpoint1,
                         }
                     )
                 if self.glycol_setpoint2 is not None:
                     chiller_commands.append(
                         {
-                            "device_id": DeviceId.chiller02P01,
+                            "device_id": DeviceId.coldGlycolChiller02,
                             "activeSetpoint": self.glycol_setpoint2,
                         }
                     )
@@ -584,11 +625,11 @@ additionalProperties: false
                 await self.config_chiller(
                     [
                         {
-                            "device_id": DeviceId.chiller01P01,
+                            "device_id": DeviceId.coldGlycolChiller01,
                             "activeSetpoint": self.glycol_setpoint1,
                         },
                         {
-                            "device_id": DeviceId.chiller02P01,
+                            "device_id": DeviceId.coldGlycolChiller02,
                             "activeSetpoint": self.glycol_setpoint2,
                         },
                     ]
@@ -605,13 +646,17 @@ additionalProperties: false
         warned_no_temperature = False
 
         while self.diurnal_timer.is_running:
+            if "closedatnite" in self.features_to_disable:
+                await asyncio.sleep(HVAC_SLEEP_TIME)
+                continue
+
             if self.diurnal_timer.is_night(Time.now()) and self.dome_model.is_closed:
                 if "room_setpoint" in self.features_to_disable:
                     await asyncio.sleep(HVAC_SLEEP_TIME)
                     continue
 
                 setpoint = max(
-                    self.weather_model.current_temperature + self.ahu_setpoint_delta,
+                    self.weather_model.current_temperature + self.ahu_setpoint_delta_closedatnite,
                     self.setpoint_lower_limit,
                 )
                 if math.isnan(setpoint):
@@ -620,7 +665,7 @@ additionalProperties: false
                         warned_no_temperature = True
 
                 else:
-                    # Apply setpoint for each of the 4 AHUs
+                    # Apply setpoint for each configured AHU
                     await self.config_lower_ahu(
                         [
                             {
@@ -630,12 +675,7 @@ additionalProperties: false
                                 "minFanSetpoint": math.nan,
                                 "antiFreezeTemperature": math.nan,
                             }
-                            for device_id in (
-                                DeviceId.lowerAHU01P05,
-                                DeviceId.lowerAHU02P05,
-                                DeviceId.lowerAHU03P05,
-                                DeviceId.lowerAHU04P05,
-                            )
+                            for device_id in self.get_controlled_ahus()
                         ]
                     )
 
