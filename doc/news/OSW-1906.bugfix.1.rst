@@ -1,1 +1,0 @@
-Added prevention of multiple simultaneous commands to a remote.
