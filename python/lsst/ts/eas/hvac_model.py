@@ -546,14 +546,6 @@ additionalProperties: false
                     await asyncio.sleep(HVAC_SLEEP_TIME)
                     continue
 
-                # At night, reset the setpoints and do not control
-                # the glycol.
-                if self.diurnal_timer.is_night(Time.now()):
-                    self.glycol_setpoint1 = None
-                    self.glycol_setpoint2 = None
-                    await asyncio.sleep(HVAC_SLEEP_TIME)
-                    continue
-
                 # After the setpoints are chosen at noon, monitor
                 # the system and adjust setpoints if needed.
                 ambient_temperature = self.weather_model.current_indoor_temperature
