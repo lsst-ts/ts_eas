@@ -76,6 +76,7 @@ class DiurnalTimerMock:
         self.sunrise_condition = asyncio.Condition()
         self.twilight_condition = asyncio.Condition()
         self._twilight_time_override: Time | None = None
+        self.twilight_time: Time | None = None
 
     def is_night(self, time: astropy.time.Time) -> bool:
         return self._night

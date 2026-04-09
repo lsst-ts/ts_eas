@@ -45,7 +45,7 @@ except ImportError:
 
 
 from .cmdwrapper import close_command_tasks, command_wrapper
-from .diurnal_timer import DiurnalTimer
+from .diurnal_timer import DiurnalTimer, get_local_noon_time
 from .dome_model import DomeModel
 from .weather_model import WeatherModel
 from .weatherforecast_model import WeatherForecastModel
@@ -521,6 +521,21 @@ additionalProperties: false
 
     async def monitor_twilight_forecast(self) -> None:
         """Run forecast callback between noon and evening twilight."""
+        # If started between noon and twilight, begin operating immediately
+        # without waiting for noon.
+        next_noon = get_local_noon_time()
+        if (
+            self.diurnal_timer.is_running
+            and self.diurnal_timer.twilight_time is not None
+            and self.diurnal_timer.twilight_time < next_noon
+        ):
+            self.set_twilight_forecast_callback()
+            async with self.diurnal_timer.twilight_condition:
+                await self.diurnal_timer.twilight_condition.wait()
+            self.clear_twilight_forecast_callback()
+
+        # Subsequently, wait for noon and start, then wait for
+        # twilight and stop, in a loop.
         while self.diurnal_timer.is_running:
             async with self.diurnal_timer.noon_condition:
                 await self.diurnal_timer.noon_condition.wait()
