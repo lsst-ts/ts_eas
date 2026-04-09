@@ -34,7 +34,7 @@ from lsst.ts.xml.enums.MTMount import ThermalCommandState
 
 from .cmdwrapper import close_command_tasks, command_wrapper
 from .delay_controller import DelayController, make_delay_policy_from_config
-from .diurnal_timer import DiurnalTimer
+from .diurnal_timer import DiurnalTimer, get_local_noon_time
 from .dome_model import DomeModel
 from .glass_temperature_model import GlassTemperatureModel
 from .weather_model import WeatherModel
@@ -214,6 +214,11 @@ class TmaModel:
         self.top_end_task = utils.make_done_future()
         self.top_end_task_warned: bool = False
         self.twilight_forecast_callback_id: int | None = None
+
+        # True while a forecast-driven setpoint is active. When True,
+        # follow_ess_indoor will not issue new setpoints, giving the forecast
+        # precedence until twilight clears the flag.
+        self.tma_forecast_active: bool = False
 
         # Fan speed configuration
         self.fan_speed_min: float = fan_speed["fan_speed_min"]
@@ -616,6 +621,10 @@ additionalProperties: false
             else:
                 n_failures = 0
 
+            if self.tma_forecast_active:
+                await asyncio.sleep(self.m1m3_setpoint_cadence)
+                continue
+
             if "top_end" not in self.features_to_disable:
                 await self.send_set_thermal(
                     top_end_chiller_setpoint=indoor_temperature
@@ -822,6 +831,7 @@ additionalProperties: false
             return
         self.weatherforecast_model.remove_callback(self.twilight_forecast_callback_id)
         self.twilight_forecast_callback_id = None
+        self.tma_forecast_active = False
 
     def set_twilight_forecast_callback(self) -> None:
         self.clear_twilight_forecast_callback()
@@ -881,8 +891,23 @@ additionalProperties: false
                 top_end_chiller_state=ThermalCommandState.ON,
             )
 
+        self.tma_forecast_active = True
+
     async def monitor_twilight_forecast(self) -> None:
         """Run forecast callback between noon and evening twilight."""
+        # If started between noon and twilight, begin operating immediately
+        # without waiting for noon.
+        next_noon = get_local_noon_time()
+        if (
+            self.diurnal_timer.is_running
+            and self.diurnal_timer.twilight_time is not None
+            and self.diurnal_timer.twilight_time < next_noon
+        ):
+            self.set_twilight_forecast_callback()
+            async with self.diurnal_timer.twilight_condition:
+                await self.diurnal_timer.twilight_condition.wait()
+            self.clear_twilight_forecast_callback()
+
         while self.diurnal_timer.is_running:
             async with self.diurnal_timer.noon_condition:
                 await self.diurnal_timer.noon_condition.wait()

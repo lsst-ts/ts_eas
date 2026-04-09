@@ -202,6 +202,11 @@ class HvacModel:
         self.glycol_setpoint1: float | None = None
         self.glycol_setpoint2: float | None = None
 
+        # When True, a forecast-driven setpoint is active and
+        # monitor_glycol_chillers should apply it rather than recomputing
+        # from the current indoor temperature. Cleared at twilight.
+        self.glycol_forecast_active: bool = False
+
         # The remote
         self.hvac_remote = hvac_remote
 
@@ -499,6 +504,7 @@ additionalProperties: false
             return
         self.weatherforecast_model.remove_callback(self.twilight_forecast_callback_id)
         self.twilight_forecast_callback_id = None
+        self.glycol_forecast_active = False
 
     def set_twilight_forecast_callback(self) -> None:
         self.clear_twilight_forecast_callback()
@@ -557,18 +563,16 @@ additionalProperties: false
             "glycol_chillers" not in self.features_to_disable
             and "forecast_glycol_chillers" not in self.features_to_disable
         ):
-            sp1, sp2 = self.compute_glycol_setpoints(
-                predicted_temperature,
-                average_offset=self.forecast_glycol_average_offset,
-            )
-            self.glycol_setpoint1 = sp1
-            self.glycol_setpoint2 = sp2
-            await self.config_chiller(
-                [
-                    {"device_id": DeviceId.coldGlycolChiller01, "activeSetpoint": sp1},
-                    {"device_id": DeviceId.coldGlycolChiller02, "activeSetpoint": sp2},
-                ]
-            )
+            # Adjust glycol chiller setpoints, but only if
+            # they have wandered outside of the deadband.
+            if not self.check_glycol_setpoint(predicted_temperature):
+                sp1, sp2 = self.compute_glycol_setpoints(
+                    predicted_temperature,
+                    average_offset=self.forecast_glycol_average_offset,
+                )
+                self.glycol_setpoint1 = sp1
+                self.glycol_setpoint2 = sp2
+            self.glycol_forecast_active = True
 
     async def monitor_twilight_forecast(self) -> None:
         """Run forecast callback between noon and evening twilight."""
@@ -711,27 +715,29 @@ additionalProperties: false
                     await asyncio.sleep(HVAC_SLEEP_TIME)
                     continue
 
-                # After the setpoints are chosen at noon, monitor
-                # the system and adjust setpoints if needed.
-                ambient_temperature = self.weather_model.current_indoor_temperature
-                if ambient_temperature is not None and not self.check_glycol_setpoint(
-                    ambient_temperature
-                ):
-                    self.log.debug("Recomputing glycol setpoints.")
-                    glycol_setpoint1, glycol_setpoint2 = self.compute_glycol_setpoints(
-                        ambient_temperature
-                    )
-
-                    if all(
-                        (
-                            glycol_setpoint1 is not None,
-                            not math.isnan(glycol_setpoint1),
-                            glycol_setpoint2 is not None,
-                            not math.isnan(glycol_setpoint2),
-                        )
+                if not self.glycol_forecast_active:
+                    # After the setpoints are chosen at noon, monitor
+                    # the system and adjust setpoints if needed.
+                    ambient_temperature = self.weather_model.current_indoor_temperature
+                    if (
+                        ambient_temperature is not None
+                        and not self.check_glycol_setpoint(ambient_temperature)
                     ):
-                        self.glycol_setpoint1 = glycol_setpoint1
-                        self.glycol_setpoint2 = glycol_setpoint2
+                        self.log.debug("Recomputing glycol setpoints.")
+                        glycol_setpoint1, glycol_setpoint2 = (
+                            self.compute_glycol_setpoints(ambient_temperature)
+                        )
+
+                        if all(
+                            (
+                                glycol_setpoint1 is not None,
+                                not math.isnan(glycol_setpoint1),
+                                glycol_setpoint2 is not None,
+                                not math.isnan(glycol_setpoint2),
+                            )
+                        ):
+                            self.glycol_setpoint1 = glycol_setpoint1
+                            self.glycol_setpoint2 = glycol_setpoint2
 
                 chiller_commands = []
                 if self.glycol_setpoint1 is not None:
