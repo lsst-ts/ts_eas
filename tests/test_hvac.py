@@ -19,19 +19,18 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-import astropy
 import asyncio
 import logging
 import math
 import types
 import unittest
-import yaml
-
-from astropy.time import Time, TimeDelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import NotRequired, TypedDict
 
+import astropy
+import yaml
+from astropy.time import Time, TimeDelta
 from lsst.ts import salobj
 from lsst.ts.eas import hvac_model
 from lsst.ts.eas.weatherforecast_model import DELTA_TIME, WeatherForecastModel
@@ -211,7 +210,9 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         )
         self.weatherforecast = WeatherForecastModel(log=self.log)
 
-    def make_model(self, **overrides: float | list[int] | list[str] | None) -> hvac_model.HvacModel:
+    def make_model(
+        self, **overrides: float | list[int] | list[str] | None
+    ) -> hvac_model.HvacModel:
         params = dict(
             ahu_setpoint_delta=0.0,
             ahu_setpoint_delta_closedatnite=0.0,
@@ -254,7 +255,9 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         model = self.make_model()
         s1, s2 = model.compute_glycol_setpoints(self.weather.current_indoor_temperature)
 
-        expected_avg = self.weather.current_indoor_temperature + model.glycol_average_offset  # 15 - 7.5 = 7.5
+        expected_avg = (
+            self.weather.current_indoor_temperature + model.glycol_average_offset
+        )  # 15 - 7.5 = 7.5
 
         # Average of the two setpoints should differ from the ambient
         # by `glycol_average_offset`.
@@ -310,7 +313,9 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         model.glycol_setpoint1 = 8.0
         model.glycol_setpoint2 = 7.0
 
-        self.assertTrue(model.check_glycol_setpoint(self.weather.current_indoor_temperature))
+        self.assertTrue(
+            model.check_glycol_setpoint(self.weather.current_indoor_temperature)
+        )
 
     def test_average_below_band_returns_false(self) -> None:
         """Test glycol average below band."""
@@ -319,7 +324,9 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         model.glycol_setpoint1 = 4.5
         model.glycol_setpoint2 = 3.5
 
-        self.assertFalse(model.check_glycol_setpoint(self.weather.current_indoor_temperature))
+        self.assertFalse(
+            model.check_glycol_setpoint(self.weather.current_indoor_temperature)
+        )
 
     def test_average_above_band_returns_false(self) -> None:
         """Test glycol average above band."""
@@ -328,7 +335,9 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         model.glycol_setpoint1 = 11.5
         model.glycol_setpoint2 = 10.5
 
-        self.assertFalse(model.check_glycol_setpoint(self.weather.current_indoor_temperature))
+        self.assertFalse(
+            model.check_glycol_setpoint(self.weather.current_indoor_temperature)
+        )
 
     async def test_adjust_glycol_at_noon(self) -> None:
         """Signal noon and verify that glycol setpoints are issued."""
@@ -408,7 +417,9 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
 
         # Setpoints should be recalculated based on
         # `current_indoor_temperature` in the weather model.
-        average = sum(self.hvac.chiller_setpoints.values()) / len(self.hvac.chiller_setpoints)
+        average = sum(self.hvac.chiller_setpoints.values()) / len(
+            self.hvac.chiller_setpoints
+        )
         difference = (
             self.hvac.chiller_setpoints[DeviceId.coldGlycolChiller01]
             - self.hvac.chiller_setpoints[DeviceId.coldGlycolChiller02]
@@ -772,7 +783,9 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
 
                 model = self.make_model(
                     ahu_setpoint_delta=case.get("ahu_setpoint_delta", 0.0),
-                    ahu_setpoint_delta_closedatnite=case.get("ahu_setpoint_delta_closedatnite", 0.0),
+                    ahu_setpoint_delta_closedatnite=case.get(
+                        "ahu_setpoint_delta_closedatnite", 0.0
+                    ),
                 )
                 task = asyncio.create_task(model.apply_setpoint_at_night())
 
@@ -806,10 +819,10 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
 
         expected = 6.0
         for ahu in (
-            DeviceId.lowerAHU01P05,
-            DeviceId.lowerAHU02P05,
-            DeviceId.lowerAHU03P05,
-            DeviceId.lowerAHU04P05,
+            DeviceId.airHandlingUnit01Dome,
+            DeviceId.airHandlingUnit02Dome,
+            DeviceId.airHandlingUnit03Dome,
+            DeviceId.airHandlingUnit04Dome,
         ):
             setpoint = self.hvac.ahu_setpoints.get(ahu)
             assert setpoint is not None
@@ -835,7 +848,9 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
     async def test_monitor_twilight_forecast_applies_setpoint(self) -> None:
         """Forecast callback should apply AHU setpoints during the window."""
         self.diurnal.is_running = True
-        self.diurnal._twilight_time_override = Time.now() + TimeDelta(45 * 60, format="sec")
+        self.diurnal._twilight_time_override = Time.now() + TimeDelta(
+            45 * 60, format="sec"
+        )
         model = self.make_model(ahu_setpoint_delta=0.0, setpoint_lower_limit=-100.0)
 
         task = asyncio.create_task(model.monitor_twilight_forecast())
@@ -850,7 +865,9 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         def prediction(time: float) -> float:
             return 10.0 + (time - (timestamp + DELTA_TIME)) / DELTA_TIME
 
-        temperatures = [prediction(timestamp + (idx + 1) * DELTA_TIME) for idx in range(12)]
+        temperatures = [
+            prediction(timestamp + (idx + 1) * DELTA_TIME) for idx in range(12)
+        ]
         telemetry = SimpleNamespace(
             temperature=temperatures,
             private_sndStamp=timestamp,
@@ -860,10 +877,10 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
 
         expected = prediction(target_time.unix)
         for ahu in (
-            DeviceId.lowerAHU01P05,
-            DeviceId.lowerAHU02P05,
-            DeviceId.lowerAHU03P05,
-            DeviceId.lowerAHU04P05,
+            DeviceId.airHandlingUnit01Dome,
+            DeviceId.airHandlingUnit02Dome,
+            DeviceId.airHandlingUnit03Dome,
+            DeviceId.airHandlingUnit04Dome,
         ):
             setpoint = self.hvac.ahu_setpoints.get(ahu)
             assert setpoint is not None

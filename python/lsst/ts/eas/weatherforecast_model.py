@@ -26,7 +26,6 @@ import math
 from typing import Callable
 
 import numpy as np
-
 from lsst.ts import salobj
 
 TEMPERATURE_EPSILON = 0.01
@@ -75,6 +74,7 @@ class WeatherForecastModel:
         """
         # Compare the temperature item to the cached value. If it hasn't
         # changed, take no action.
+        self.log.debug("Received hourlyTrend.")
         if self.cached_temperature is not None and len(self.cached_temperature) == len(
             hourly_trend.temperature
         ):
