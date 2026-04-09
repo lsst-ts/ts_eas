@@ -150,6 +150,8 @@ class HvacModel:
         glycol_absolute_minimum: float,
         glycol_absolute_maximum: float,
         features_to_disable: list[str],
+        forecast_ahu_setpoint_delta: float | None = None,
+        forecast_glycol_average_offset: float | None = None,
         allow_send: Callable[[], bool] | None = None,
     ) -> None:
         self.log = log
@@ -174,10 +176,23 @@ class HvacModel:
         self.vec04_hold_time = vec04_hold_time
         self.features_to_disable = features_to_disable
 
+        # Forecast-specific delta overrides
+        # (fall back to standard values when absent):
+        self.forecast_ahu_setpoint_delta = (
+            forecast_ahu_setpoint_delta
+            if forecast_ahu_setpoint_delta is not None
+            else ahu_setpoint_delta
+        )
+
         # Glycol chiller parameters:
         self.glycol_band_low = glycol_band_low
         self.glycol_band_high = glycol_band_high
         self.glycol_average_offset = glycol_average_offset
+        self.forecast_glycol_average_offset = (
+            forecast_glycol_average_offset
+            if forecast_glycol_average_offset is not None
+            else glycol_average_offset
+        )
         self.glycol_dew_point_margin = glycol_dew_point_margin
         self.glycol_setpoints_delta = glycol_setpoints_delta
         self.glycol_absolute_minimum = glycol_absolute_minimum
@@ -279,6 +294,18 @@ properties:
     type: number
     default: 10.0
     description: Absolute maximum setpoint (°C) allowed for the warmer glycol chiller.
+  forecast_ahu_setpoint_delta:
+    type: [number, "null"]
+    default: null
+    description: >-
+      AHU setpoint offset (°C) used when driven by forecast. If absent,
+      ahu_setpoint_delta is used.
+  forecast_glycol_average_offset:
+    type: [number, "null"]
+    default: null
+    description: >-
+      Glycol average offset (°C) used in compute_glycol_setpoints() when driven
+      by forecast. If absent, glycol_average_offset is used.
 required:
   - ahu_setpoint_delta
   - setpoint_lower_limit
@@ -505,7 +532,7 @@ additionalProperties: false
             and "forecast_ahu" not in self.features_to_disable
         ):
             setpoint = max(
-                predicted_temperature + self.ahu_setpoint_delta,
+                predicted_temperature + self.forecast_ahu_setpoint_delta,
                 self.setpoint_lower_limit,
             )
             await self.config_lower_ahu(
@@ -530,7 +557,10 @@ additionalProperties: false
             "glycol_chillers" not in self.features_to_disable
             and "forecast_glycol_chillers" not in self.features_to_disable
         ):
-            sp1, sp2 = self.compute_glycol_setpoints(predicted_temperature)
+            sp1, sp2 = self.compute_glycol_setpoints(
+                predicted_temperature,
+                average_offset=self.forecast_glycol_average_offset,
+            )
             self.glycol_setpoint1 = sp1
             self.glycol_setpoint2 = sp2
             await self.config_chiller(
@@ -568,7 +598,7 @@ additionalProperties: false
             self.clear_twilight_forecast_callback()
 
     def compute_glycol_setpoints(
-        self, ambient_temperature: float
+        self, ambient_temperature: float, average_offset: float | None = None
     ) -> tuple[float, float]:
         """Compute staggered glycol chiller setpoints.
 
@@ -605,7 +635,9 @@ additionalProperties: false
             Active setpoint for chiller 2 (°C), the colder of the two.
         """
         # Compute a target average setpoint
-        target_average = ambient_temperature + self.glycol_average_offset
+        if average_offset is None:
+            average_offset = self.glycol_average_offset
+        target_average = ambient_temperature + average_offset
 
         # Incorporate dew point into the calculation - setpoint
         # average should not be lower than the dew point (with margin)

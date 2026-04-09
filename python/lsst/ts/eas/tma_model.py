@@ -29,7 +29,6 @@ from typing import Any, Callable
 
 import yaml
 from astropy.time import Time
-
 from lsst.ts import salobj, utils
 from lsst.ts.xml.enums.MTMount import ThermalCommandState
 
@@ -47,7 +46,9 @@ DORMANT_TIME = 100  # Time to wait while sleeping, seconds
 MAX_TEMPERATURE_FAILURES = 10
 
 SECONDS_PER_HOUR = 3600.0  # Number of seconds in one hour
-SLOW_COOLING_START_TIME = 2  # Time (in hours) before twilight to begin using the slow cooling rate.
+SLOW_COOLING_START_TIME = (
+    2  # Time (in hours) before twilight to begin using the slow cooling rate.
+)
 
 
 class TmaModel:
@@ -86,7 +87,7 @@ class TmaModel:
     top_end_setpoint_delta_closedatnite : `float`
         The difference between the indoor temperature and the top-end
         setpoint during nighttime closed-dome operation.
-    m1m3_setpoint_cadence : `float`
+    m1m3_setpoint_cadence : `float`
         The cadence at which applySetpoints commands should be sent to
         MTM1M3TS (seconds).
     m1m3ts_delay_mode : `dict`
@@ -145,6 +146,9 @@ class TmaModel:
         fast_cooling_rate: float,
         fan_speed: dict[str, float],
         features_to_disable: list[str],
+        forecast_glycol_setpoint_delta: float | None = None,
+        forecast_heater_setpoint_delta: float | None = None,
+        forecast_top_end_setpoint_delta: float | None = None,
         allow_send: Callable[[], bool] | None = None,
     ) -> None:
         self.log = log
@@ -166,6 +170,24 @@ class TmaModel:
         self.glycol_setpoint_delta = glycol_setpoint_delta
         self.heater_setpoint_delta = heater_setpoint_delta
         self.top_end_setpoint_delta = top_end_setpoint_delta
+
+        # Forecast-specific delta overrides
+        # (fall back to standard values when absent):
+        self.forecast_glycol_setpoint_delta = (
+            forecast_glycol_setpoint_delta
+            if forecast_glycol_setpoint_delta is not None
+            else glycol_setpoint_delta
+        )
+        self.forecast_heater_setpoint_delta = (
+            forecast_heater_setpoint_delta
+            if forecast_heater_setpoint_delta is not None
+            else heater_setpoint_delta
+        )
+        self.forecast_top_end_setpoint_delta = (
+            forecast_top_end_setpoint_delta
+            if forecast_top_end_setpoint_delta is not None
+            else top_end_setpoint_delta
+        )
         self.m1m3_extra_delta_closedatnite = m1m3_extra_delta_closedatnite
         self.top_end_setpoint_delta_closedatnite = top_end_setpoint_delta_closedatnite
         self.m1m3_setpoint_cadence = m1m3_setpoint_cadence
@@ -196,9 +218,15 @@ class TmaModel:
         # Fan speed configuration
         self.fan_speed_min: float = fan_speed["fan_speed_min"]
         self.fan_speed_max: float = fan_speed["fan_speed_max"]
-        self.fan_glycol_heater_offset_min: float = fan_speed["fan_glycol_heater_offset_min"]
-        self.fan_glycol_heater_offset_max: float = fan_speed["fan_glycol_heater_offset_max"]
-        self.fan_throttle_turn_on_temp_diff: float = fan_speed["fan_throttle_turn_on_temp_diff"]
+        self.fan_glycol_heater_offset_min: float = fan_speed[
+            "fan_glycol_heater_offset_min"
+        ]
+        self.fan_glycol_heater_offset_max: float = fan_speed[
+            "fan_glycol_heater_offset_max"
+        ]
+        self.fan_throttle_turn_on_temp_diff: float = fan_speed[
+            "fan_throttle_turn_on_temp_diff"
+        ]
         self.fan_throttle_max_temp_diff: float = fan_speed["fan_throttle_max_temp_diff"]
 
     @classmethod
@@ -313,6 +341,24 @@ properties:
         while observing.
     type: number
     default: 10.0
+  forecast_glycol_setpoint_delta:
+    type: [number, "null"]
+    default: null
+    description: >-
+      M1M3TS glycol setpoint offset (°C) used when driven by forecast. If absent,
+      glycol_setpoint_delta is used.
+  forecast_heater_setpoint_delta:
+    type: [number, "null"]
+    default: null
+    description: >-
+      M1M3TS heater setpoint offset (°C) used when driven by forecast. If absent,
+      heater_setpoint_delta is used.
+  forecast_top_end_setpoint_delta:
+    type: [number, "null"]
+    default: null
+    description: >-
+      Top-end chiller setpoint offset (°C) used when driven by forecast. If absent,
+      top_end_setpoint_delta is used.
   fan_speed:
     description: Parameters controlling the M1M3TS fan speed response.
     type: object
@@ -326,11 +372,11 @@ properties:
         type: number
         default: 2000.0
       fan_glycol_heater_offset_min:
-        description: Glycol–heater temperature offset (°C) at fan_speed_min.
+        description: Glycol heater temperature offset (°C) at fan_speed_min.
         type: number
         default: -1.0
       fan_glycol_heater_offset_max:
-        description: Glycol–heater temperature offset (°C) at fan_speed_max.
+        description: Glycol heater temperature offset (°C) at fan_speed_max.
         type: number
         default: -4.0
       fan_throttle_turn_on_temp_diff:
@@ -368,7 +414,9 @@ additionalProperties: false
         )
 
     @command_wrapper(
-        remote_attr="m1m3ts_remote", command_attr="cmd_applySetpoints", command_timeout=STD_TIMEOUT
+        remote_attr="m1m3ts_remote",
+        command_attr="cmd_applySetpoints",
+        command_timeout=STD_TIMEOUT,
     )
     async def send_apply_setpoints(
         self,
@@ -382,7 +430,9 @@ additionalProperties: false
         }
 
     @command_wrapper(
-        remote_attr="m1m3ts_remote", command_attr="cmd_heaterFanDemand", command_timeout=STD_TIMEOUT
+        remote_attr="m1m3ts_remote",
+        command_attr="cmd_heaterFanDemand",
+        command_timeout=STD_TIMEOUT,
     )
     async def send_heater_fan_demand(
         self,
@@ -392,7 +442,11 @@ additionalProperties: false
     ) -> dict[str, Any]:
         return {"heaterPWM": heater_pwm, "fanRPM": fan_rpm}
 
-    @command_wrapper(remote_attr="mtmount_remote", command_attr="cmd_setThermal", command_timeout=STD_TIMEOUT)
+    @command_wrapper(
+        remote_attr="mtmount_remote",
+        command_attr="cmd_setThermal",
+        command_timeout=STD_TIMEOUT,
+    )
     async def send_set_thermal(
         self,
         *,
@@ -427,7 +481,9 @@ additionalProperties: false
 
         self.log.debug("TmaModel.monitor closing...")
 
-    async def apply_setpoints(self, setpoint: float, *, delta_adjustment: float = 0.0) -> None:
+    async def apply_setpoints(
+        self, setpoint: float, *, delta_adjustment: float = 0.0
+    ) -> None:
         if "m1m3ts" not in self.features_to_disable:
             glycol_setpoint = (
                 setpoint
@@ -436,7 +492,9 @@ additionalProperties: false
                 + delta_adjustment
             )
             heaters_setpoint = setpoint + self.heater_setpoint_delta + delta_adjustment
-            self.log.debug(f"Setting MTM1MTS: {glycol_setpoint=:.2f}°C {heaters_setpoint=:.2f}°C")
+            self.log.debug(
+                f"Setting MTM1MTS: {glycol_setpoint=:.2f}°C {heaters_setpoint=:.2f}°C"
+            )
             await self.send_apply_setpoints(
                 glycol_setpoint=glycol_setpoint,
                 heaters_setpoint=heaters_setpoint,
@@ -493,9 +551,9 @@ additionalProperties: false
             # Adjust glycol offset based on fan speed:
             #   Fan speed of 700 (minimum) -> glycol offset of -1 from heater
             #   Fan speed of 2000 (maximum) -> glycol offset of -4 from heater
-            glycol_offset_slope = (self.fan_glycol_heater_offset_max - self.fan_glycol_heater_offset_min) / (
-                self.fan_speed_max - self.fan_speed_min
-            )
+            glycol_offset_slope = (
+                self.fan_glycol_heater_offset_max - self.fan_glycol_heater_offset_min
+            ) / (self.fan_speed_max - self.fan_speed_min)
             glycol_offset = glycol_offset_slope * (fan_speed - self.fan_speed_min)
             glycol_offset += self.fan_glycol_heater_offset_min
             self.glycol_setpoint_delta_adjustment = (
@@ -503,7 +561,9 @@ additionalProperties: false
             )
         else:
             self.glycol_setpoint_delta_adjustment = (
-                self.heater_setpoint_delta + self.fan_glycol_heater_offset_min - self.glycol_setpoint_delta
+                self.heater_setpoint_delta
+                + self.fan_glycol_heater_offset_min
+                - self.glycol_setpoint_delta
             )
 
         self.m1m3_setpoints_are_stale = True
@@ -516,7 +576,10 @@ additionalProperties: false
         self.monitor_start_event.set()
 
         while self.diurnal_timer.is_running:
-            if "m1m3ts" in self.features_to_disable and "top_end" in self.features_to_disable:
+            if (
+                "m1m3ts" in self.features_to_disable
+                and "top_end" in self.features_to_disable
+            ):
                 await asyncio.sleep(DORMANT_TIME)
                 continue
 
@@ -544,7 +607,9 @@ additionalProperties: false
                 )
                 n_failures += 1
                 if n_failures == MAX_TEMPERATURE_FAILURES:
-                    self.log.error("No temperature samples were collected. CSC will fault.")
+                    self.log.error(
+                        "No temperature samples were collected. CSC will fault."
+                    )
                     raise RuntimeError("No temperature samples were collected.")
                 await asyncio.sleep(self.m1m3_setpoint_cadence)
                 continue
@@ -553,7 +618,8 @@ additionalProperties: false
 
             if "top_end" not in self.features_to_disable:
                 await self.send_set_thermal(
-                    top_end_chiller_setpoint=indoor_temperature + self.top_end_setpoint_delta,
+                    top_end_chiller_setpoint=indoor_temperature
+                    + self.top_end_setpoint_delta,
                     top_end_chiller_state=ThermalCommandState.ON,
                 )
 
@@ -563,7 +629,10 @@ additionalProperties: false
             else:
                 last_m1m3ts_setpoint = msg.heatersSetpoint - self.heater_setpoint_delta
 
-            if "m1m3ts" in self.features_to_disable or "require_dome_open" in self.features_to_disable:
+            if (
+                "m1m3ts" in self.features_to_disable
+                or "require_dome_open" in self.features_to_disable
+            ):
                 delay_ready = True
             else:
                 delay_ready = await self.delay_controller.gate(
@@ -577,7 +646,9 @@ additionalProperties: false
                 continue
 
             # Apply the new setpoint to change fan speed.
-            if "fanspeed" not in self.features_to_disable and not math.isnan(indoor_temperature):
+            if "fanspeed" not in self.features_to_disable and not math.isnan(
+                indoor_temperature
+            ):
                 await self.set_fan_speed(setpoint=indoor_temperature)
 
             # Maximum cooling rate depends on environmental conditions:
@@ -598,7 +669,11 @@ additionalProperties: false
                     < SLOW_COOLING_START_TIME * SECONDS_PER_HOUR
                 )
             )
-            cooling_rate = self.slow_cooling_rate if use_slow_cooling_rate else self.fast_cooling_rate
+            cooling_rate = (
+                self.slow_cooling_rate
+                if use_slow_cooling_rate
+                else self.fast_cooling_rate
+            )
 
             if last_m1m3ts_setpoint is None:
                 # No previous setpoint = apply it regardless
@@ -612,7 +687,9 @@ additionalProperties: false
                 if delta > self.setpoint_deadband_heating:
                     # Apply the setpoint, limited by maximum_heating_rate
                     maximum_heating_step = (
-                        self.maximum_heating_rate * self.m1m3_setpoint_cadence / SECONDS_PER_HOUR
+                        self.maximum_heating_rate
+                        * self.m1m3_setpoint_cadence
+                        / SECONDS_PER_HOUR
                     )
                     new_setpoint = min(
                         new_setpoint,
@@ -620,7 +697,9 @@ additionalProperties: false
                     )
                     await self.apply_setpoints(new_setpoint)
                 else:
-                    self.log.debug("Heating deadband criterion not met. No M1M3TS setpoint update.")
+                    self.log.debug(
+                        "Heating deadband criterion not met. No M1M3TS setpoint update."
+                    )
 
             elif indoor_temperature < last_m1m3ts_setpoint:
                 # Cool the mirror if the setpoint is past the cooling deadband.
@@ -629,14 +708,18 @@ additionalProperties: false
 
                 if delta > self.setpoint_deadband_cooling:
                     # Apply the setpoint, limited by maximum_cooling_rate
-                    maximum_cooling_step = cooling_rate * self.m1m3_setpoint_cadence / SECONDS_PER_HOUR
+                    maximum_cooling_step = (
+                        cooling_rate * self.m1m3_setpoint_cadence / SECONDS_PER_HOUR
+                    )
                     new_setpoint = max(
                         new_setpoint,
                         last_m1m3ts_setpoint - maximum_cooling_step,
                     )
                     await self.apply_setpoints(new_setpoint)
                 else:
-                    self.log.debug("Cooling deadband criterion not met. No M1M3TS setpoint update.")
+                    self.log.debug(
+                        "Cooling deadband criterion not met. No M1M3TS setpoint update."
+                    )
 
             else:
                 # indoor_temperature == last_m1m3ts_setpoint
@@ -662,8 +745,13 @@ additionalProperties: false
                 # Avoid stepping on setpoints from the closedatnite coroutine.
                 await asyncio.sleep(self.m1m3_setpoint_cadence)
 
-                last_twilight_temperature = await self.weather_model.get_last_twilight_temperature()
-                if self.diurnal_timer.is_running and last_twilight_temperature is not None:
+                last_twilight_temperature = (
+                    await self.weather_model.get_last_twilight_temperature()
+                )
+                if (
+                    self.diurnal_timer.is_running
+                    and last_twilight_temperature is not None
+                ):
                     self.log.info(
                         "Sunrise M1M3TS and top end is set based on twilight temperature: "
                         f"{last_twilight_temperature:.2f}°C"
@@ -672,7 +760,9 @@ additionalProperties: false
                     await self.apply_setpoints(last_twilight_temperature)
 
                     if "top_end" not in self.features_to_disable:
-                        chiller_setpoint = last_twilight_temperature + self.top_end_setpoint_delta
+                        chiller_setpoint = (
+                            last_twilight_temperature + self.top_end_setpoint_delta
+                        )
                         await self.send_set_thermal(
                             top_end_chiller_setpoint=chiller_setpoint,
                             top_end_chiller_state=ThermalCommandState.ON,
@@ -693,7 +783,10 @@ additionalProperties: false
             # Otherwise, there would be a conflict between this coroutine
             # and the one that controls the setpoints based on an indoor
             # temperature.
-            if "closedatnite" in self.features_to_disable or "require_dome_open" in self.features_to_disable:
+            if (
+                "closedatnite" in self.features_to_disable
+                or "require_dome_open" in self.features_to_disable
+            ):
                 await asyncio.sleep(self.m1m3_setpoint_cadence)
                 continue
 
@@ -702,7 +795,9 @@ additionalProperties: false
 
                 if outdoor_temperature is None or math.isnan(outdoor_temperature):
                     if not warned_no_temperature:
-                        self.log.warning("Failed to collect a temperature sample for nighttime TMA setpoint.")
+                        self.log.warning(
+                            "Failed to collect a temperature sample for nighttime TMA setpoint."
+                        )
                         warned_no_temperature = True
                 else:
                     warned_no_temperature = False
@@ -714,7 +809,8 @@ additionalProperties: false
                     if "top_end" not in self.features_to_disable:
                         await self.send_set_thermal(
                             top_end_chiller_setpoint=(
-                                outdoor_temperature + self.top_end_setpoint_delta_closedatnite
+                                outdoor_temperature
+                                + self.top_end_setpoint_delta_closedatnite
                             ),
                             top_end_chiller_state=ThermalCommandState.ON,
                         )
@@ -741,7 +837,10 @@ additionalProperties: false
             return
         if "forecast" in self.features_to_disable:
             return
-        if "forecast_m1m3ts" in self.features_to_disable and "forecast_top_end" in self.features_to_disable:
+        if (
+            "forecast_m1m3ts" in self.features_to_disable
+            and "forecast_top_end" in self.features_to_disable
+        ):
             return
         self.log.info(
             f"Applying TMA setpoints based on forecast twilight temperature: {predicted_temperature:.2f}°C"
@@ -749,15 +848,34 @@ additionalProperties: false
         asyncio.create_task(self.apply_forecast_setpoints(predicted_temperature))
 
     async def apply_forecast_setpoints(self, predicted_temperature: float) -> None:
-        if "forecast" not in self.features_to_disable and "forecast_m1m3ts" not in self.features_to_disable:
-            await self.apply_setpoints(predicted_temperature)
+        if (
+            "forecast" not in self.features_to_disable
+            and "forecast_m1m3ts" not in self.features_to_disable
+        ):
+            if "m1m3ts" not in self.features_to_disable:
+                glycol_setpoint = (
+                    predicted_temperature + self.forecast_glycol_setpoint_delta
+                )
+                heaters_setpoint = (
+                    predicted_temperature + self.forecast_heater_setpoint_delta
+                )
+                self.log.debug(
+                    f"Setting MTM1M3TS from forecast: {glycol_setpoint=:.2f}°C {heaters_setpoint=:.2f}°C"
+                )
+                await self.send_apply_setpoints(
+                    glycol_setpoint=glycol_setpoint,
+                    heaters_setpoint=heaters_setpoint,
+                )
+            self.m1m3_setpoints_are_stale = False
 
         if (
             "forecast" not in self.features_to_disable
             and "forecast_top_end" not in self.features_to_disable
             and "top_end" not in self.features_to_disable
         ):
-            chiller_setpoint = predicted_temperature + self.top_end_setpoint_delta
+            chiller_setpoint = (
+                predicted_temperature + self.forecast_top_end_setpoint_delta
+            )
             await self.send_set_thermal(
                 top_end_chiller_setpoint=chiller_setpoint,
                 top_end_chiller_state=ThermalCommandState.ON,
