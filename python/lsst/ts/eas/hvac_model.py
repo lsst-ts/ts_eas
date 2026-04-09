@@ -122,6 +122,7 @@ class HvacModel:
          * room_setpoint
          * forecast
          * forecast_ahu
+         * forecast_glycol_chillers
          * glycol_chillers
         Any other values are ignored.
     """
@@ -487,37 +488,57 @@ additionalProperties: false
         if (
             "room_setpoint" in self.features_to_disable
             or "forecast" in self.features_to_disable
-            or "forecast_ahu" in self.features_to_disable
+        ) or (
+            "forecast_ahu" in self.features_to_disable
+            and "forecast_glycol_chillers" in self.features_to_disable
         ):
             return
         self.log.info(
-            "Applying HVAC AHU setpoint based on forecast twilight temperature: "
+            "Applying HVAC setpoints based on forecast twilight temperature: "
             f"{predicted_temperature:.2f}°C"
         )
-        asyncio.create_task(self.apply_forecast_setpoint(predicted_temperature))
+        asyncio.create_task(self.apply_forecast_setpoints(predicted_temperature))
 
-    async def apply_forecast_setpoint(self, predicted_temperature: float) -> None:
-        setpoint = max(
-            predicted_temperature + self.ahu_setpoint_delta,
-            self.setpoint_lower_limit,
-        )
-        await self.config_lower_ahu(
-            [
-                {
-                    "device_id": device_id,
-                    "workingSetpoint": setpoint,
-                    "maxFanSetpoint": math.nan,
-                    "minFanSetpoint": math.nan,
-                    "antiFreezeTemperature": math.nan,
-                }
-                for device_id in (
-                    DeviceId.airHandlingUnit01Dome,
-                    DeviceId.airHandlingUnit02Dome,
-                    DeviceId.airHandlingUnit03Dome,
-                    DeviceId.airHandlingUnit04Dome,
-                )
-            ]
-        )
+    async def apply_forecast_setpoints(self, predicted_temperature: float) -> None:
+        if (
+            "room_setpoint" not in self.features_to_disable
+            and "forecast_ahu" not in self.features_to_disable
+        ):
+            setpoint = max(
+                predicted_temperature + self.ahu_setpoint_delta,
+                self.setpoint_lower_limit,
+            )
+            await self.config_lower_ahu(
+                [
+                    {
+                        "device_id": device_id,
+                        "workingSetpoint": setpoint,
+                        "maxFanSetpoint": math.nan,
+                        "minFanSetpoint": math.nan,
+                        "antiFreezeTemperature": math.nan,
+                    }
+                    for device_id in (
+                        DeviceId.airHandlingUnit01Dome,
+                        DeviceId.airHandlingUnit02Dome,
+                        DeviceId.airHandlingUnit03Dome,
+                        DeviceId.airHandlingUnit04Dome,
+                    )
+                ]
+            )
+
+        if (
+            "glycol_chillers" not in self.features_to_disable
+            and "forecast_glycol_chillers" not in self.features_to_disable
+        ):
+            sp1, sp2 = self.compute_glycol_setpoints(predicted_temperature)
+            self.glycol_setpoint1 = sp1
+            self.glycol_setpoint2 = sp2
+            await self.config_chiller(
+                [
+                    {"device_id": DeviceId.coldGlycolChiller01, "activeSetpoint": sp1},
+                    {"device_id": DeviceId.coldGlycolChiller02, "activeSetpoint": sp2},
+                ]
+            )
 
     async def monitor_twilight_forecast(self) -> None:
         """Run forecast callback between noon and evening twilight."""

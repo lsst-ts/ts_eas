@@ -50,6 +50,7 @@ CONFIG_SCHEMA = yaml.safe_load(
             * `room_setpoint`: HVAC setpoints will not be applied.
             * `forecast`: All forecast-based setpoints will not be applied.
             * `forecast_ahu`: HVAC forecast-based AHU setpoints will not be applied.
+            * `forecast_glycol_chillers`: HVAC forecast-based glycol chiller setpoints will not be applied.
             * `forecast_m1m3ts`: TMA forecast-based M1M3TS setpoints will not be applied.
             * `forecast_top_end`: TMA forecast-based top end setpoints will not be applied.
             * `ahu`: HVAC AHUs will not be enabled / disabled.
@@ -66,6 +67,7 @@ CONFIG_SCHEMA = yaml.safe_load(
             - forecast
             - room_setpoint
             - forecast_ahu
+            - forecast_glycol_chillers
             - forecast_m1m3ts
             - forecast_top_end
             - ahu
