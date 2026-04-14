@@ -75,15 +75,15 @@ class DiurnalTimerMock:
         self.noon_condition = asyncio.Condition()
         self.sunrise_condition = asyncio.Condition()
         self.twilight_condition = asyncio.Condition()
-        self._twilight_time_override: Time | None = None
+        self.twilight_time_override: Time | None = None
         self.twilight_time: Time | None = None
 
     def is_night(self, time: astropy.time.Time) -> bool:
         return self._night
 
     def get_twilight_time(self, *, after: Time) -> Time:
-        if self._twilight_time_override is not None:
-            return self._twilight_time_override
+        if self.twilight_time_override is not None:
+            return self.twilight_time_override
         return after + TimeDelta(45 * 60, format="sec")
 
     async def stop(self) -> None:
@@ -849,7 +849,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
     async def test_monitor_twilight_forecast_applies_setpoint(self) -> None:
         """Forecast callback should apply AHU setpoints during the window."""
         self.diurnal.is_running = True
-        self.diurnal._twilight_time_override = Time.now() + TimeDelta(
+        self.diurnal.twilight_time_override = Time.now() + TimeDelta(
             45 * 60, format="sec"
         )
         model = self.make_model(ahu_setpoint_delta=0.0, setpoint_lower_limit=-100.0)
@@ -860,7 +860,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             self.diurnal.noon_condition.notify_all()
         await asyncio.sleep(STD_SLEEP)
 
-        target_time = self.diurnal._twilight_time_override
+        target_time = self.diurnal.twilight_time_override
         timestamp = target_time.unix - 6 * DELTA_TIME
 
         def prediction(time: float) -> float:
