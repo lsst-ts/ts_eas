@@ -93,7 +93,10 @@ class DelayPolicy:
     """
 
     is_ready: Callable[[float | None, float | None, float, float], bool]
-    on_hold: Callable[[float | None, float | None, float, ApplySetpointsCallback | None], Awaitable[None]]
+    on_hold: Callable[
+        [float | None, float | None, float, ApplySetpointsCallback | None],
+        Awaitable[None],
+    ]
 
 
 def within_tolerance(

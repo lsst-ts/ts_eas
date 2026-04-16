@@ -28,6 +28,7 @@ from collections import deque
 from types import SimpleNamespace
 
 from lsst.ts import eas, salobj
+from lsst.ts.eas.weatherforecast_model import WeatherForecastModel
 
 STD_TIMEOUT = 60
 STD_SLEEP = 0.5
@@ -135,6 +136,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 dome_model=self.dome_model,
                 glass_temperature_model=SimpleNamespace(median_temperature=0.0),
                 weather_model=self.weather_model,
+                weatherforecast_model=WeatherForecastModel(log=mock_m1m3ts.log),
                 m1m3ts_remote=m1m3ts_remote,
                 mtmount_remote=mtmount_remote,
                 glycol_setpoint_delta=model_args["glycol_setpoint_delta"],
@@ -142,7 +144,8 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 top_end_setpoint_delta=model_args["top_end_setpoint_delta"],
                 m1m3_extra_delta_closedatnite=model_args.get("m1m3_extra_delta_closedatnite", 0.0),
                 top_end_setpoint_delta_closedatnite=model_args.get(
-                    "top_end_setpoint_delta_closedatnite", model_args["top_end_setpoint_delta"]
+                    "top_end_setpoint_delta_closedatnite",
+                    model_args["top_end_setpoint_delta"],
                 ),
                 m1m3_setpoint_cadence=cadence,
                 setpoint_deadband_heating=0,
@@ -418,6 +421,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 dome_model=dome_model,
                 glass_temperature_model=SimpleNamespace(median_temperature=0.0),
                 weather_model=weather_model,
+                weatherforecast_model=WeatherForecastModel(log=mock_m1m3ts.log),
                 m1m3ts_remote=m1m3ts_remote,
                 mtmount_remote=mtmount_remote,
                 glycol_setpoint_delta=-2,
@@ -486,6 +490,182 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 - tma_model.glycol_setpoint_delta,
             )
 
+    async def test_forecast_setpoints_use_forecast_fan_and_glycol_adjustment(
+        self,
+    ) -> None:
+        """Forecast control should use forecast deltas in M1M3 feedback."""
+        diurnal_timer = eas.diurnal_timer.DiurnalTimer()
+        diurnal_timer.is_running = True
+
+        weather_model = WeatherModelMock(self.last_twilight_temperature)
+        dome_model = DomeModelMock(is_closed=True)
+
+        async with (
+            M1M3TSMock() as mock_m1m3ts,
+            salobj.Remote(name="MTM1M3TS", domain=mock_m1m3ts.domain) as m1m3ts_remote,
+            salobj.Remote(name="MTMount", domain=mock_m1m3ts.domain) as mtmount_remote,
+        ):
+            tma_model = eas.tma_model.TmaModel(
+                log=mock_m1m3ts.log,
+                diurnal_timer=diurnal_timer,
+                dome_model=dome_model,
+                glass_temperature_model=SimpleNamespace(median_temperature=2.0),
+                weather_model=weather_model,
+                weatherforecast_model=WeatherForecastModel(log=mock_m1m3ts.log),
+                m1m3ts_remote=m1m3ts_remote,
+                mtmount_remote=mtmount_remote,
+                glycol_setpoint_delta=-2.0,
+                heater_setpoint_delta=-1.0,
+                top_end_setpoint_delta=-1.0,
+                m1m3_extra_delta_closedatnite=0.0,
+                top_end_setpoint_delta_closedatnite=-1.0,
+                m1m3_setpoint_cadence=10,
+                setpoint_deadband_heating=0,
+                setpoint_deadband_cooling=0,
+                maximum_heating_rate=100,
+                slow_cooling_rate=1,
+                fast_cooling_rate=10,
+                fan_speed={
+                    "fan_speed_min": 700.0,
+                    "fan_speed_max": 2000.0,
+                    "fan_glycol_heater_offset_min": -1.0,
+                    "fan_glycol_heater_offset_max": -4.0,
+                    "fan_throttle_turn_on_temp_diff": 0.0,
+                    "fan_throttle_max_temp_diff": 1.0,
+                },
+                m1m3ts_delay_mode={"mode": "time_delay", "delay": 0.0},
+                features_to_disable=[],
+                forecast_glycol_setpoint_delta=-3.0,
+                forecast_heater_setpoint_delta=-0.5,
+            )
+
+            await tma_model.apply_forecast_setpoints(predicted_temperature=0.0)
+            await asyncio.sleep(STD_SLEEP)
+
+            expected_heater_setpoint = -0.5
+            expected_glycol_setpoint = expected_heater_setpoint + tma_model.fan_glycol_heater_offset_max
+
+            self.assertEqual(mock_m1m3ts.heater_setpoint, expected_heater_setpoint)
+            self.assertEqual(mock_m1m3ts.glycol_setpoint, expected_glycol_setpoint)
+            self.assertEqual(mock_m1m3ts.fan_rpm, [int(0.1 * tma_model.fan_speed_max)] * 96)
+
+    async def test_forecast_setpoints_require_idle_delay_controller(self) -> None:
+        """Forecast control should be skipped unless delay is idle."""
+        diurnal_timer = eas.diurnal_timer.DiurnalTimer()
+        diurnal_timer.is_running = True
+
+        weather_model = WeatherModelMock(self.last_twilight_temperature)
+        dome_model = DomeModelMock(is_closed=True)
+
+        async with (
+            M1M3TSMock() as mock_m1m3ts,
+            salobj.Remote(name="MTM1M3TS", domain=mock_m1m3ts.domain) as m1m3ts_remote,
+            salobj.Remote(name="MTMount", domain=mock_m1m3ts.domain) as mtmount_remote,
+        ):
+            tma_model = eas.tma_model.TmaModel(
+                log=mock_m1m3ts.log,
+                diurnal_timer=diurnal_timer,
+                dome_model=dome_model,
+                glass_temperature_model=SimpleNamespace(median_temperature=2.0),
+                weather_model=weather_model,
+                weatherforecast_model=WeatherForecastModel(log=mock_m1m3ts.log),
+                m1m3ts_remote=m1m3ts_remote,
+                mtmount_remote=mtmount_remote,
+                glycol_setpoint_delta=-2.0,
+                heater_setpoint_delta=-1.0,
+                top_end_setpoint_delta=-1.0,
+                m1m3_extra_delta_closedatnite=0.0,
+                top_end_setpoint_delta_closedatnite=-1.0,
+                m1m3_setpoint_cadence=10,
+                setpoint_deadband_heating=0,
+                setpoint_deadband_cooling=0,
+                maximum_heating_rate=100,
+                slow_cooling_rate=1,
+                fast_cooling_rate=10,
+                fan_speed={
+                    "fan_speed_min": 700.0,
+                    "fan_speed_max": 2000.0,
+                    "fan_glycol_heater_offset_min": -1.0,
+                    "fan_glycol_heater_offset_max": -4.0,
+                    "fan_throttle_turn_on_temp_diff": 0.0,
+                    "fan_throttle_max_temp_diff": 1.0,
+                },
+                m1m3ts_delay_mode={"mode": "time_delay", "delay": 0.0},
+                features_to_disable=[],
+                forecast_glycol_setpoint_delta=-3.0,
+                forecast_heater_setpoint_delta=-0.5,
+            )
+
+            tma_model.delay_controller.state = eas.delay_controller.DelayState.WAITING
+            tma_model.tma_forecast_active = True
+
+            await tma_model.apply_forecast_setpoints(predicted_temperature=0.0)
+            await asyncio.sleep(STD_SLEEP)
+
+            self.assertIsNone(mock_m1m3ts.heater_setpoint)
+            self.assertIsNone(mock_m1m3ts.glycol_setpoint)
+            self.assertIsNone(mock_m1m3ts.fan_rpm)
+            self.assertFalse(tma_model.tma_forecast_active)
+
+    async def test_top_end_only_forecast_does_not_activate_m1m3_forecast_state(
+        self,
+    ) -> None:
+        """Top-end-only forecast should not suppress normal M1M3TS tracking."""
+        diurnal_timer = eas.diurnal_timer.DiurnalTimer()
+        diurnal_timer.is_running = True
+
+        weather_model = WeatherModelMock(self.last_twilight_temperature)
+        dome_model = DomeModelMock(is_closed=True)
+
+        async with (
+            M1M3TSMock() as mock_m1m3ts,
+            MTMountMock() as mock_mtmount,
+            salobj.Remote(name="MTM1M3TS", domain=mock_m1m3ts.domain) as m1m3ts_remote,
+            salobj.Remote(name="MTMount", domain=mock_m1m3ts.domain) as mtmount_remote,
+        ):
+            await mock_mtmount.evt_summaryState.set_write(summaryState=salobj.State.ENABLED)
+
+            tma_model = eas.tma_model.TmaModel(
+                log=mock_m1m3ts.log,
+                diurnal_timer=diurnal_timer,
+                dome_model=dome_model,
+                glass_temperature_model=SimpleNamespace(median_temperature=2.0),
+                weather_model=weather_model,
+                weatherforecast_model=WeatherForecastModel(log=mock_m1m3ts.log),
+                m1m3ts_remote=m1m3ts_remote,
+                mtmount_remote=mtmount_remote,
+                glycol_setpoint_delta=-2.0,
+                heater_setpoint_delta=-1.0,
+                top_end_setpoint_delta=-1.0,
+                m1m3_extra_delta_closedatnite=0.0,
+                top_end_setpoint_delta_closedatnite=-1.0,
+                m1m3_setpoint_cadence=10,
+                setpoint_deadband_heating=0,
+                setpoint_deadband_cooling=0,
+                maximum_heating_rate=100,
+                slow_cooling_rate=1,
+                fast_cooling_rate=10,
+                fan_speed={
+                    "fan_speed_min": 700.0,
+                    "fan_speed_max": 2000.0,
+                    "fan_glycol_heater_offset_min": -1.0,
+                    "fan_glycol_heater_offset_max": -4.0,
+                    "fan_throttle_turn_on_temp_diff": 0.0,
+                    "fan_throttle_max_temp_diff": 1.0,
+                },
+                m1m3ts_delay_mode={"mode": "time_delay", "delay": 0.0},
+                features_to_disable=["forecast_m1m3ts"],
+                forecast_top_end_setpoint_delta=-0.25,
+            )
+
+            await tma_model.apply_forecast_setpoints(predicted_temperature=1.5)
+            await asyncio.sleep(STD_SLEEP)
+
+            self.assertIsNone(mock_m1m3ts.heater_setpoint)
+            self.assertIsNone(mock_m1m3ts.glycol_setpoint)
+            self.assertFalse(tma_model.tma_forecast_active)
+            self.assertAlmostEqual(mock_mtmount.top_end_setpoint, 1.25)
+
     async def test_delay_policy_time_delay(self) -> None:
         """Delay policy should gate tracking until the time delay elapses."""
         cadence = 0.05
@@ -512,6 +692,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 dome_model=dome_model,
                 glass_temperature_model=SimpleNamespace(median_temperature=0.0),
                 weather_model=weather_model,
+                weatherforecast_model=WeatherForecastModel(log=mock_m1m3ts.log),
                 m1m3ts_remote=m1m3ts_remote,
                 mtmount_remote=mtmount_remote,
                 glycol_setpoint_delta=-2,

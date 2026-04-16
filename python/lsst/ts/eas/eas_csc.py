@@ -37,6 +37,7 @@ from .glass_temperature_model import GlassTemperatureModel
 from .hvac_model import HvacModel
 from .tma_model import TmaModel
 from .weather_model import WeatherModel
+from .weatherforecast_model import WeatherForecastModel
 
 # Constants for the health monitor:
 FAILURE_TIMEOUT = 600  # Failure count will reset after monitor has run for this time (seconds).
@@ -119,6 +120,7 @@ class EasCsc(salobj.ConfigurableCsc):
         self.dome_model: DomeModel | None = None
         self.glass_temperature_model: GlassTemperatureModel | None = None
         self.weather_model: WeatherModel | None = None
+        self.weatherforecast_model: WeatherForecastModel | None = None
 
         self.dome_remote = salobj.Remote(
             domain=self.domain,
@@ -165,6 +167,12 @@ class EasCsc(salobj.ConfigurableCsc):
             domain=self.domain,
             name="HVAC",
             include=["summaryState"],
+        )
+        self.weatherforecast_remote = salobj.Remote(
+            domain=self.domain,
+            name="WeatherForecast",
+            readonly=True,
+            include=["hourlyTrend", "summaryState"],
         )
 
         self.ess_indoor_remote: salobj.Remote | None = None
@@ -275,6 +283,7 @@ class EasCsc(salobj.ConfigurableCsc):
             self.dome_model.set_pending_events()
 
         self.glass_temperature_model = GlassTemperatureModel(log=self.log)
+        self.weatherforecast_model = WeatherForecastModel(log=self.log)
 
         # Validate the sub-schemas and update with defaults.
         for object_type, attr in (
@@ -299,6 +308,7 @@ class EasCsc(salobj.ConfigurableCsc):
             diurnal_timer=self.diurnal_timer,
             dome_model=self.dome_model,
             weather_model=self.weather_model,
+            weatherforecast_model=self.weatherforecast_model,
             hvac_remote=self.hvac_remote,
             features_to_disable=self.config.features_to_disable,
             allow_send=self._allow_send,
@@ -310,6 +320,7 @@ class EasCsc(salobj.ConfigurableCsc):
             dome_model=self.dome_model,
             glass_temperature_model=self.glass_temperature_model,
             weather_model=self.weather_model,
+            weatherforecast_model=self.weatherforecast_model,
             m1m3ts_remote=self.mtm1m3ts_remote,
             mtmount_remote=self.mtmount_remote,
             features_to_disable=self.config.features_to_disable,
@@ -373,6 +384,7 @@ class EasCsc(salobj.ConfigurableCsc):
         assert self.dome_model is not None, "Dome model not initialized."
         assert self.glass_temperature_model is not None, "Glass model not initialized."
         assert self.weather_model is not None, "Weather Model not initialized."
+        assert self.weatherforecast_model is not None, "WeatherForecast model not initialized."
 
         if self.ess_indoor_remote is None or self.ess_outdoor_remote is None:
             raise RuntimeError(
@@ -392,6 +404,9 @@ class EasCsc(salobj.ConfigurableCsc):
         self.ess_outdoor_remote.tel_temperature.callback = self.weather_model.temperature_callback
         self.ess_indoor_remote.tel_dewPoint.callback = self.weather_model.indoor_dew_point_callback
         self.ess_indoor_remote.tel_temperature.callback = self.weather_model.indoor_temperature_callback
+        self.weatherforecast_remote.tel_hourlyTrend.callback = (
+            self.weatherforecast_model.hourly_trend_callback
+        )
 
     def disconnect_callbacks(self) -> None:
         """Disconnects callbacks from their remotes."""
@@ -412,6 +427,7 @@ class EasCsc(salobj.ConfigurableCsc):
         self.ess_outdoor_remote.tel_temperature.callback = None
         self.ess_indoor_remote.tel_dewPoint.callback = None
         self.ess_indoor_remote.tel_temperature.callback = None
+        self.weatherforecast_remote.tel_hourlyTrend.callback = None
 
     async def monitor_health(self) -> None:
         """Manage the `monitor_dome_shutter` control loop.

@@ -46,9 +46,10 @@ except ImportError:
 
 
 from .cmdwrapper import close_command_tasks, command_wrapper
-from .diurnal_timer import DiurnalTimer
+from .diurnal_timer import DiurnalTimer, get_local_noon_time
 from .dome_model import DomeModel
 from .weather_model import WeatherModel
+from .weatherforecast_model import WeatherForecastModel
 
 HVAC_SLEEP_TIME = 60.0  # How often to check the HVAC state (seconds)
 STD_TIMEOUT = 5  # seconds
@@ -68,6 +69,8 @@ class HvacModel:
         A model representing the dome state.
     weather_model : `WeatherModel`
         A model representing weather conditions.
+    weatherforecast_model : `WeatherForecastModel`
+        A model representing forecast conditions used for upcoming twilight.
     ahu_setpoint_delta : `float`
         The offset that will be added to the measured temperature in
         selecting a setpoint for the HVAC air handling units (AHUs/UMAs)
@@ -118,6 +121,8 @@ class HvacModel:
          * vec04
          * ahu
          * room_setpoint
+         * forecast
+         * forecast_ahu
          * glycol_chillers
         Any other values are ignored.
     """
@@ -129,6 +134,7 @@ class HvacModel:
         diurnal_timer: DiurnalTimer,
         dome_model: DomeModel,
         weather_model: WeatherModel,
+        weatherforecast_model: WeatherForecastModel,
         hvac_remote: salobj.Remote,
         ahu_setpoint_delta: float,
         ahu_setpoint_delta_closedatnite: float,
@@ -144,6 +150,7 @@ class HvacModel:
         glycol_absolute_minimum: float,
         glycol_absolute_maximum: float,
         features_to_disable: list[str],
+        forecast_ahu_setpoint_delta: float | None = None,
         allow_send: Callable[[], bool] | None = None,
     ) -> None:
         self.log = log
@@ -157,6 +164,7 @@ class HvacModel:
         # Configuration parameters:
         self.dome_model = dome_model
         self.weather_model = weather_model
+        self.weatherforecast_model = weatherforecast_model
         self.ahu_setpoint_delta = ahu_setpoint_delta
         self.ahu_setpoint_delta_closedatnite = ahu_setpoint_delta_closedatnite
         self.ahu_control = ahu_control
@@ -164,6 +172,12 @@ class HvacModel:
         self.wind_threshold = wind_threshold
         self.vec04_hold_time = vec04_hold_time
         self.features_to_disable = features_to_disable
+
+        # Forecast-specific delta overrides
+        # (fall back to standard values when absent):
+        self.forecast_ahu_setpoint_delta = (
+            forecast_ahu_setpoint_delta if forecast_ahu_setpoint_delta is not None else ahu_setpoint_delta
+        )
 
         # Glycol chiller parameters:
         self.glycol_band_low = glycol_band_low
@@ -178,8 +192,15 @@ class HvacModel:
         self.glycol_setpoint1: float | None = None
         self.glycol_setpoint2: float | None = None
 
+        # When True, a forecast-driven setpoint is active and
+        # monitor_glycol_chillers should apply it rather than recomputing
+        # from the current indoor temperature. Cleared at twilight.
+        self.glycol_forecast_active: bool = False
+
         # The remote
         self.hvac_remote = hvac_remote
+
+        self.twilight_forecast_callback_id: int | None = None
 
     def get_controlled_ahus(self) -> tuple[DeviceId, ...]:
         """Return the AHU device IDs configured for EAS control.
@@ -268,6 +289,12 @@ properties:
     type: number
     default: 10.0
     description: Absolute maximum setpoint (°C) allowed for the warmer glycol chiller.
+  forecast_ahu_setpoint_delta:
+    type: [number, "null"]
+    default: null
+    description: >-
+      AHU setpoint offset (°C) used when driven by forecast. If absent,
+      ahu_setpoint_delta is used.
 required:
   - ahu_setpoint_delta
   - setpoint_lower_limit
@@ -324,6 +351,7 @@ additionalProperties: false
         tasks = [
             self.control_ahus_and_vec04(),
             self.wait_for_sunrise(),
+            self.monitor_twilight_forecast(),
             self.apply_setpoint_at_night(),
             self.adjust_glycol_chillers_at_noon(),
             self.monitor_glycol_chillers(),
@@ -343,6 +371,7 @@ additionalProperties: false
 
     async def close(self) -> None:
         """Cancel any in-flight command tasks."""
+        self.clear_twilight_forecast_callback()
         await close_command_tasks(self)
 
     async def control_ahus_and_vec04(self) -> None:
@@ -428,7 +457,6 @@ additionalProperties: false
                             last_twilight_temperature + self.ahu_setpoint_delta,
                             self.setpoint_lower_limit,
                         )
-
                         await self.config_lower_ahu(
                             [
                                 {
@@ -442,7 +470,81 @@ additionalProperties: false
                             ]
                         )
 
-    def compute_glycol_setpoints(self, ambient_temperature: float) -> tuple[float, float]:
+    def clear_twilight_forecast_callback(self) -> None:
+        if self.twilight_forecast_callback_id is None:
+            return
+        self.weatherforecast_model.remove_callback(self.twilight_forecast_callback_id)
+        self.twilight_forecast_callback_id = None
+        self.glycol_forecast_active = False
+
+    def set_twilight_forecast_callback(self) -> None:
+        self.clear_twilight_forecast_callback()
+        twilight_time = self.diurnal_timer.get_twilight_time(after=Time.now())
+        callback_id = self.weatherforecast_model.add_callback(
+            twilight_time.tai.unix,
+            self.handle_twilight_forecast,
+        )
+        self.twilight_forecast_callback_id = callback_id
+
+    def handle_twilight_forecast(self, predicted_temperature: float) -> None:
+        if not self.diurnal_timer.is_running:
+            return
+        if "room_setpoint" in self.features_to_disable or "forecast" in self.features_to_disable:
+            return
+        self.log.info(
+            f"Applying HVAC setpoints based on forecast twilight temperature: {predicted_temperature:.2f}°C"
+        )
+        asyncio.create_task(self.apply_forecast_setpoints(predicted_temperature))
+
+    async def apply_forecast_setpoints(self, predicted_temperature: float) -> None:
+        if "room_setpoint" not in self.features_to_disable and "forecast_ahu" not in self.features_to_disable:
+            setpoint = max(
+                predicted_temperature + self.forecast_ahu_setpoint_delta,
+                self.setpoint_lower_limit,
+            )
+            await self.config_lower_ahu(
+                [
+                    {
+                        "device_id": device_id,
+                        "workingSetpoint": setpoint,
+                        "maxFanSetpoint": math.nan,
+                        "minFanSetpoint": math.nan,
+                        "antiFreezeTemperature": math.nan,
+                    }
+                    for device_id in self.get_controlled_ahus()
+                ]
+            )
+
+    async def monitor_twilight_forecast(self) -> None:
+        """Run forecast callback between noon and evening twilight."""
+        # If started between noon and twilight, begin operating immediately
+        # without waiting for noon.
+        next_noon = get_local_noon_time()
+        if (
+            self.diurnal_timer.is_running
+            and self.diurnal_timer.twilight_time is not None
+            and self.diurnal_timer.twilight_time < next_noon
+        ):
+            self.set_twilight_forecast_callback()
+            async with self.diurnal_timer.twilight_condition:
+                await self.diurnal_timer.twilight_condition.wait()
+            self.clear_twilight_forecast_callback()
+
+        # Subsequently, wait for noon and start, then wait for
+        # twilight and stop, in a loop.
+        while self.diurnal_timer.is_running:
+            async with self.diurnal_timer.noon_condition:
+                await self.diurnal_timer.noon_condition.wait()
+            if not self.diurnal_timer.is_running:
+                break
+            self.set_twilight_forecast_callback()
+            async with self.diurnal_timer.twilight_condition:
+                await self.diurnal_timer.twilight_condition.wait()
+            self.clear_twilight_forecast_callback()
+
+    def compute_glycol_setpoints(
+        self, ambient_temperature: float, average_offset: float | None = None
+    ) -> tuple[float, float]:
         """Compute staggered glycol chiller setpoints.
 
         Compute staggered glycol chiller setpoints based on ambient
@@ -478,7 +580,9 @@ additionalProperties: false
             Active setpoint for chiller 2 (°C), the colder of the two.
         """
         # Compute a target average setpoint
-        target_average = ambient_temperature + self.glycol_average_offset
+        if average_offset is None:
+            average_offset = self.glycol_average_offset
+        target_average = ambient_temperature + average_offset
 
         # Incorporate dew point into the calculation - setpoint
         # average should not be lower than the dew point (with margin)
@@ -546,23 +650,28 @@ additionalProperties: false
                     await asyncio.sleep(HVAC_SLEEP_TIME)
                     continue
 
-                # After the setpoints are chosen at noon, monitor
-                # the system and adjust setpoints if needed.
-                ambient_temperature = self.weather_model.current_indoor_temperature
-                if ambient_temperature is not None and not self.check_glycol_setpoint(ambient_temperature):
-                    self.log.debug("Recomputing glycol setpoints.")
-                    glycol_setpoint1, glycol_setpoint2 = self.compute_glycol_setpoints(ambient_temperature)
-
-                    if all(
-                        (
-                            glycol_setpoint1 is not None,
-                            not math.isnan(glycol_setpoint1),
-                            glycol_setpoint2 is not None,
-                            not math.isnan(glycol_setpoint2),
-                        )
+                if not self.glycol_forecast_active:
+                    # After the setpoints are chosen at noon, monitor
+                    # the system and adjust setpoints if needed.
+                    ambient_temperature = self.weather_model.current_indoor_temperature
+                    if ambient_temperature is not None and not self.check_glycol_setpoint(
+                        ambient_temperature
                     ):
-                        self.glycol_setpoint1 = glycol_setpoint1
-                        self.glycol_setpoint2 = glycol_setpoint2
+                        self.log.debug("Recomputing glycol setpoints.")
+                        glycol_setpoint1, glycol_setpoint2 = self.compute_glycol_setpoints(
+                            ambient_temperature
+                        )
+
+                        if all(
+                            (
+                                glycol_setpoint1 is not None,
+                                not math.isnan(glycol_setpoint1),
+                                glycol_setpoint2 is not None,
+                                not math.isnan(glycol_setpoint2),
+                            )
+                        ):
+                            self.glycol_setpoint1 = glycol_setpoint1
+                            self.glycol_setpoint2 = glycol_setpoint2
 
                 chiller_commands = []
                 if self.glycol_setpoint1 is not None:
