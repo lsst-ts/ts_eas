@@ -93,7 +93,10 @@ class DelayPolicy:
     """
 
     is_ready: Callable[[float | None, float | None, float, float], bool]
-    on_hold: Callable[[float | None, float | None, float, ApplySetpointsCallback | None], Awaitable[None]]
+    on_hold: Callable[
+        [float | None, float | None, float, ApplySetpointsCallback | None],
+        Awaitable[None],
+    ]
 
 
 def within_tolerance(
@@ -400,7 +403,17 @@ class DelayController:
 
         while dome_model.is_closed is not False:
             event = asyncio.Event()
-            dome_model.on_open.append((event, 0.0))
+            dome_model.on_open.append(event)
+
+            # Recheck after registering the waiter so an open transition
+            # between the loop condition and append cannot be lost.
+            if dome_model.is_closed is False:
+                try:
+                    dome_model.on_open.remove(event)
+                except ValueError:
+                    pass
+                break
+
             self.log.debug("Waiting for dome open (delay controller).")
             await event.wait()
 
