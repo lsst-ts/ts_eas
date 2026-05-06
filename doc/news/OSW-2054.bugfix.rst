@@ -1,1 +1,0 @@
-Improved assurances that code will respond to dome open events.
