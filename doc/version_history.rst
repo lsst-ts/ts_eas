@@ -1,3 +1,21 @@
+v0.15.0 (2026-05-06)
+====================
+
+New Features
+------------
+
+- Added WeatherForecast remote. (`OSW-1772 <https://rubinobs.atlassian.net//browse/OSW-1772>`_)
+- Removed AHU enum fallback. (`OSW-2022 <https://rubinobs.atlassian.net//browse/OSW-2022>`_)
+- Removed no-longer-used delay in dome_model in favor of DelayController. (`OSW-2054 <https://rubinobs.atlassian.net//browse/OSW-2054>`_)
+
+
+Bug Fixes
+---------
+
+- Improved assurances that code will respond to dome open events. (`OSW-2054 <https://rubinobs.atlassian.net//browse/OSW-2054>`_)
+- Added nighttime control of glycol chillers. (`OSW-2128 <https://rubinobs.atlassian.net//browse/OSW-2128>`_)
+
+
 v0.14.0 (2026-04-01)
 ====================
 
