@@ -31,7 +31,7 @@ from astropy.utils import iers
 from astropy.utils.iers import conf as iers_conf
 from scipy.optimize import brentq
 
-__all__ = ["DiurnalTimer"]
+__all__ = ["DiurnalTimer", "OBSERVATORY_LOCATION"]
 
 iers_conf.auto_download = False
 iers_conf.iers_degraded_accuracy = "ignore"

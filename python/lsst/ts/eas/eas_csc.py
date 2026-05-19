@@ -125,8 +125,7 @@ class EasCsc(salobj.ConfigurableCsc):
         self.dome_remote = salobj.Remote(
             domain=self.domain,
             name="MTDome",
-            readonly=True,
-            include=["apertureShutter", "louvers", "summaryState"],
+            include=["apertureShutter", "azimuth", "louvers", "summaryState"],
         )
         self.ess_ts1_remote = salobj.Remote(
             domain=self.domain,
@@ -214,6 +213,8 @@ class EasCsc(salobj.ConfigurableCsc):
     async def close_tasks(self) -> None:
         """Stop active tasks."""
         await self.shutdown_health_monitor()
+        if self.dome_model is not None:
+            await self.dome_model.close()
         if self.hvac_model is not None:
             await self.hvac_model.close()
         if self.tma_model is not None:
@@ -296,7 +297,13 @@ class EasCsc(salobj.ConfigurableCsc):
             validator = salobj.DefaultingValidator(schema)
             setattr(config, attr, validator.validate(getattr(config, attr)))
 
-        self.dome_model = DomeModel(log=self.log, **self.config.dome)
+        self.dome_model = DomeModel(
+            log=self.log,
+            dome_remote=self.dome_remote,
+            features_to_disable=self.config.features_to_disable,
+            allow_send=self._allow_send,
+            **self.config.dome,
+        )
 
         self.weather_model = WeatherModel(
             log=self.log,
@@ -395,6 +402,7 @@ class EasCsc(salobj.ConfigurableCsc):
             )
 
         self.dome_remote.tel_apertureShutter.callback = self.dome_model.aperture_shutter_callback
+        self.dome_remote.tel_azimuth.callback = self.dome_model.azimuth_callback
         self.dome_remote.tel_louvers.callback = self.dome_model.louvers_callback
         self.ess_ts1_remote.tel_temperature.callback = self.glass_temperature_model.temperature_callback
         self.ess_ts2_remote.tel_temperature.callback = self.glass_temperature_model.temperature_callback
@@ -419,6 +427,7 @@ class EasCsc(salobj.ConfigurableCsc):
             )
 
         self.dome_remote.tel_apertureShutter.callback = None
+        self.dome_remote.tel_azimuth.callback = None
         self.ess_ts1_remote.tel_temperature.callback = None
         self.ess_ts2_remote.tel_temperature.callback = None
         self.ess_ts3_remote.tel_temperature.callback = None
@@ -437,6 +446,7 @@ class EasCsc(salobj.ConfigurableCsc):
         disconnects of the remotes, as well as any other form of
         recoverable failure.
         """
+        assert self.dome_model is not None, "Dome Model not initialized."
         assert self.hvac_model is not None, "HVAC Model not initialized."
         assert self.tma_model is not None, "TMA Model not initialized."
         assert self.diurnal_timer is not None, "Timer not initialized."
@@ -452,6 +462,7 @@ class EasCsc(salobj.ConfigurableCsc):
                     self.weather_model.monitor,
                     self.hvac_model.monitor,
                     self.tma_model.monitor,
+                    self.dome_model.monitor,
                 )
             ]
 
@@ -461,6 +472,7 @@ class EasCsc(salobj.ConfigurableCsc):
                 self.weather_model.monitor_start_event.wait(),
                 self.hvac_model.monitor_start_event.wait(),
                 self.tma_model.monitor_start_event.wait(),
+                self.dome_model.monitor_start_event.wait(),
             )
             self.log.debug("Monitors started.")
             self.monitor_start_event.set()
