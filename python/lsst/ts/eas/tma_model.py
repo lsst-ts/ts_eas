@@ -80,15 +80,19 @@ class TmaModel:
     top_end_setpoint_delta : `float`
         The difference between the indoor (ESS:112) temperature and the
         setpoint to apply for the top end, via MTMount.setThermal.
-    m1m3_extra_delta_closedatnite : `float`
+    m1m3_extra_delta_closed_at_night : `float`
         Extra temperature offset (°C) applied during nighttime closed-dome
         operation on top of the configured glycol and heater setpoint deltas.
-    top_end_setpoint_delta_closedatnite : `float`
+    top_end_setpoint_delta_closed_at_night : `float`
         The difference between the indoor temperature and the top-end
         setpoint during nighttime closed-dome operation.
     m1m3_setpoint_cadence : `float`
         The cadence at which applySetpoints commands should be sent to
         MTM1M3TS (seconds).
+    closed_at_night_setpoint_cadence : `float`, optional
+        Cadence (s) at which the nighttime closed-dome M1M3TS and top-end
+        setpoints are reassessed. If ``None``, falls back to
+        ``m1m3_setpoint_cadence``.
     m1m3ts_delay_mode : `dict`
         Configuration for the delay controller policy after dome opening.
     setpoint_deadband_heating : `float`
@@ -134,8 +138,8 @@ class TmaModel:
         glycol_setpoint_delta: float,
         heater_setpoint_delta: float,
         top_end_setpoint_delta: float,
-        m1m3_extra_delta_closedatnite: float,
-        top_end_setpoint_delta_closedatnite: float,
+        m1m3_extra_delta_closed_at_night: float,
+        top_end_setpoint_delta_closed_at_night: float,
         m1m3_setpoint_cadence: float,
         m1m3ts_delay_mode: dict,
         setpoint_deadband_heating: float,
@@ -148,6 +152,7 @@ class TmaModel:
         forecast_glycol_setpoint_delta: float | None = None,
         forecast_heater_setpoint_delta: float | None = None,
         forecast_top_end_setpoint_delta: float | None = None,
+        closed_at_night_setpoint_cadence: float | None = None,
         allow_send: Callable[[], bool] | None = None,
     ) -> None:
         self.log = log
@@ -187,9 +192,14 @@ class TmaModel:
             if forecast_top_end_setpoint_delta is not None
             else top_end_setpoint_delta
         )
-        self.m1m3_extra_delta_closedatnite = m1m3_extra_delta_closedatnite
-        self.top_end_setpoint_delta_closedatnite = top_end_setpoint_delta_closedatnite
+        self.m1m3_extra_delta_closed_at_night = m1m3_extra_delta_closed_at_night
+        self.top_end_setpoint_delta_closed_at_night = top_end_setpoint_delta_closed_at_night
         self.m1m3_setpoint_cadence = m1m3_setpoint_cadence
+        self.closed_at_night_setpoint_cadence = (
+            closed_at_night_setpoint_cadence
+            if closed_at_night_setpoint_cadence is not None
+            else m1m3_setpoint_cadence
+        )
         self.m1m3ts_delay_mode = m1m3ts_delay_mode
         self.setpoint_deadband_heating = setpoint_deadband_heating
         self.setpoint_deadband_cooling = setpoint_deadband_cooling
@@ -247,13 +257,13 @@ properties:
     description: Difference (°C) between the ambient temperature and MTMount thermal setpoint.
     type: number
     default: -1.0
-  m1m3_extra_delta_closedatnite:
+  m1m3_extra_delta_closed_at_night:
     description: >-
       Additional difference (°C) applied during nighttime closed-dome operation
       on top of the configured M1M3TS glycol and heater setpoint deltas.
     type: number
     default: 0.0
-  top_end_setpoint_delta_closedatnite:
+  top_end_setpoint_delta_closed_at_night:
     description: >-
       Difference (°C) between the ambient temperature and MTMount thermal setpoint
       during nighttime closed-dome operation.
@@ -263,6 +273,13 @@ properties:
     description: Time (s) between successive assessments of the TMA setpoint.
     type: number
     default: 300.0
+  closed_at_night_setpoint_cadence:
+    description: >-
+      Cadence (s) at which the nighttime closed-dome M1M3TS and top-end
+      setpoints are reassessed. If absent, m1m3_setpoint_cadence is used.
+    type: [number, "null"]
+    default: null
+    exclusiveMinimum: 0
   m1m3ts_delay_mode:
     description: Behavior after dome opening before resuming M1M3TS ambient tracking.
     type: object
@@ -397,8 +414,8 @@ required:
   - glycol_setpoint_delta
   - heater_setpoint_delta
   - top_end_setpoint_delta
-  - m1m3_extra_delta_closedatnite
-  - top_end_setpoint_delta_closedatnite
+  - m1m3_extra_delta_closed_at_night
+  - top_end_setpoint_delta_closed_at_night
   - m1m3_setpoint_cadence
   - m1m3ts_delay_mode
   - setpoint_deadband_heating
@@ -734,7 +751,6 @@ additionalProperties: false
             async with self.diurnal_timer.sunrise_condition:
                 await self.diurnal_timer.sunrise_condition.wait()
 
-                # Avoid stepping on setpoints from the closedatnite coroutine.
                 await asyncio.sleep(self.m1m3_setpoint_cadence)
 
                 last_twilight_temperature = await self.weather_model.get_last_twilight_temperature()
@@ -768,8 +784,11 @@ additionalProperties: false
             # Otherwise, there would be a conflict between this coroutine
             # and the one that controls the setpoints based on an indoor
             # temperature.
-            if "closedatnite" in self.features_to_disable or "require_dome_open" in self.features_to_disable:
-                await asyncio.sleep(self.m1m3_setpoint_cadence)
+            if (
+                "closed_at_night" in self.features_to_disable
+                or "require_dome_open" in self.features_to_disable
+            ):
+                await asyncio.sleep(self.closed_at_night_setpoint_cadence)
                 continue
 
             if self.diurnal_timer.is_night(Time.now()) and self.dome_model.is_closed:
@@ -783,18 +802,18 @@ additionalProperties: false
                     warned_no_temperature = False
                     await self.apply_setpoints(
                         outdoor_temperature,
-                        delta_adjustment=self.m1m3_extra_delta_closedatnite,
+                        delta_adjustment=self.m1m3_extra_delta_closed_at_night,
                     )
 
                     if "top_end" not in self.features_to_disable:
                         await self.send_set_thermal(
                             top_end_chiller_setpoint=(
-                                outdoor_temperature + self.top_end_setpoint_delta_closedatnite
+                                outdoor_temperature + self.top_end_setpoint_delta_closed_at_night
                             ),
                             top_end_chiller_state=ThermalCommandState.ON,
                         )
 
-            await asyncio.sleep(self.m1m3_setpoint_cadence)
+            await asyncio.sleep(self.closed_at_night_setpoint_cadence)
 
     def clear_twilight_forecast_callback(self) -> None:
         if self.twilight_forecast_callback_id is None:

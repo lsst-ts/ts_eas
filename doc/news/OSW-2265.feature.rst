@@ -1,0 +1,1 @@
+Added a configurable setpoint cadence for nighttime closed-dome operation in HVAC and TMA.

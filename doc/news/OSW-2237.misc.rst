@@ -1,0 +1,1 @@
+Renamed ``closedatnite`` configuration items to ``closed_at_night``.
