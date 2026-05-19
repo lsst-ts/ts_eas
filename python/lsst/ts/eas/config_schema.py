@@ -57,7 +57,7 @@ CONFIG_SCHEMA = yaml.safe_load(
             * `glycol_chillers`: Glycol chillers will not be controlled in HVAC.
             * `fanspeed`: MTM1M3TS fans will not be controlled.
             * `m1m3ts`: MTM1M3TS setpoints will not be applied.
-            * `closedatnite`: Nighttime closed-dome setpoint control will not run.
+            * `closed_at_night`: Nighttime closed-dome setpoint control will not run.
             * `require_dome_open`: functionality will operate even when the dome is closed.
         type: array
         items:
@@ -73,7 +73,7 @@ CONFIG_SCHEMA = yaml.safe_load(
             - glycol_chillers
             - fanspeed
             - m1m3ts
-            - closedatnite
+            - closed_at_night
             - require_dome_open
       twilight_definition:
         description: >
