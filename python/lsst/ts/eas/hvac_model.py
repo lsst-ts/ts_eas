@@ -83,6 +83,8 @@ class HvacModel:
     vec04_hold_time : `float`
         Minimum time to wait before changing the state of the VEC-04 fan. This
         value is ignored if the dome is opened or closed. (s)
+    vec04_fan_frequency : `float`
+        Rotation frequency commanded to the VEC-04 fan when it is enabled (Hz).
     glycol_band_low : `float`
         The lower bound (more negative) of the allowed difference between the
         average glycol setpoint and the ambient temperature (°C). This
@@ -134,6 +136,7 @@ class HvacModel:
         setpoint_lower_limit: float,
         wind_threshold: float,
         vec04_hold_time: float,
+        vec04_fan_frequency: float,
         glycol_band_low: float,
         glycol_band_high: float,
         glycol_average_offset: float,
@@ -169,6 +172,7 @@ class HvacModel:
         self.setpoint_lower_limit = setpoint_lower_limit
         self.wind_threshold = wind_threshold
         self.vec04_hold_time = vec04_hold_time
+        self.vec04_fan_frequency = vec04_fan_frequency
         self.features_to_disable = features_to_disable
 
         # Forecast-specific delta overrides
@@ -254,6 +258,11 @@ properties:
     description: >-
       Minimum time to wait before changing the state of the VEC-04 fan. This
       value is ignored if the dome is opened or closed (s).
+  vec04_fan_frequency:
+    type: number
+    default: 55.0
+    description: >-
+      Rotation frequency commanded to the VEC-04 fan when it is enabled (Hz).
   glycol_band_low:
     type: number
     default: -10.0
@@ -335,6 +344,10 @@ additionalProperties: false
             return None
         return commands
 
+    @command_wrapper(remote_attr="hvac_remote", command_attr="cmd_configFan")
+    async def config_fan(self, frequency: float) -> dict[str, Any]:
+        return {"device_id": DeviceId.airExtractionFan04Dome, "frequency": frequency}
+
     async def monitor(self) -> None:
         """Monitor the dome status and windspeed to control the HVAC.
 
@@ -408,6 +421,7 @@ additionalProperties: false
                     self.last_vec04_time = utils.current_tai()
                     if wind_threshold:
                         self.log.info(f"Turning on VEC-04 fan! {change_message}")
+                        await self.config_fan(self.vec04_fan_frequency)
                         enable_device_list.append(DeviceId.airExtractionFan04Dome)
                     else:
                         self.log.info(f"Turning off VEC-04 fan! {change_message}")

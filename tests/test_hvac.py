@@ -152,6 +152,7 @@ class HvacMock(salobj.BaseCsc):
         self.disable_called: set[int] = set()
         self.chiller_setpoints: dict[int, float] = dict()  # Calls to configChiller
         self.ahu_setpoints: dict[int, float] = dict()  # Calls to configLowerAhu
+        self.fan_frequencies: dict[int, float] = dict()  # Calls to configFan
 
     async def do_enableDevice(self, data: salobj.BaseMsgType) -> None:
         self.enable_called.add(data.device_id)
@@ -164,6 +165,9 @@ class HvacMock(salobj.BaseCsc):
 
     async def do_configChiller(self, data: salobj.BaseMsgType) -> None:
         self.chiller_setpoints[data.device_id] = data.activeSetpoint
+
+    async def do_configFan(self, data: salobj.BaseMsgType) -> None:
+        self.fan_frequencies[data.device_id] = data.frequency
 
 
 class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
@@ -218,6 +222,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             setpoint_lower_limit=6.0,
             wind_threshold=10.0,
             vec04_hold_time=0.0,
+            vec04_fan_frequency=55.0,
             glycol_band_low=-10.0,
             glycol_band_high=-5.0,
             glycol_average_offset=-7.5,
@@ -462,9 +467,13 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         except asyncio.CancelledError:
             pass  # expected
 
-        # VEC-04 was enabled
+        # VEC-04 was enabled and its frequency was configured
         self.assertIn(DeviceId.airExtractionFan04Dome, self.hvac.enable_called)
         self.assertNotIn(DeviceId.airExtractionFan04Dome, self.hvac.disable_called)
+        self.assertEqual(
+            self.hvac.fan_frequencies.get(DeviceId.airExtractionFan04Dome),
+            55.0,
+        )
 
         for ahu in (
             DeviceId.airHandlingUnit01Dome,
@@ -491,6 +500,10 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(STD_SLEEP)
         self.assertIn(DeviceId.airExtractionFan04Dome, self.hvac.enable_called)
         self.assertNotIn(DeviceId.airExtractionFan04Dome, self.hvac.disable_called)
+        self.assertEqual(
+            self.hvac.fan_frequencies.get(DeviceId.airExtractionFan04Dome),
+            55.0,
+        )
 
         # Wind rises above threshold --> should disable VEC-04
         self.weather.average_windspeed = 12.0
