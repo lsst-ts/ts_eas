@@ -160,6 +160,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
 
         self.hvac.cmd_enableDevice.callback = self.enable_callback
         self.hvac.cmd_disableDevice.callback = self.disable_callback
+        self.hvac.cmd_configFan.callback = self.fan_callback
         self.mtdome.cmd_setLouvers.callback = self.set_louvers_callback
 
         try:
@@ -212,6 +213,10 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 self.vec04_state = True
 
         self.hvac_events[message.device_id].set()
+
+    async def fan_callback(self, message: salobj.topics.BaseTopic.DataType) -> None:
+        """Callback for HVAC.cmd_configFan."""
+        self.log.info(f"fan_callback {message.device_id=} {message.frequency=}")
 
     async def disable_callback(self, message: salobj.topics.BaseTopic.DataType) -> None:
         """Callback for HVAC.cmd_disableDevice."""
@@ -650,6 +655,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
 
             self.hvac.cmd_enableDevice.callback = self.enable_callback
             self.hvac.cmd_disableDevice.callback = self.disable_callback
+            self.hvac.cmd_configFan.callback = self.fan_callback
 
             await asyncio.wait_for(
                 asyncio.gather(
