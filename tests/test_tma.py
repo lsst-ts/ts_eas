@@ -27,6 +27,8 @@ import unittest
 from collections import deque
 from types import SimpleNamespace
 
+import jsonschema
+
 from lsst.ts import eas, salobj
 from lsst.ts.eas.weatherforecast_model import WeatherForecastModel
 
@@ -142,9 +144,9 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 glycol_setpoint_delta=model_args["glycol_setpoint_delta"],
                 heater_setpoint_delta=model_args["heater_setpoint_delta"],
                 top_end_setpoint_delta=model_args["top_end_setpoint_delta"],
-                m1m3_extra_delta_closedatnite=model_args.get("m1m3_extra_delta_closedatnite", 0.0),
-                top_end_setpoint_delta_closedatnite=model_args.get(
-                    "top_end_setpoint_delta_closedatnite",
+                m1m3_extra_delta_closed_at_night=model_args.get("m1m3_extra_delta_closed_at_night", 0.0),
+                top_end_setpoint_delta_closed_at_night=model_args.get(
+                    "top_end_setpoint_delta_closed_at_night",
                     model_args["top_end_setpoint_delta"],
                 ),
                 m1m3_setpoint_cadence=cadence,
@@ -244,8 +246,8 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         glycol_setpoint_delta = -2.0
         heater_setpoint_delta = -1.0
         top_end_setpoint_delta = -0.5
-        m1m3_extra_delta_closedatnite = 0.5
-        top_end_setpoint_delta_closedatnite = -1.5
+        m1m3_extra_delta_closed_at_night = 0.5
+        top_end_setpoint_delta_closed_at_night = -1.5
 
         for case in scenarios:
             with self.subTest(case=case["name"]):
@@ -257,19 +259,19 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                     glycol_setpoint_delta=glycol_setpoint_delta,
                     heater_setpoint_delta=heater_setpoint_delta,
                     top_end_setpoint_delta=top_end_setpoint_delta,
-                    m1m3_extra_delta_closedatnite=m1m3_extra_delta_closedatnite,
-                    top_end_setpoint_delta_closedatnite=top_end_setpoint_delta_closedatnite,
+                    m1m3_extra_delta_closed_at_night=m1m3_extra_delta_closed_at_night,
+                    top_end_setpoint_delta_closed_at_night=top_end_setpoint_delta_closed_at_night,
                     features_to_disable=[],
                 )
 
                 if case["expect_m1m3"]:
                     self.assertEqual(
                         glycol_setpoint,
-                        case["indoor_temperature"] + glycol_setpoint_delta + m1m3_extra_delta_closedatnite,
+                        case["indoor_temperature"] + glycol_setpoint_delta + m1m3_extra_delta_closed_at_night,
                     )
                     self.assertEqual(
                         heater_setpoint,
-                        case["indoor_temperature"] + heater_setpoint_delta + m1m3_extra_delta_closedatnite,
+                        case["indoor_temperature"] + heater_setpoint_delta + m1m3_extra_delta_closed_at_night,
                     )
                 else:
                     self.assertIsNone(glycol_setpoint)
@@ -278,7 +280,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 if case["expect_top_end"]:
                     self.assertEqual(
                         top_end_setpoint,
-                        case["indoor_temperature"] + top_end_setpoint_delta_closedatnite,
+                        case["indoor_temperature"] + top_end_setpoint_delta_closed_at_night,
                     )
                 else:
                     self.assertIsNone(top_end_setpoint)
@@ -427,8 +429,8 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 glycol_setpoint_delta=-2,
                 heater_setpoint_delta=heater_setpoint_delta,
                 top_end_setpoint_delta=-1,
-                m1m3_extra_delta_closedatnite=0.0,
-                top_end_setpoint_delta_closedatnite=-1,
+                m1m3_extra_delta_closed_at_night=0.0,
+                top_end_setpoint_delta_closed_at_night=-1,
                 m1m3_setpoint_cadence=10,
                 setpoint_deadband_heating=0,
                 setpoint_deadband_cooling=0,
@@ -517,8 +519,8 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 glycol_setpoint_delta=-2.0,
                 heater_setpoint_delta=-1.0,
                 top_end_setpoint_delta=-1.0,
-                m1m3_extra_delta_closedatnite=0.0,
-                top_end_setpoint_delta_closedatnite=-1.0,
+                m1m3_extra_delta_closed_at_night=0.0,
+                top_end_setpoint_delta_closed_at_night=-1.0,
                 m1m3_setpoint_cadence=10,
                 setpoint_deadband_heating=0,
                 setpoint_deadband_cooling=0,
@@ -574,8 +576,8 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 glycol_setpoint_delta=-2.0,
                 heater_setpoint_delta=-1.0,
                 top_end_setpoint_delta=-1.0,
-                m1m3_extra_delta_closedatnite=0.0,
-                top_end_setpoint_delta_closedatnite=-1.0,
+                m1m3_extra_delta_closed_at_night=0.0,
+                top_end_setpoint_delta_closed_at_night=-1.0,
                 m1m3_setpoint_cadence=10,
                 setpoint_deadband_heating=0,
                 setpoint_deadband_cooling=0,
@@ -637,8 +639,8 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 glycol_setpoint_delta=-2.0,
                 heater_setpoint_delta=-1.0,
                 top_end_setpoint_delta=-1.0,
-                m1m3_extra_delta_closedatnite=0.0,
-                top_end_setpoint_delta_closedatnite=-1.0,
+                m1m3_extra_delta_closed_at_night=0.0,
+                top_end_setpoint_delta_closed_at_night=-1.0,
                 m1m3_setpoint_cadence=10,
                 setpoint_deadband_heating=0,
                 setpoint_deadband_cooling=0,
@@ -698,8 +700,8 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 glycol_setpoint_delta=-2,
                 heater_setpoint_delta=0.0,
                 top_end_setpoint_delta=-1,
-                m1m3_extra_delta_closedatnite=0.0,
-                top_end_setpoint_delta_closedatnite=-1,
+                m1m3_extra_delta_closed_at_night=0.0,
+                top_end_setpoint_delta_closed_at_night=-1,
                 m1m3_setpoint_cadence=cadence,
                 setpoint_deadband_heating=0,
                 setpoint_deadband_cooling=0,
@@ -754,6 +756,32 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             done, pending = await asyncio.wait({task}, timeout=STD_TIMEOUT)
             if pending:
                 self.fail("follow_ess_indoor did not stop before timeout")
+
+    def test_closed_at_night_setpoint_cadence_schema(self) -> None:
+        """closed_at_night_setpoint_cadence setting affects cadence."""
+        validator = salobj.DefaultingValidator(eas.tma_model.TmaModel.get_config_schema())
+        base_config: dict[str, typing.Any] = {
+            "m1m3ts_delay_mode": {"mode": "time_delay", "delay": 0.0},
+            "fan_speed": {
+                "fan_speed_min": 700.0,
+                "fan_speed_max": 2000.0,
+                "fan_glycol_heater_offset_min": -1.0,
+                "fan_glycol_heater_offset_max": -4.0,
+                "fan_throttle_turn_on_temp_diff": 0.0,
+                "fan_throttle_max_temp_diff": 1.0,
+            },
+        }
+
+        validated = validator.validate(dict(base_config))
+        self.assertIsNone(validated["closed_at_night_setpoint_cadence"])
+
+        validated = validator.validate({**base_config, "closed_at_night_setpoint_cadence": 30.0})
+        self.assertEqual(validated["closed_at_night_setpoint_cadence"], 30.0)
+
+        for bad_value in (0, -1.0):
+            with self.subTest(bad_value=bad_value):
+                with self.assertRaises(jsonschema.exceptions.ValidationError):
+                    validator.validate({**base_config, "closed_at_night_setpoint_cadence": bad_value})
 
     def basic_make_csc(
         self,
