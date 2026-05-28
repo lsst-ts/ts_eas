@@ -1,1 +1,0 @@
-Added frequency control via configFan when enabling VEC-04.

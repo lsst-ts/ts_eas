@@ -1,1 +1,0 @@
-Removed the unused ``glycol_forecast_active`` flag from ``HvacModel``. It was a leftover from when the weather forecast was expected to apply glycol setpoints; that behavior was later removed but the flag remained.
