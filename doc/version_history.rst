@@ -1,3 +1,26 @@
+v0.16.0 (2026-05-28)
+====================
+
+New Features
+------------
+
+- Added daytime control of louvers. (`OSW-1555 <https://rubinobs.atlassian.net//browse/OSW-1555>`_)
+- Added a configurable setpoint cadence for nighttime closed-dome operation in HVAC and TMA. (`OSW-2265 <https://rubinobs.atlassian.net//browse/OSW-2265>`_)
+
+
+Bug Fixes
+---------
+
+- Added frequency control via configFan when enabling VEC-04. (`OSW-2348 <https://rubinobs.atlassian.net//browse/OSW-2348>`_)
+
+
+Other Changes and Additions
+---------------------------
+
+- Renamed ``closedatnite`` configuration items to ``closed_at_night``. (`OSW-2237 <https://rubinobs.atlassian.net//browse/OSW-2237>`_)
+- Removed the unused ``glycol_forecast_active`` flag from ``HvacModel``. It was a leftover from when the weather forecast was expected to apply glycol setpoints; that behavior was later removed but the flag remained. (`OSW-2274 <https://rubinobs.atlassian.net//browse/OSW-2274>`_)
+
+
 v0.15.0 (2026-05-06)
 ====================
 
