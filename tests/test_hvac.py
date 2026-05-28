@@ -29,6 +29,7 @@ from types import SimpleNamespace
 from typing import NotRequired, TypedDict
 
 import astropy
+import jsonschema
 import yaml
 from astropy.time import Time, TimeDelta
 
@@ -151,6 +152,7 @@ class HvacMock(salobj.BaseCsc):
         self.disable_called: set[int] = set()
         self.chiller_setpoints: dict[int, float] = dict()  # Calls to configChiller
         self.ahu_setpoints: dict[int, float] = dict()  # Calls to configLowerAhu
+        self.fan_frequencies: dict[int, float] = dict()  # Calls to configFan
 
     async def do_enableDevice(self, data: salobj.BaseMsgType) -> None:
         self.enable_called.add(data.device_id)
@@ -163,6 +165,9 @@ class HvacMock(salobj.BaseCsc):
 
     async def do_configChiller(self, data: salobj.BaseMsgType) -> None:
         self.chiller_setpoints[data.device_id] = data.activeSetpoint
+
+    async def do_configFan(self, data: salobj.BaseMsgType) -> None:
+        self.fan_frequencies[data.device_id] = data.frequency
 
 
 class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
@@ -212,11 +217,12 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
     def make_model(self, **overrides: float | list[int] | list[str] | None) -> hvac_model.HvacModel:
         params = dict(
             ahu_setpoint_delta=0.0,
-            ahu_setpoint_delta_closedatnite=0.0,
+            ahu_setpoint_delta_closed_at_night=0.0,
             ahu_control=[1, 2, 3, 4],
             setpoint_lower_limit=6.0,
             wind_threshold=10.0,
             vec04_hold_time=0.0,
+            vec04_fan_frequency=55.0,
             glycol_band_low=-10.0,
             glycol_band_high=-5.0,
             glycol_average_offset=-7.5,
@@ -461,9 +467,13 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         except asyncio.CancelledError:
             pass  # expected
 
-        # VEC-04 was enabled
+        # VEC-04 was enabled and its frequency was configured
         self.assertIn(DeviceId.airExtractionFan04Dome, self.hvac.enable_called)
         self.assertNotIn(DeviceId.airExtractionFan04Dome, self.hvac.disable_called)
+        self.assertEqual(
+            self.hvac.fan_frequencies.get(DeviceId.airExtractionFan04Dome),
+            55.0,
+        )
 
         for ahu in (
             DeviceId.airHandlingUnit01Dome,
@@ -490,6 +500,10 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(STD_SLEEP)
         self.assertIn(DeviceId.airExtractionFan04Dome, self.hvac.enable_called)
         self.assertNotIn(DeviceId.airExtractionFan04Dome, self.hvac.disable_called)
+        self.assertEqual(
+            self.hvac.fan_frequencies.get(DeviceId.airExtractionFan04Dome),
+            55.0,
+        )
 
         # Wind rises above threshold --> should disable VEC-04
         self.weather.average_windspeed = 12.0
@@ -701,7 +715,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             night: bool
             closed: bool
             ahu_setpoint_delta: NotRequired[float]
-            ahu_setpoint_delta_closedatnite: NotRequired[float]
+            ahu_setpoint_delta_closed_at_night: NotRequired[float]
             temp: float
             expect_setpoints: dict[str, float]
 
@@ -727,7 +741,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 "closed": True,
                 "temp": 9.0,
                 "ahu_setpoint_delta": 0.0,
-                "ahu_setpoint_delta_closedatnite": -1.5,
+                "ahu_setpoint_delta_closed_at_night": -1.5,
                 "expect_setpoints": {
                     ahu: 7.5
                     for ahu in (
@@ -770,7 +784,7 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
 
                 model = self.make_model(
                     ahu_setpoint_delta=case.get("ahu_setpoint_delta", 0.0),
-                    ahu_setpoint_delta_closedatnite=case.get("ahu_setpoint_delta_closedatnite", 0.0),
+                    ahu_setpoint_delta_closed_at_night=case.get("ahu_setpoint_delta_closed_at_night", 0.0),
                 )
                 task = asyncio.create_task(model.apply_setpoint_at_night())
 
@@ -793,6 +807,33 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             with self.subTest(config_path=filename):
                 validated = validator.validate(vars(self.get_config(filename)))
                 self.assertEqual(validated["ahu_control"], expected_ahu_control)
+
+    def test_closed_at_night_setpoint_cadence(self) -> None:
+        """Schema and constructor handling of closed_at_night cadence."""
+        validator = salobj.DefaultingValidator(hvac_model.HvacModel.get_config_schema())
+        base_config = vars(self.get_config("hvac_ahu_control_default.yaml"))
+
+        # Missing -> default null in the validated dict.
+        validated = validator.validate(dict(base_config))
+        self.assertIsNone(validated["closed_at_night_setpoint_cadence"])
+
+        # A positive number is accepted.
+        validated = validator.validate({**base_config, "closed_at_night_setpoint_cadence": 30.0})
+        self.assertEqual(validated["closed_at_night_setpoint_cadence"], 30.0)
+
+        # exclusiveMinimum: 0 rejects zero and negative values.
+        for bad_value in (0, -1.0):
+            with self.subTest(bad_value=bad_value):
+                with self.assertRaises(jsonschema.exceptions.ValidationError):
+                    validator.validate({**base_config, "closed_at_night_setpoint_cadence": bad_value})
+
+        # Constructor: omitted/None falls back to HVAC_SLEEP_TIME;
+        # explicit value is used as-is.
+        default_model = self.make_model()
+        self.assertEqual(default_model.closed_at_night_setpoint_cadence, hvac_model.HVAC_SLEEP_TIME)
+
+        override_model = self.make_model(closed_at_night_setpoint_cadence=42.0)
+        self.assertEqual(override_model.closed_at_night_setpoint_cadence, 42.0)
 
     async def test_forecast_ahu_applies_setpoint(self) -> None:
         """Forecast-based AHU setpoints should be applied."""

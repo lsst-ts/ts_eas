@@ -63,10 +63,14 @@ class HvacModel:
         The offset that will be added to the measured temperature in
         selecting a setpoint for the HVAC air handling units (AHUs/UMAs)
         measured in °C.
-    ahu_setpoint_delta_closedatnite : `float`
+    ahu_setpoint_delta_closed_at_night : `float`
         The offset that will be added to the measured temperature in
         selecting a setpoint for the HVAC air handling units (AHUs/UMAs)
         during nighttime closed-dome operation, measured in °C.
+    closed_at_night_setpoint_cadence : `float`, optional
+        Cadence (s) at which the nighttime closed-dome AHU setpoint is
+        reassessed. If ``None``, falls back to the default monitor sleep
+        time (``HVAC_SLEEP_TIME``).
     ahu_control : `list`[`int`]
         The AHU numbers that EAS is allowed to control. Values correspond
         to AHUs 1 through 4.
@@ -79,6 +83,8 @@ class HvacModel:
     vec04_hold_time : `float`
         Minimum time to wait before changing the state of the VEC-04 fan. This
         value is ignored if the dome is opened or closed. (s)
+    vec04_fan_frequency : `float`
+        Rotation frequency commanded to the VEC-04 fan when it is enabled (Hz).
     glycol_band_low : `float`
         The lower bound (more negative) of the allowed difference between the
         average glycol setpoint and the ambient temperature (°C). This
@@ -125,11 +131,12 @@ class HvacModel:
         weatherforecast_model: WeatherForecastModel,
         hvac_remote: salobj.Remote,
         ahu_setpoint_delta: float,
-        ahu_setpoint_delta_closedatnite: float,
+        ahu_setpoint_delta_closed_at_night: float,
         ahu_control: list[int],
         setpoint_lower_limit: float,
         wind_threshold: float,
         vec04_hold_time: float,
+        vec04_fan_frequency: float,
         glycol_band_low: float,
         glycol_band_high: float,
         glycol_average_offset: float,
@@ -139,6 +146,7 @@ class HvacModel:
         glycol_absolute_maximum: float,
         features_to_disable: list[str],
         forecast_ahu_setpoint_delta: float | None = None,
+        closed_at_night_setpoint_cadence: float | None = None,
         allow_send: Callable[[], bool] | None = None,
     ) -> None:
         self.log = log
@@ -154,11 +162,17 @@ class HvacModel:
         self.weather_model = weather_model
         self.weatherforecast_model = weatherforecast_model
         self.ahu_setpoint_delta = ahu_setpoint_delta
-        self.ahu_setpoint_delta_closedatnite = ahu_setpoint_delta_closedatnite
+        self.ahu_setpoint_delta_closed_at_night = ahu_setpoint_delta_closed_at_night
+        self.closed_at_night_setpoint_cadence = (
+            closed_at_night_setpoint_cadence
+            if closed_at_night_setpoint_cadence is not None
+            else HVAC_SLEEP_TIME
+        )
         self.ahu_control = ahu_control
         self.setpoint_lower_limit = setpoint_lower_limit
         self.wind_threshold = wind_threshold
         self.vec04_hold_time = vec04_hold_time
+        self.vec04_fan_frequency = vec04_fan_frequency
         self.features_to_disable = features_to_disable
 
         # Forecast-specific delta overrides
@@ -179,11 +193,6 @@ class HvacModel:
         # Glycol setpoints
         self.glycol_setpoint1: float | None = None
         self.glycol_setpoint2: float | None = None
-
-        # When True, a forecast-driven setpoint is active and
-        # monitor_glycol_chillers should apply it rather than recomputing
-        # from the current indoor temperature. Cleared at twilight.
-        self.glycol_forecast_active: bool = False
 
         # The remote
         self.hvac_remote = hvac_remote
@@ -214,7 +223,7 @@ properties:
       The offset that will be applied to the measured temperature in
       selecting a setpoint for the HVAC air handling units (AHUs/UMAs)
       measured in °C.
-  ahu_setpoint_delta_closedatnite:
+  ahu_setpoint_delta_closed_at_night:
     type: number
     default: -1.0
     description: >-
@@ -249,6 +258,11 @@ properties:
     description: >-
       Minimum time to wait before changing the state of the VEC-04 fan. This
       value is ignored if the dome is opened or closed (s).
+  vec04_fan_frequency:
+    type: number
+    default: 55.0
+    description: >-
+      Rotation frequency commanded to the VEC-04 fan when it is enabled (Hz).
   glycol_band_low:
     type: number
     default: -10.0
@@ -283,6 +297,13 @@ properties:
     description: >-
       AHU setpoint offset (°C) used when driven by forecast. If absent,
       ahu_setpoint_delta is used.
+  closed_at_night_setpoint_cadence:
+    type: [number, "null"]
+    default: null
+    exclusiveMinimum: 0
+    description: >-
+      Cadence (s) at which the nighttime closed-dome AHU setpoint is
+      reassessed. If absent, the default monitor sleep time is used.
 required:
   - ahu_setpoint_delta
   - setpoint_lower_limit
@@ -322,6 +343,10 @@ additionalProperties: false
         if not commands:
             return None
         return commands
+
+    @command_wrapper(remote_attr="hvac_remote", command_attr="cmd_configFan")
+    async def config_fan(self, frequency: float) -> dict[str, Any]:
+        return {"device_id": DeviceId.airExtractionFan04Dome, "frequency": frequency}
 
     async def monitor(self) -> None:
         """Monitor the dome status and windspeed to control the HVAC.
@@ -396,6 +421,7 @@ additionalProperties: false
                     self.last_vec04_time = utils.current_tai()
                     if wind_threshold:
                         self.log.info(f"Turning on VEC-04 fan! {change_message}")
+                        await self.config_fan(self.vec04_fan_frequency)
                         enable_device_list.append(DeviceId.airExtractionFan04Dome)
                     else:
                         self.log.info(f"Turning off VEC-04 fan! {change_message}")
@@ -463,7 +489,6 @@ additionalProperties: false
             return
         self.weatherforecast_model.remove_callback(self.twilight_forecast_callback_id)
         self.twilight_forecast_callback_id = None
-        self.glycol_forecast_active = False
 
     def set_twilight_forecast_callback(self) -> None:
         self.clear_twilight_forecast_callback()
@@ -638,28 +663,23 @@ additionalProperties: false
                     await asyncio.sleep(HVAC_SLEEP_TIME)
                     continue
 
-                if not self.glycol_forecast_active:
-                    # After the setpoints are chosen at noon, monitor
-                    # the system and adjust setpoints if needed.
-                    ambient_temperature = self.weather_model.current_indoor_temperature
-                    if ambient_temperature is not None and not self.check_glycol_setpoint(
-                        ambient_temperature
-                    ):
-                        self.log.debug("Recomputing glycol setpoints.")
-                        glycol_setpoint1, glycol_setpoint2 = self.compute_glycol_setpoints(
-                            ambient_temperature
-                        )
+                # After the setpoints are chosen at noon, monitor
+                # the system and adjust setpoints if needed.
+                ambient_temperature = self.weather_model.current_indoor_temperature
+                if ambient_temperature is not None and not self.check_glycol_setpoint(ambient_temperature):
+                    self.log.debug("Recomputing glycol setpoints.")
+                    glycol_setpoint1, glycol_setpoint2 = self.compute_glycol_setpoints(ambient_temperature)
 
-                        if all(
-                            (
-                                glycol_setpoint1 is not None,
-                                not math.isnan(glycol_setpoint1),
-                                glycol_setpoint2 is not None,
-                                not math.isnan(glycol_setpoint2),
-                            )
-                        ):
-                            self.glycol_setpoint1 = glycol_setpoint1
-                            self.glycol_setpoint2 = glycol_setpoint2
+                    if all(
+                        (
+                            glycol_setpoint1 is not None,
+                            not math.isnan(glycol_setpoint1),
+                            glycol_setpoint2 is not None,
+                            not math.isnan(glycol_setpoint2),
+                        )
+                    ):
+                        self.glycol_setpoint1 = glycol_setpoint1
+                        self.glycol_setpoint2 = glycol_setpoint2
 
                 chiller_commands = []
                 if self.glycol_setpoint1 is not None:
@@ -735,17 +755,17 @@ additionalProperties: false
         warned_no_temperature = False
 
         while self.diurnal_timer.is_running:
-            if "closedatnite" in self.features_to_disable:
-                await asyncio.sleep(HVAC_SLEEP_TIME)
+            if "closed_at_night" in self.features_to_disable:
+                await asyncio.sleep(self.closed_at_night_setpoint_cadence)
                 continue
 
             if self.diurnal_timer.is_night(Time.now()) and self.dome_model.is_closed:
                 if "room_setpoint" in self.features_to_disable:
-                    await asyncio.sleep(HVAC_SLEEP_TIME)
+                    await asyncio.sleep(self.closed_at_night_setpoint_cadence)
                     continue
 
                 setpoint = max(
-                    self.weather_model.current_temperature + self.ahu_setpoint_delta_closedatnite,
+                    self.weather_model.current_temperature + self.ahu_setpoint_delta_closed_at_night,
                     self.setpoint_lower_limit,
                 )
                 if math.isnan(setpoint):
@@ -768,4 +788,4 @@ additionalProperties: false
                         ]
                     )
 
-            await asyncio.sleep(HVAC_SLEEP_TIME)
+            await asyncio.sleep(self.closed_at_night_setpoint_cadence)

@@ -57,8 +57,9 @@ CONFIG_SCHEMA = yaml.safe_load(
             * `glycol_chillers`: Glycol chillers will not be controlled in HVAC.
             * `fanspeed`: MTM1M3TS fans will not be controlled.
             * `m1m3ts`: MTM1M3TS setpoints will not be applied.
-            * `closedatnite`: Nighttime closed-dome setpoint control will not run.
+            * `closed_at_night`: Nighttime closed-dome setpoint control will not run.
             * `require_dome_open`: functionality will operate even when the dome is closed.
+            * `day_louvers`: louver positions will not be adjusted based on sun position during the day.
         type: array
         items:
           type: string
@@ -73,8 +74,9 @@ CONFIG_SCHEMA = yaml.safe_load(
             - glycol_chillers
             - fanspeed
             - m1m3ts
-            - closedatnite
+            - closed_at_night
             - require_dome_open
+            - day_louvers
       twilight_definition:
         description: >
           Definition of twilight. Can be a number (in degrees) between -90 and 0, corresponding

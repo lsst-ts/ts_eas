@@ -40,6 +40,7 @@ from lsst.ts.xml.enums.HVAC import DeviceId
 STD_TIMEOUT = 60
 STD_SLEEP = 5
 LONG_SLEEP = 15
+SPIN_SLEEP = 0.1
 
 TEST_CONFIG_DIR = pathlib.Path(__file__).parents[1].joinpath("tests", "config")
 TEST_WIND_DATA_DIR = pathlib.Path(__file__).parent
@@ -129,6 +130,8 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             DeviceId.airExtractionFan04Dome: asyncio.Event(),
         }
 
+        self.set_louvers_calls: list[list[float]] = []
+
         self.mtdome = salobj.Controller("MTDome")
         self.hvac = salobj.Controller("HVAC")
         self.ess = salobj.Controller("ESS", 301)
@@ -157,6 +160,8 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
 
         self.hvac.cmd_enableDevice.callback = self.enable_callback
         self.hvac.cmd_disableDevice.callback = self.disable_callback
+        self.hvac.cmd_configFan.callback = self.fan_callback
+        self.mtdome.cmd_setLouvers.callback = self.set_louvers_callback
 
         try:
             yield
@@ -209,6 +214,10 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
 
         self.hvac_events[message.device_id].set()
 
+    async def fan_callback(self, message: salobj.topics.BaseTopic.DataType) -> None:
+        """Callback for HVAC.cmd_configFan."""
+        self.log.info(f"fan_callback {message.device_id=} {message.frequency=}")
+
     async def disable_callback(self, message: salobj.topics.BaseTopic.DataType) -> None:
         """Callback for HVAC.cmd_disableDevice."""
         self.log.info(f"disable_callback {message.device_id=}")
@@ -225,6 +234,10 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 self.vec04_state = False
 
         self.hvac_events[message.device_id].set()
+
+    async def set_louvers_callback(self, message: salobj.topics.BaseTopic.DataType) -> None:
+        """Callback for MTDome.cmd_setLouvers."""
+        self.set_louvers_calls.append(list(message.position))
 
     async def wait_for_all_hvac_events(self) -> None:
         await asyncio.wait_for(
@@ -642,6 +655,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
 
             self.hvac.cmd_enableDevice.callback = self.enable_callback
             self.hvac.cmd_disableDevice.callback = self.disable_callback
+            self.hvac.cmd_configFan.callback = self.fan_callback
 
             await asyncio.wait_for(
                 asyncio.gather(
@@ -670,3 +684,42 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.ahu3_state, True)
         self.assertEqual(self.ahu4_state, True)
         self.assertEqual(self.vec04_state, False)
+
+    async def test_louvers_commanded_when_sun_is_up(self) -> None:
+        """cmd_setLouvers should be sent when the sun is above the horizon."""
+        louver_positions = [50.0] * 34
+        mock_altaz = mock.MagicMock()
+        mock_altaz.alt.deg = 45.0
+        mock_altaz.az.deg = 180.0
+        mock_sun = mock.MagicMock()
+        mock_sun.transform_to.return_value = mock_altaz
+
+        with (
+            mock.patch("lsst.ts.eas.dome_model.DORMANT_TIME", 1.0),
+            mock.patch("lsst.ts.eas.dome_model.get_sun", return_value=mock_sun),
+        ):
+            async with (
+                self.mock_extra_cscs(),
+                self.make_csc(
+                    initial_state=salobj.State.ENABLED,
+                    config_dir=TEST_CONFIG_DIR,
+                    simulation_mode=1,
+                ),
+            ):
+                await asyncio.wait_for(self.csc.monitor_start_event.wait(), timeout=STD_TIMEOUT)
+
+                await self.mtdome.evt_summaryState.set_write(summaryState=salobj.State.ENABLED)
+                await self.mtdome.tel_azimuth.set_write(positionActual=0.0)
+                await self.mtdome.tel_louvers.set_write(
+                    positionActual=louver_positions,
+                    positionCommanded=louver_positions,
+                )
+
+                async def wait_for_louvers() -> None:
+                    while not self.set_louvers_calls:
+                        await asyncio.sleep(SPIN_SLEEP)
+
+                await asyncio.wait_for(wait_for_louvers(), timeout=STD_TIMEOUT)
+                await self.csc.close_tasks()
+
+        self.assertTrue(len(self.set_louvers_calls) > 0)
