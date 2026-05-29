@@ -32,7 +32,13 @@ from astropy.coordinates import AltAz, get_sun
 from astropy.time import Time
 
 from lsst.ts import salobj, utils
-from lsst.ts.xml.tables.mtdome import LouverTable
+
+try:
+    from lsst.ts.xml.tables.mtdome import LouverTable
+except ImportError:
+    # TODO: OSW-2359 Remove this backward compatibility once the louver table
+    # is available in the ts_xml conda package.
+    from .louver_table import LouverTable
 
 from .cmdwrapper import close_command_tasks, command_wrapper
 from .diurnal_timer import OBSERVATORY_LOCATION

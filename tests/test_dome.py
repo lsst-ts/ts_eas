@@ -28,7 +28,13 @@ from unittest import mock
 
 from lsst.ts import eas, salobj, utils
 from lsst.ts.eas.cmdwrapper import close_command_tasks
-from lsst.ts.xml.tables.mtdome import find_louver
+
+try:
+    from lsst.ts.xml.tables.mtdome import find_louver
+except ImportError:
+    # TODO: OSW-2359 Remove this backward compatibility once the louver table
+    # is available in the ts_xml conda package.
+    from lsst.ts.eas.louver_table import find_louver
 
 STD_SLEEP = 0.2
 
