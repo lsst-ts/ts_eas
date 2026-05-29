@@ -1,3 +1,12 @@
+v0.16.1 (2026-05-29)
+====================
+
+Bug Fixes
+---------
+
+- Added a temporary copy of the MTDome louver table, as a backward compatibility until it is available in the ts_xml conda package. (`OSW-2358 <https://rubinobs.atlassian.net//browse/OSW-2358>`_)
+
+
 v0.16.0 (2026-05-28)
 ====================
 

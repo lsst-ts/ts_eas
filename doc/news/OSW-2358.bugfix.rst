@@ -1,1 +1,0 @@
-Added a temporary copy of the MTDome louver table, as a backward compatibility until it is available in the ts_xml conda package.
