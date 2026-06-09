@@ -111,6 +111,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         night: bool = False,
         dome_closed: bool = False,
         run_monitor: bool = True,
+        glass_temperature: float | None = 0.0,
         **model_args: typing.Any,
     ) -> tuple[float | None, float | None, float | None, list[float] | None]:
         self.diurnal_timer = eas.diurnal_timer.DiurnalTimer()
@@ -136,7 +137,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 log=mock_m1m3ts.log,
                 diurnal_timer=self.diurnal_timer,
                 dome_model=self.dome_model,
-                glass_temperature_model=SimpleNamespace(median_temperature=0.0),
+                glass_temperature_model=SimpleNamespace(median_temperature=glass_temperature),
                 weather_model=self.weather_model,
                 weatherforecast_model=WeatherForecastModel(log=mock_m1m3ts.log),
                 m1m3ts_remote=m1m3ts_remote,
@@ -155,6 +156,8 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 maximum_heating_rate=100,
                 slow_cooling_rate=1,
                 fast_cooling_rate=10,
+                glass_offset_limit_low=model_args.get("glass_offset_limit_low", -1000.0),
+                glass_offset_limit_high=model_args.get("glass_offset_limit_high", 1000.0),
                 fan_speed={
                     "fan_speed_min": 700.0,
                     "fan_speed_max": 2000.0,
@@ -343,6 +346,100 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             places=4,
         )
 
+    async def test_glass_offset_clamp_high(self) -> None:
+        """Heater setpoint above glass + high limit is clamped to the limit."""
+        # glass=0, deltas -1/-2: raw heater = 10-1 = 9 -> clamp to 0+2 = 2
+        # (offset -7); raw glycol = 10-2 = 8 -> shifted by -7 = 1.
+        glycol_setpoint, heater_setpoint, _, _ = await self.run_with_parameters(
+            indoor_temperature=10.0,
+            night=True,
+            dome_closed=True,
+            run_monitor=False,
+            glycol_setpoint_delta=-2.0,
+            heater_setpoint_delta=-1.0,
+            top_end_setpoint_delta=-0.5,
+            glass_offset_limit_low=-2.0,
+            glass_offset_limit_high=2.0,
+            features_to_disable=[],
+        )
+        assert heater_setpoint is not None and glycol_setpoint is not None
+        self.assertAlmostEqual(heater_setpoint, 2.0, places=4)
+        self.assertAlmostEqual(glycol_setpoint, 1.0, places=4)
+
+    async def test_glass_offset_clamp_low(self) -> None:
+        """Heater setpoint below glass + low limit is clamped to the limit."""
+        # glass=0, deltas -1/-2: raw heater = -10-1 = -11 -> clamp to 0-2 = -2
+        # (offset +9); raw glycol = -10-2 = -12 -> shifted by +9 = -3.
+        glycol_setpoint, heater_setpoint, _, _ = await self.run_with_parameters(
+            indoor_temperature=-10.0,
+            night=True,
+            dome_closed=True,
+            run_monitor=False,
+            glycol_setpoint_delta=-2.0,
+            heater_setpoint_delta=-1.0,
+            top_end_setpoint_delta=-0.5,
+            glass_offset_limit_low=-2.0,
+            glass_offset_limit_high=2.0,
+            features_to_disable=[],
+        )
+        assert heater_setpoint is not None and glycol_setpoint is not None
+        self.assertAlmostEqual(heater_setpoint, -2.0, places=4)
+        self.assertAlmostEqual(glycol_setpoint, -3.0, places=4)
+
+    async def test_glass_offset_within_band_no_clamp(self) -> None:
+        """A heater setpoint inside the band is applied unchanged."""
+        # glass=0, deltas -1/-2: raw heater = 2-1 = 1 (within [-5, 5]);
+        # raw glycol = 2-2 = 0. Neither is clamped.
+        glycol_setpoint, heater_setpoint, _, _ = await self.run_with_parameters(
+            indoor_temperature=2.0,
+            night=True,
+            dome_closed=True,
+            run_monitor=False,
+            glycol_setpoint_delta=-2.0,
+            heater_setpoint_delta=-1.0,
+            top_end_setpoint_delta=-0.5,
+            glass_offset_limit_low=-5.0,
+            glass_offset_limit_high=5.0,
+            features_to_disable=[],
+        )
+        assert heater_setpoint is not None and glycol_setpoint is not None
+        self.assertAlmostEqual(heater_setpoint, 1.0, places=4)
+        self.assertAlmostEqual(glycol_setpoint, 0.0, places=4)
+
+    async def test_glass_offset_unavailable_applies_unclamped(self) -> None:
+        """With no glass temperature, setpoints are applied without clamp."""
+        # Tight band that WOULD clamp, but glass is unavailable, so raw values
+        # are sent: heater = 10-1 = 9, glycol = 10-2 = 8.
+        glycol_setpoint, heater_setpoint, _, _ = await self.run_with_parameters(
+            indoor_temperature=10.0,
+            night=True,
+            dome_closed=True,
+            run_monitor=False,
+            glass_temperature=None,
+            glycol_setpoint_delta=-2.0,
+            heater_setpoint_delta=-1.0,
+            top_end_setpoint_delta=-0.5,
+            glass_offset_limit_low=-0.5,
+            glass_offset_limit_high=0.5,
+            features_to_disable=[],
+        )
+        assert heater_setpoint is not None and glycol_setpoint is not None
+        self.assertAlmostEqual(heater_setpoint, 9.0, places=4)
+        self.assertAlmostEqual(glycol_setpoint, 8.0, places=4)
+
+    async def test_glass_offset_limit_validation(self) -> None:
+        """Constructing with low > high raises ValueError."""
+        with self.assertRaises(ValueError):
+            await self.run_with_parameters(
+                run_monitor=False,
+                glycol_setpoint_delta=-2.0,
+                heater_setpoint_delta=-1.0,
+                top_end_setpoint_delta=-0.5,
+                glass_offset_limit_low=5.0,
+                glass_offset_limit_high=-5.0,
+                features_to_disable=[],
+            )
+
     async def test_disabled_m1m3ts(self) -> None:
         """The applySetpoint should not be called when m1m3ts is disabled."""
         glycol_setpoint_delta = -2
@@ -437,6 +534,10 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 maximum_heating_rate=100,
                 slow_cooling_rate=1,
                 fast_cooling_rate=10,
+                # Wide glass-offset band so this test exercises the un-clamped
+                # fan response. Clamping is covered by the glass_offset tests.
+                glass_offset_limit_low=-1000.0,
+                glass_offset_limit_high=1000.0,
                 fan_speed={
                     "fan_speed_min": 700.0,
                     "fan_speed_max": 2000.0,
@@ -527,6 +628,11 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 maximum_heating_rate=100,
                 slow_cooling_rate=1,
                 fast_cooling_rate=10,
+                # Wide glass-offset band so this test exercises the un-clamped
+                # forecast fan/glycol response. Clamping is covered by the
+                # glass_offset tests.
+                glass_offset_limit_low=-1000.0,
+                glass_offset_limit_high=1000.0,
                 fan_speed={
                     "fan_speed_min": 700.0,
                     "fan_speed_max": 2000.0,

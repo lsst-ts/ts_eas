@@ -147,6 +147,8 @@ class TmaModel:
         maximum_heating_rate: float,
         slow_cooling_rate: float,
         fast_cooling_rate: float,
+        glass_offset_limit_low: float = -0.4,
+        glass_offset_limit_high: float = 0.2,
         fan_speed: dict[str, float],
         features_to_disable: list[str],
         forecast_glycol_setpoint_delta: float | None = None,
@@ -206,6 +208,13 @@ class TmaModel:
         self.maximum_heating_rate = maximum_heating_rate
         self.slow_cooling_rate = slow_cooling_rate
         self.fast_cooling_rate = fast_cooling_rate
+        if glass_offset_limit_low > glass_offset_limit_high:
+            raise ValueError(
+                f"glass_offset_limit_low ({glass_offset_limit_low}) must be "
+                f"<= glass_offset_limit_high ({glass_offset_limit_high})."
+            )
+        self.glass_offset_limit_low = glass_offset_limit_low
+        self.glass_offset_limit_high = glass_offset_limit_high
         self.features_to_disable = features_to_disable
 
         # Fan-driven adjustment applied on top of the configured glycol delta.
@@ -356,6 +365,22 @@ properties:
         while observing.
     type: number
     default: 10.0
+  glass_offset_limit_low:
+    description: >-
+        Minimum allowed offset (°C) of the M1M3TS heater setpoint relative to the
+        median M1M3 glass temperature. Commanded heater (and fan-target) setpoints
+        are clamped so they never fall below glass_temperature + this value.
+        Must be <= glass_offset_limit_high.
+    type: number
+    default: -0.4
+  glass_offset_limit_high:
+    description: >-
+        Maximum allowed offset (°C) of the M1M3TS heater setpoint relative to the
+        median M1M3 glass temperature. Commanded heater (and fan-target) setpoints
+        are clamped so they never exceed glass_temperature + this value.
+        Must be >= glass_offset_limit_low.
+    type: number
+    default: 0.2
   forecast_glycol_setpoint_delta:
     type: [number, "null"]
     default: null
@@ -496,6 +521,31 @@ additionalProperties: false
 
         self.log.debug("TmaModel.monitor closing...")
 
+    def clamp_to_glass_offset(self, heaters_setpoint: float, glass_temperature: float) -> float:
+        """Clamp a heater setpoint to the configured offset band around glass.
+
+        The heater setpoint is constrained so that its offset relative to the
+        median M1M3 glass temperature stays within
+        ``[glass_offset_limit_low, glass_offset_limit_high]``. Keeping the
+        heater setpoint close to the glass temperature avoids the excessive
+        z-gradients that interfere with AOS operation.
+
+        Parameters
+        ----------
+        heaters_setpoint : `float`
+            Requested heater setpoint (°C).
+        glass_temperature : `float`
+            Median M1M3 glass temperature (°C).
+
+        Returns
+        -------
+        `float`
+            The heater setpoint clamped to the glass-relative offset band.
+        """
+        lower = glass_temperature + self.glass_offset_limit_low
+        upper = glass_temperature + self.glass_offset_limit_high
+        return min(max(heaters_setpoint, lower), upper)
+
     async def apply_setpoints(
         self,
         setpoint: float,
@@ -511,6 +561,29 @@ additionalProperties: false
                 setpoint + glycol_delta + self.glycol_setpoint_delta_adjustment + delta_adjustment
             )
             heaters_setpoint = setpoint + heater_delta + delta_adjustment
+
+            # Clamp the heater setpoint to the configured offset band around
+            # M1M3 glass temperature, shifting glycol by the same amount so the
+            # configured glycol/heater relationship is preserved.
+            glass_temperature = self.glass_temperature_model.median_temperature
+            if glass_temperature is not None and math.isfinite(glass_temperature):
+                clamped_heaters = self.clamp_to_glass_offset(heaters_setpoint, glass_temperature)
+                if clamped_heaters != heaters_setpoint:
+                    self.log.info(
+                        f"Clamping M1M3TS heater setpoint to glass-relative limits: "
+                        f"{heaters_setpoint:.2f} -> {clamped_heaters:.2f}°C "
+                        f"(glass={glass_temperature:.2f}, "
+                        f"offsets=[{self.glass_offset_limit_low:.2f}, "
+                        f"{self.glass_offset_limit_high:.2f}])"
+                    )
+                    glycol_setpoint += clamped_heaters - heaters_setpoint
+                    heaters_setpoint = clamped_heaters
+            else:
+                self.log.warning(
+                    "M1M3 glass temperature unavailable; applying M1M3TS setpoints "
+                    "without glass-relative offset clamping."
+                )
+
             self.log.debug(f"Setting MTM1MTS: {glycol_setpoint=:.2f}°C {heaters_setpoint=:.2f}°C")
             await self.send_apply_setpoints(
                 glycol_setpoint=glycol_setpoint,
@@ -555,7 +628,10 @@ additionalProperties: false
         ):
             return
 
-        control_setpoint = setpoint + heater_delta
+        # Pin the fan's heater target to the same glass-relative offset band
+        # used when commanding the heater setpoint, so the fan drives toward
+        # temperature the heater will actually hold.
+        control_setpoint = self.clamp_to_glass_offset(setpoint + heater_delta, glass_temperature)
         slope = (self.fan_speed_max - self.fan_speed_min) / (
             self.fan_throttle_max_temp_diff - self.fan_throttle_turn_on_temp_diff
         )
