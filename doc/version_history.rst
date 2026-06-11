@@ -1,3 +1,12 @@
+v0.17.0 (2026-06-11)
+====================
+
+New Features
+------------
+
+- Added clamping around glass temperature. (`OSW-2418 <https://rubinobs.atlassian.net//browse/OSW-2418>`_)
+
+
 v0.16.1 (2026-05-29)
 ====================
 
