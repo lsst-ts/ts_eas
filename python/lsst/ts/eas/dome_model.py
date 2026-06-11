@@ -317,7 +317,7 @@ additionalProperties: false
         louver_command = [
             (
                 -1.0
-                if cmd < 0
+                if cmd <= 0
                 else self.louver_exposed_command
                 if sd < self.louver_sun_angle
                 else self.louver_shaded_command
