@@ -50,6 +50,11 @@ MAX_TELEMETRY_AGE = 300  # Time at which apertureShutter telemetry expires, seco
 # from the azimuth callback.
 AZIMUTH_CHANGE_THRESHOLD = 0.1
 
+# Tolerance (percent-open) within which a reported positionCommanded is
+# considered equal to the position EAS last commanded. A larger difference is
+# treated as a freshly sent command rather than EAS's own command echoed back.
+LOUVER_COMMAND_TOLERANCE = 0.1
+
 # Atmospheric pressure used in the sun-altitude refraction correction.
 SUN_ALTITUDE_PRESSURE = 700 * u.hPa
 
@@ -76,10 +81,9 @@ class DomeModel:
         the sun's azimuth at which the louver is considered to be facing the
         sun.
     louver_exposed_command : `float`
-        Commanded percent-open position for a louver that faces the sun.
-    louver_shaded_command : `float`
-        Commanded percent-open position for a louver that does not face the
-        sun.
+        Maximum commanded percent-open position for a louver that faces the
+        sun. A sun-facing louver is never opened beyond this value, nor beyond
+        the position the observer commanded.
     sun_altitude_threshold : `float`
         Sun altitude (degrees) above which louver positions are adjusted
         based on sun azimuth.
@@ -102,7 +106,6 @@ class DomeModel:
         dome_open_threshold: float,
         louver_sun_angle: float,
         louver_exposed_command: float,
-        louver_shaded_command: float,
         sun_altitude_threshold: float,
         dome_remote: salobj.Remote,
         features_to_disable: list[str],
@@ -123,14 +126,25 @@ class DomeModel:
         # at which a louver is considered to be "facing" the sun.
         self.louver_sun_angle: float = louver_sun_angle
 
-        # Desired command position for a louver facing the sun.
+        # Maximum command position for a louver facing the sun.
         self.louver_exposed_command: float = louver_exposed_command
-
-        # Desired command position for a louver that is not facing the sun.
-        self.louver_shaded_command: float = louver_shaded_command
 
         # Sun altitude (degrees) above which louvers are adjusted.
         self.sun_altitude_threshold: float = sun_altitude_threshold
+
+        # Observer-commanded position per louver. EAS caps a sun-facing louver
+        # at `louver_exposed_command` but never opens a louver beyond what the
+        # observer requested, so the observer's request must be remembered
+        # separately. This list stores observed louver commands issued by the
+        # operator so that they can be re-issued when the louver returns to a
+        # shaded position. If no command has been observed, the value is None.
+        self.louver_operator_command: list[float] | None = None
+
+        # Position EAS last intended for each louver (with -1 "do not move"
+        # resolved to the value carried forward). Used to distinguish EAS's own
+        # commands echoed back in positionCommanded from fresh observer
+        # commands. None until the first daytime adjustment; reset at sundown.
+        self.louver_eas_command: list[float] | None = None
 
         self.on_open: deque[asyncio.Event] = deque()
         self.was_closed: bool | None = None
@@ -160,13 +174,12 @@ properties:
     type: number
     default: 60.0
   louver_exposed_command:
-    description: Commanded percent-open position for a louver that faces the sun.
+    description: >-
+      Maximum commanded percent-open position for a louver that faces the sun.
+      A sun-facing louver is never opened beyond this value, nor beyond the
+      position the observer commanded.
     type: number
     default: 50.0
-  louver_shaded_command:
-    description: Commanded percent-open position for a louver that does not face the sun.
-    type: number
-    default: 100.0
   sun_altitude_threshold:
     description: >-
       Sun altitude (degrees) above which louver positions are adjusted based
@@ -177,7 +190,6 @@ required:
   - dome_open_threshold
   - louver_sun_angle
   - louver_exposed_command
-  - louver_shaded_command
 additionalProperties: false
 """
         )
@@ -294,13 +306,19 @@ additionalProperties: false
     async def adjust_louvers(self, sun_azimuth: float) -> None:
         """Adjust positions of louvers.
 
-        If a louver is actively being commanded (`positionCommanded` >= 0) then
-        the commanded position of the louver should be adjusted based on the
-        azimuth of the sun: if the louvers face the sun (within
-        `louver_sun_angle`) its commanded position should be set to
-        `exposed_lover_command`. If the louver does not face the sun, its
-        commanded position should be set to `shaded_louver_command` If the
-        louver is not commanded, it should remain uncommanded.
+        EAS never opens a louver beyond the position the observer commanded. A
+        louver the observer has opened is capped at `louver_exposed_command`
+        while it faces the sun (within `louver_sun_angle`) and is otherwise
+        left at the observer's commanded position. A louver the observer has
+        not opened remains uncommanded.
+
+        Because EAS commands louvers through the same path the observer uses,
+        the `positionCommanded` telemetry is overwritten by EAS's own caps and
+        no longer reflects the observer's intent. The standing observer command
+        is therefore tracked separately in `self.louver_operator_command`.
+        A change in `positionCommanded` that differs from what EAS last sent
+        (`self.louver_eas_command`) is taken to be a fresh observer command and
+        updates the baseline.
 
         Parameters
         ----------
@@ -310,20 +328,47 @@ additionalProperties: false
         if self.louvers_telemetry is None or self.dome_azimuth is None:
             return
 
+        position_commanded = list(self.louvers_telemetry.positionCommanded[: len(LouverTable)])
+
+        # Reconcile the observer baseline against the latest telemetry.
+        if self.louver_operator_command is None or self.louver_eas_command is None:
+            # First daytime adjustment: adopt the reported commands as the
+            # observer's standing request.
+            self.louver_operator_command = list(position_commanded)
+        else:
+            for i, commanded in enumerate(position_commanded):
+                if commanded <= 0 or abs(commanded - self.louver_eas_command[i]) > LOUVER_COMMAND_TOLERANCE:
+                    # The observer moved this louver (closed it, or commanded a
+                    # position EAS did not). Adopt it as the new baseline.
+                    self.louver_operator_command[i] = commanded
+
         louver_azimuth = [(self.dome_azimuth + louver.azimuth) % CIRCLE for louver in LouverTable]
         sun_distance = [
             min((sun_azimuth - az) % CIRCLE, (az - sun_azimuth) % CIRCLE) for az in louver_azimuth
         ]
+
+        # Settle on what commands to send:
         louver_command = [
             (
                 -1.0
-                if cmd <= 0
-                else self.louver_exposed_command
-                if sd < self.louver_sun_angle
-                else self.louver_shaded_command
+                if base <= 0  # <-- No command if the louver is closed.
+                else min(base, self.louver_exposed_command)  # Min of command or `louver_exposed_command`...
+                if sd < self.louver_sun_angle  # ...if the louver is exposed to the sun...
+                else base  # ... or the observer's commanded position otherwise.
             )
-            for cmd, sd in zip(self.louvers_telemetry.positionCommanded[: len(LouverTable)], sun_distance)
+            for base, sd in zip(self.louver_operator_command, sun_distance)
         ]
+
+        # Copy the non-negative values in `louver_command` to
+        # `self.louver_eas_command` for later reference.
+        self.louver_eas_command = [
+            previous if command < 0 else command
+            for command, previous in zip(
+                louver_command,
+                self.louver_eas_command if self.louver_eas_command is not None else louver_command,
+            )
+        ]
+
         await self.set_louvers(position=louver_command)
 
     async def update_louvers_for_sun(self) -> None:
@@ -332,7 +377,9 @@ additionalProperties: false
         Computes the sun's current altitude and azimuth at the observatory
         location and, if the sun is above `sun_altitude_threshold` and the
         ``day_louvers`` feature is not disabled, calls `adjust_louvers`
-        with the sun azimuth.
+        with the sun azimuth. When the sun is below the threshold, the tracked
+        observer baseline is cleared so the next daytime adjustment re-adopts
+        fresh observer commands rather than re-applying the previous day's.
         """
         if "day_louvers" in self.features_to_disable:
             return
@@ -348,6 +395,10 @@ additionalProperties: false
         )
         if altaz.alt.deg > self.sun_altitude_threshold:
             await self.adjust_louvers(altaz.az.deg)
+        else:
+            # Sundown: discard the stale observer baseline.
+            self.louver_operator_command = None
+            self.louver_eas_command = None
 
     async def monitor(self) -> None:
         """Monitor the sun position and adjust louvers accordingly.
