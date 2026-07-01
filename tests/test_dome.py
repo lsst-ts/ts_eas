@@ -490,6 +490,31 @@ class TestDomeModel(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.model.louver_operator_command)
         self.assertIsNone(self.model.louver_eas_command)
 
+    async def test_update_louvers_for_sun_opens_to_operator_command_at_sundown(self) -> None:
+        """At sundown each opened louver is restored to the observer command.
+
+        A sun-facing louver may have been capped below the observer's command
+        during the day. Since the daytime logic does not run again until
+        sunrise, the observer baseline is commanded one last time at sundown so
+        louvers the observer opened are not left capped overnight. Louvers the
+        observer did not open (<= 0) stay uncommanded (-1).
+        """
+        self.model.louver_operator_command = [-1.0] + [100.0] * 33
+        self.fake_remote.evt_summaryState.set_state(salobj.State.ENABLED)
+
+        mock_altaz = mock.MagicMock()
+        mock_altaz.alt.deg = -10.0
+        mock_sun = mock.MagicMock()
+        mock_sun.transform_to.return_value = mock_altaz
+
+        with mock.patch("lsst.ts.eas.dome_model.get_sun", return_value=mock_sun):
+            await self.model.update_louvers_for_sun()
+        await spin_until(lambda: bool(self.fake_remote.cmd_setLouvers.calls))
+
+        position = self.fake_remote.cmd_setLouvers.calls[-1]["position"]
+        self.assertEqual(position[0], -1.0)
+        self.assertTrue(all(p == 100.0 for p in position[1:]))
+
     async def test_monitor_skips_adjust_louvers_when_sun_is_down(self) -> None:
         """monitor() should not call adjust_louvers after sundown."""
         mock_altaz = mock.MagicMock()

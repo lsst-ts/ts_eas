@@ -377,9 +377,10 @@ additionalProperties: false
         Computes the sun's current altitude and azimuth at the observatory
         location and, if the sun is above `sun_altitude_threshold` and the
         ``day_louvers`` feature is not disabled, calls `adjust_louvers`
-        with the sun azimuth. When the sun is below the threshold, the tracked
-        observer baseline is cleared so the next daytime adjustment re-adopts
-        fresh observer commands rather than re-applying the previous day's.
+        with the sun azimuth. At sundown (the first update with the sun below
+        the threshold) each louver the observer opened is commanded to its
+        observer-commanded position one last time and the cached observer-
+        commanded position is cleared.
         """
         if "day_louvers" in self.features_to_disable:
             return
@@ -395,8 +396,11 @@ additionalProperties: false
         )
         if altaz.alt.deg > self.sun_altitude_threshold:
             await self.adjust_louvers(altaz.az.deg)
-        else:
-            # Sundown: discard the stale observer baseline.
+        elif self.louver_operator_command is not None:
+            # Sundown: the daytime cap no longer applies, so open each louver
+            # the observer opened to its commanded position one last time (the
+            # loop will not run again until sunrise), then discard the cache.
+            await self.set_louvers(self.louver_operator_command)
             self.louver_operator_command = None
             self.louver_eas_command = None
 
