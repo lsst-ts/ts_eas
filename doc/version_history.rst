@@ -1,3 +1,12 @@
+v0.17.2 (2026-07-01)
+====================
+
+Bug Fixes
+---------
+
+- Added one last louver command to be issued after sundown to restore to the observer-commanded positions. (`OSW-2643 <https://rubinobs.atlassian.net//browse/OSW-2643>`_)
+
+
 v0.17.1 (2026-06-19)
 ====================
 
