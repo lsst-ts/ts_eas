@@ -41,3 +41,7 @@ dome:
   dome_open_threshold: 50.0
 features_to_disable: []
 twilight_definition: astronomical
+louver:
+  louver_sun_angle: 60.0
+  louver_exposed_command: 50.0
+  sun_altitude_threshold: -1.0

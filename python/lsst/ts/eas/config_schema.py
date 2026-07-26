@@ -28,7 +28,7 @@ CONFIG_SCHEMA = yaml.safe_load(
     $schema: http://json-schema.org/draft-07/schema#
     $id: https://github.com/lsst-ts/ts_eas/blob/main/python/lsst/ts/eas/config_schema.py
     # title must end with one or more spaces followed by the schema version, which must begin with "v"
-    title: EAS v9
+    title: EAS v10
     description: Schema for EAS configuration files.
     type: object
     properties:
@@ -43,6 +43,9 @@ CONFIG_SCHEMA = yaml.safe_load(
         type: object
       dome:
         description: Dome configuration items.
+        type: object
+      louver:
+        description: Louver configuration items.
         type: object
       features_to_disable:
         description: >-
@@ -93,6 +96,7 @@ CONFIG_SCHEMA = yaml.safe_load(
       - hvac
       - tma
       - dome
+      - louver
       - features_to_disable
       - twilight_definition
     additionalProperties: false

@@ -35,6 +35,7 @@ from .diurnal_timer import DiurnalTimer
 from .dome_model import DomeModel
 from .glass_temperature_model import GlassTemperatureModel
 from .hvac_model import HvacModel
+from .louver_model import LouverModel
 from .tma_model import TmaModel
 from .weather_model import WeatherModel
 from .weatherforecast_model import WeatherForecastModel
@@ -118,6 +119,7 @@ class EasCsc(salobj.ConfigurableCsc):
         self.tma_model: TmaModel | None = None
 
         self.dome_model: DomeModel | None = None
+        self.louver_model: LouverModel | None = None
         self.glass_temperature_model: GlassTemperatureModel | None = None
         self.weather_model: WeatherModel | None = None
         self.weatherforecast_model: WeatherForecastModel | None = None
@@ -213,8 +215,8 @@ class EasCsc(salobj.ConfigurableCsc):
     async def close_tasks(self) -> None:
         """Stop active tasks."""
         await self.shutdown_health_monitor()
-        if self.dome_model is not None:
-            await self.dome_model.close()
+        if self.louver_model is not None:
+            await self.louver_model.close()
         if self.hvac_model is not None:
             await self.hvac_model.close()
         if self.tma_model is not None:
@@ -292,6 +294,7 @@ class EasCsc(salobj.ConfigurableCsc):
             (HvacModel, "hvac"),
             (TmaModel, "tma"),
             (DomeModel, "dome"),
+            (LouverModel, "louver"),
         ):
             schema = object_type.get_config_schema()
             validator = salobj.DefaultingValidator(schema)
@@ -299,10 +302,15 @@ class EasCsc(salobj.ConfigurableCsc):
 
         self.dome_model = DomeModel(
             log=self.log,
+            **self.config.dome,
+        )
+        self.louver_model = LouverModel(
+            log=self.log,
+            dome_model=self.dome_model,
             dome_remote=self.dome_remote,
             features_to_disable=self.config.features_to_disable,
             allow_send=self._allow_send,
-            **self.config.dome,
+            **self.config.louver,
         )
 
         self.weather_model = WeatherModel(
@@ -389,6 +397,7 @@ class EasCsc(salobj.ConfigurableCsc):
 
         # Models should be initialized before this method is called.
         assert self.dome_model is not None, "Dome model not initialized."
+        assert self.louver_model is not None, "Louver model not initialized."
         assert self.glass_temperature_model is not None, "Glass model not initialized."
         assert self.weather_model is not None, "Weather Model not initialized."
         assert self.weatherforecast_model is not None, "WeatherForecast model not initialized."
@@ -402,7 +411,7 @@ class EasCsc(salobj.ConfigurableCsc):
             )
 
         self.dome_remote.tel_apertureShutter.callback = self.dome_model.aperture_shutter_callback
-        self.dome_remote.tel_azimuth.callback = self.dome_model.azimuth_callback
+        self.dome_remote.tel_azimuth.callback = self.louver_model.azimuth_callback
         self.dome_remote.tel_louvers.callback = self.dome_model.louvers_callback
         self.ess_ts1_remote.tel_temperature.callback = self.glass_temperature_model.temperature_callback
         self.ess_ts2_remote.tel_temperature.callback = self.glass_temperature_model.temperature_callback
@@ -428,6 +437,7 @@ class EasCsc(salobj.ConfigurableCsc):
 
         self.dome_remote.tel_apertureShutter.callback = None
         self.dome_remote.tel_azimuth.callback = None
+        self.dome_remote.tel_louvers.callback = None
         self.ess_ts1_remote.tel_temperature.callback = None
         self.ess_ts2_remote.tel_temperature.callback = None
         self.ess_ts3_remote.tel_temperature.callback = None
@@ -446,7 +456,7 @@ class EasCsc(salobj.ConfigurableCsc):
         disconnects of the remotes, as well as any other form of
         recoverable failure.
         """
-        assert self.dome_model is not None, "Dome Model not initialized."
+        assert self.louver_model is not None, "Louver Model not initialized."
         assert self.hvac_model is not None, "HVAC Model not initialized."
         assert self.tma_model is not None, "TMA Model not initialized."
         assert self.diurnal_timer is not None, "Timer not initialized."
@@ -462,7 +472,7 @@ class EasCsc(salobj.ConfigurableCsc):
                     self.weather_model.monitor,
                     self.hvac_model.monitor,
                     self.tma_model.monitor,
-                    self.dome_model.monitor,
+                    self.louver_model.monitor,
                 )
             ]
 
@@ -472,7 +482,7 @@ class EasCsc(salobj.ConfigurableCsc):
                 self.weather_model.monitor_start_event.wait(),
                 self.hvac_model.monitor_start_event.wait(),
                 self.tma_model.monitor_start_event.wait(),
-                self.dome_model.monitor_start_event.wait(),
+                self.louver_model.monitor_start_event.wait(),
             )
             self.log.debug("Monitors started.")
             self.monitor_start_event.set()
