@@ -61,6 +61,10 @@ SUN_ALTITUDE_PRESSURE = 700 * u.hPa
 # Number of degrees in a complete circle.
 CIRCLE = 360.0
 
+# Maximum angle (degrees) between a louver's normal and the wind direction for
+# that louver to count as upwind.
+UPWIND_ANGLE = 90.0
+
 # Percent-open limits for a louver.
 FULLY_CLOSED = 0.0
 FULLY_OPEN = 100.0
@@ -84,10 +88,14 @@ class LouverControlMode(enum.Enum):
     DAYTIME_LOUVER_CONTROL
         Sun avoidance. A louver facing the sun is capped at
         `LouverModel.louver_exposed_command`.
+    NIGHTTIME_LOUVER_CONTROL
+        Inside-windspeed balancing. Upwind and downwind louver groups are
+        adjusted to hold the inside windspeed near a target.
     """
 
     IDLE = enum.auto()
     DAYTIME_LOUVER_CONTROL = enum.auto()
+    NIGHTTIME_LOUVER_CONTROL = enum.auto()
 
 
 class LouverModel:
@@ -117,6 +125,16 @@ class LouverModel:
     sun_altitude_threshold : `float`
         Sun altitude (degrees) above which louver positions are adjusted
         based on sun azimuth.
+    inside_windspeed_threshold : `float`
+        Target windspeed (m/s) inside the dome during nighttime louver
+        control.
+    inside_windspeed_deadband : `float`
+        Half-width (m/s) of the band around ``inside_windspeed_threshold``
+        within which no louver adjustment is made.
+    upwind_interval : `float`
+        Percent-open step applied to the upwind louvers per adjustment.
+    downwind_interval : `float`
+        Percent-open step applied to the downwind louvers per adjustment.
     features_to_disable : `list` [`str`]
         List of feature names to disable. If ``"day_louvers"`` is present,
         louvers are not adjusted during the day.
@@ -135,6 +153,10 @@ class LouverModel:
         louver_sun_angle: float,
         louver_exposed_command: float,
         sun_altitude_threshold: float,
+        inside_windspeed_threshold: float,
+        inside_windspeed_deadband: float,
+        upwind_interval: float,
+        downwind_interval: float,
         features_to_disable: list[str],
         allow_send: Callable[[], bool] | None = None,
     ) -> None:
@@ -161,6 +183,16 @@ class LouverModel:
         # Sun altitude (degrees) above which louvers are adjusted.
         self.sun_altitude_threshold: float = sun_altitude_threshold
 
+        # Target inside windspeed (m/s) and the half-width of the band around
+        # it within which no adjustment is made.
+        self.inside_windspeed_threshold: float = inside_windspeed_threshold
+        self.inside_windspeed_deadband: float = inside_windspeed_deadband
+
+        # Step increment size applied to each group per adjustment
+        # during nighttime control.
+        self.upwind_interval: float = upwind_interval
+        self.downwind_interval: float = downwind_interval
+
         # Per louver, the position the observer last commanded. MTDome's
         # positionCommanded can't be used for this, since it also reflects
         # EAS's own commands. None until EAS first reads louver telemetry.
@@ -168,6 +200,7 @@ class LouverModel:
 
         # Per louver, the positionCommanded EAS expects MTDome to report. A
         # louver that reports something else was commanded by the observer.
+        # At night, EAS steps the louvers from these positions.
         self.expected_commanded: list[float] | None = None
 
         self.log = log
@@ -203,6 +236,24 @@ properties:
       on sun azimuth.
     type: number
     default: -1.0
+  inside_windspeed_threshold:
+    description: Target windspeed (m/s) inside the dome during nighttime louver control.
+    type: number
+    default: 2.0
+  inside_windspeed_deadband:
+    description: >-
+      Half-width (m/s) of the band around the inside windspeed threshold within
+      which no louver adjustment is made.
+    type: number
+    default: 0.2
+  upwind_interval:
+    description: Percent-open step applied to the upwind louvers per adjustment.
+    type: number
+    default: 10.0
+  downwind_interval:
+    description: Percent-open step applied to the downwind louvers per adjustment.
+    type: number
+    default: 25.0
 required:
   - louver_sun_angle
   - louver_exposed_command
@@ -307,6 +358,162 @@ additionalProperties: false
 
         return LouverControlMode.IDLE
 
+    def louver_targets(self, inside_windspeed: float, upwind: list[bool]) -> list[float]:
+        """Return the target position for each louver.
+
+        The louver targets are adjusted based on indoor windspeed and the
+        outdoor wind direction. The downwind louvers are the ones stepped open
+        first and shut last; the upwind louvers are brought in only once every
+        downwind louver has run to the end of its travel.
+
+        Parameters
+        ----------
+        inside_windspeed : `float`
+            Current average windspeed (m/s) inside the dome.
+        upwind : `list` [`bool`]
+            Per-louver flags from `is_upwind`.
+
+        Returns
+        -------
+        `list` [`float`]
+            Target percent-open position per louver, clamped to 0-100.
+        """
+        if self.expected_commanded is None or self.observer_opened is None:
+            raise RuntimeError("louver_targets called before the observer baseline was captured.")
+
+        targets = self.expected_commanded
+        opened = self.observer_opened
+
+        if abs(inside_windspeed - self.inside_windspeed_threshold) <= self.inside_windspeed_deadband:
+            # No change because windspeed is within deadband.
+            return list(targets)
+
+        downwind = [index for index, is_up in enumerate(upwind) if not is_up and opened[index]]
+        upwind_group = [index for index, is_up in enumerate(upwind) if is_up and opened[index]]
+
+        # The two groups are alternatives, never both: adjust the preferred
+        # group if that is possible, and only if it is not, adjust the other.
+        # Both tests read the current targets, so a group that has been stepped
+        # to the end of its travel hands over to the other one.
+        if inside_windspeed < self.inside_windspeed_threshold:
+            # Too still: let more air in, from the downwind louvers if any of
+            # them can open further, and from the upwind ones if none can.
+            if any(targets[index] < FULLY_OPEN for index in downwind):
+                trim = {index: self.downwind_interval for index in downwind}
+            else:
+                trim = {index: self.upwind_interval for index in upwind_group}
+        else:
+            # Too windy: shut the wind out, from the upwind louvers if any of
+            # them can close further, and from the downwind ones if none can.
+            if any(targets[index] > FULLY_CLOSED for index in upwind_group):
+                trim = {index: -self.upwind_interval for index in upwind_group}
+            else:
+                trim = {index: -self.downwind_interval for index in downwind}
+
+        # Only stepped louvers are clamped. An unstepped entry is passed
+        # through verbatim, so the -1 of a louver under no command survives
+        # rather than being clamped up to 0.
+        return [
+            min(FULLY_OPEN, max(FULLY_CLOSED, position + trim[index])) if index in trim else position
+            for index, position in enumerate(targets)
+        ]
+
+    def is_upwind(self, wind_direction: float) -> list[bool]:
+        """Return, per louver, whether it faces into the wind.
+
+        A louver is upwind when its outward normal lies within
+        `UPWIND_ANGLE` degrees of the direction the wind is blowing from, and
+        downwind otherwise. Because `LouverTable` gives each louver's azimuth
+        relative to the dome, the comparison is made in absolute azimuth, so
+        the grouping changes as the dome rotates.
+
+        Note that ESS ``airFlow.direction`` is taken to be meteorological, that
+        is, the direction the wind blows *from*. A louver whose normal points
+        at that bearing therefore faces into the wind.
+
+        Parameters
+        ----------
+        wind_direction : `float`
+            Direction (degrees east of north) the wind is blowing from.
+
+        Returns
+        -------
+        `list` [`bool`]
+            One flag per louver in `LouverTable`, True when upwind.
+
+        Raises
+        ------
+        `RuntimeError`
+            If the dome azimuth is not yet known.
+        """
+        if self.dome_azimuth is None:
+            raise RuntimeError("is_upwind called before dome azimuth was known.")
+
+        louver_azimuth = [(self.dome_azimuth + louver.azimuth) % CIRCLE for louver in LouverTable]
+
+        return [
+            min((wind_direction - azimuth) % CIRCLE, (azimuth - wind_direction) % CIRCLE) <= UPWIND_ANGLE
+            for azimuth in louver_azimuth
+        ]
+
+    def enter_mode(self, mode: LouverControlMode) -> set[int]:
+        """Prepare for `mode`.
+
+        On entering `~LouverControlMode.NIGHTTIME_LOUVER_CONTROL`, sets both
+        `louver_observer_command` and `expected_commanded` to the observer's
+        latest command (see `night_baseline`), so that EAS starts stepping the
+        louvers from the observer's positions.
+
+        Parameters
+        ----------
+        mode : `LouverControlMode`
+            The mode being entered.
+
+        Returns
+        -------
+        `set` [`int`]
+            Louvers still at the daytime sun cap. They have to be restored to
+            the position commanded by the observer after being changed by EAS.
+        """
+        if mode is not LouverControlMode.NIGHTTIME_LOUVER_CONTROL:
+            return set()
+
+        baseline = self.night_baseline()
+        self.expected_commanded = list(baseline)
+        self.louver_observer_command = list(baseline)
+
+        return {
+            index for index in self.observer_commands(expected=baseline) if baseline[index] > FULLY_CLOSED
+        }
+
+    def night_baseline(self) -> list[float]:
+        """Return the observer's standing command to start nighttime control.
+
+        Prefers the standing command EAS has tracked, updated with anything
+        the observer has commanded since: telemetry alone would show EAS's own
+        daytime caps on a direct day-to-night transition, and wherever an
+        earlier nighttime walk left the louvers after a pause in IDLE. Falls
+        back to telemetry when EAS has not tracked the observer's command,
+        such as when it started up after sundown.
+
+        Returns
+        -------
+        `list` [`float`]
+            Observer-commanded position per louver, empty if not yet known.
+        """
+        if self.louver_observer_command is not None:
+            baseline = list(self.louver_observer_command)
+            if self.expected_commanded is not None:
+                for index, commanded in self.observer_commands(expected=self.expected_commanded).items():
+                    baseline[index] = commanded
+            return baseline
+
+        louvers_telemetry = self.dome_model.louvers_telemetry
+        if louvers_telemetry is None:
+            return []
+
+        return list(louvers_telemetry.positionCommanded[: len(LouverTable)])
+
     async def exit_mode(self, mode: LouverControlMode) -> None:
         """Perform the actions required when leaving `mode`.
 
@@ -339,8 +546,9 @@ additionalProperties: false
         EAS commands louvers through the same path the observer uses, so
         ``positionCommanded`` telemetry cannot say who set a value. A louver
         whose reported command differs from what EAS expects it to be is
-        taken to have been commanded by the observer since. Daytime control
-        uses this to adopt the observer's commands.
+        taken to have been commanded by the observer since. Daytime control,
+        nighttime control and the handover between them use this to adopt the
+        observer's commands.
 
         Note that telemetry that has not yet caught up with EAS's own latest
         command also differs, and is mistaken for an observer command.

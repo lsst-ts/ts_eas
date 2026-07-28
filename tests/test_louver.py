@@ -37,11 +37,11 @@ from lsst.ts.eas.louver_model import (
 )
 
 try:
-    from lsst.ts.xml.tables.mtdome import find_louver
+    from lsst.ts.xml.tables.mtdome import LouverTable, find_louver
 except ImportError:
     # TODO: OSW-2359 Remove this backward compatibility once the louver table
     # is available in the ts_xml conda package.
-    from lsst.ts.eas.louver_table import find_louver
+    from lsst.ts.eas.louver_table import LouverTable, find_louver
 
 STD_SLEEP = 0.2
 
@@ -62,7 +62,7 @@ class FakeDomeLouverCommand:
 
     Every command EAS sends is verified here rather than in individual tests,
     so a violation is caught wherever it originates -- `adjust_louvers`,
-    `exit_mode`, or any future caller.
+    `exit_mode`, the nighttime control rules, or any future caller.
 
     Attributes
     ----------
@@ -118,7 +118,9 @@ class FakeDomeLouverCommand:
 
         A louver the observer never commanded (-1) is left alone entirely, and
         one the observer commanded shut (0) may be re-commanded shut but never
-        opened.
+        opened. Note that this constrains only louvers the observer left shut:
+        nighttime control is allowed to open a louver past the position the
+        observer set, which is what the control rules are for.
         """
         if self.observer_command is None:
             return
@@ -214,6 +216,10 @@ class TestLouverModel(unittest.IsolatedAsyncioTestCase):
             louver_sun_angle=60.0,
             louver_exposed_command=50.0,
             sun_altitude_threshold=0.0,
+            inside_windspeed_threshold=2.0,
+            inside_windspeed_deadband=0.2,
+            upwind_interval=10.0,
+            downwind_interval=25.0,
             features_to_disable=[],
         )
 
@@ -275,6 +281,264 @@ class TestLouverModel(unittest.IsolatedAsyncioTestCase):
         self.model.features_to_disable = ["day_louvers"]
 
         self.assertIs(self.model.select_mode(45.0), LouverControlMode.IDLE)
+
+    async def test_louvers_grouped_by_relative_wind_direction(self) -> None:
+        """Louvers within 90 degrees of the wind direction are upwind.
+
+        With the dome at azimuth 0, each louver's absolute azimuth is just its
+        dome-local offset. For wind out of the north, the A/B panels (53.1 and
+        67.5 degrees) and the M/N panels (292.5 and 306.9) fall inside the 90
+        degree window, and everything from C round to L is downwind.
+        """
+        self.model.dome_azimuth = 0.0
+
+        upwind = self.model.is_upwind(wind_direction=0.0)
+
+        self.assertEqual(
+            [index for index, is_up in enumerate(upwind) if is_up],
+            [0, 1, 2, 3, 4, 29, 30, 31, 32, 33],
+        )
+
+    async def test_deadband_holds_the_louvers_where_they_are(self) -> None:
+        """Inside the deadband the targets do not move at all.
+
+        Crucially they are held where the control rules have put them, not
+        returned to the observer's command. Returning would undo the very
+        adjustment that brought the windspeed into the deadband, which takes
+        it straight back out again -- a state with no fixed point, so the
+        louvers would oscillate forever in steady wind.
+        """
+        observer_command = [40.0, 60.0] + [10.0] * 32
+        self.model.louver_observer_command = observer_command
+        self.model.enter_mode(LouverControlMode.NIGHTTIME_LOUVER_CONTROL)
+        upwind = [True, False] + [False] * 32
+
+        # One step away from the observer's command, then back into the band.
+        stepped = self.model.louver_targets(inside_windspeed=1.0, upwind=upwind)
+        self.model.expected_commanded = stepped
+        self.assertEqual(stepped[1], 85.0, "the downwind louver stepped open")
+
+        held = self.model.louver_targets(inside_windspeed=2.1, upwind=upwind)
+
+        self.assertEqual(held, stepped, "the deadband must hold, not revert")
+        self.assertNotEqual(
+            held[1],
+            observer_command[1],
+            "holding means staying stepped, not returning to the observer's command",
+        )
+
+    async def test_below_threshold_trims_downwind_louvers_open(self) -> None:
+        """Too still inside: each downwind louver opens one interval.
+
+        The trim is measured from the observer's own command for that louver,
+        so relative intent survives, and the upwind louvers are untouched
+        while the downwind group still has travel.
+        """
+        observer_command = [40.0, 60.0, 80.0] + [10.0] * 31
+        self.model.louver_observer_command = observer_command
+        self.model.enter_mode(LouverControlMode.NIGHTTIME_LOUVER_CONTROL)
+        upwind = [True, False, False] + [False] * 31
+
+        targets = self.model.louver_targets(inside_windspeed=1.0, upwind=upwind)
+
+        self.assertEqual(targets[:3], [40.0, 85.0, 100.0])
+
+    async def test_below_threshold_trims_upwind_only_when_downwind_cannot_open(self) -> None:
+        """The upwind louvers open only when the downwind ones cannot.
+
+        The two are alternatives, not a pair: open the downwind louvers if
+        that is possible, and only if it is not, open the upwind ones. With
+        every downwind louver already fully open there is nowhere left to go,
+        so the upwind group takes the increment and the downwind group holds.
+        """
+        observer_command = [40.0] + [FULLY_OPEN] * 33
+        self.model.louver_observer_command = observer_command
+        self.model.enter_mode(LouverControlMode.NIGHTTIME_LOUVER_CONTROL)
+        upwind = [True] + [False] * 33
+
+        targets = self.model.louver_targets(inside_windspeed=1.0, upwind=upwind)
+
+        self.assertEqual(targets[0], 50.0, "upwind opens by upwind_interval")
+        self.assertTrue(all(target == FULLY_OPEN for target in targets[1:]), "downwind unchanged")
+
+    async def test_above_threshold_trims_upwind_louvers_shut(self) -> None:
+        """Too windy inside: each upwind louver closes one interval.
+
+        Closing starts with the louvers facing into the wind, since those are
+        what is driving the inside windspeed up. A louver with less than one
+        interval of travel simply clamps shut, and the downwind group is left
+        at the observer's command.
+        """
+        observer_command = [40.0, 5.0, 60.0] + [10.0] * 31
+        self.model.louver_observer_command = observer_command
+        self.model.enter_mode(LouverControlMode.NIGHTTIME_LOUVER_CONTROL)
+        upwind = [True, True, False] + [False] * 31
+
+        targets = self.model.louver_targets(inside_windspeed=3.0, upwind=upwind)
+
+        self.assertEqual(targets[:3], [30.0, 0.0, 60.0])
+
+    async def test_above_threshold_trims_downwind_only_when_upwind_cannot_close(self) -> None:
+        """The downwind louvers close only when the upwind ones cannot.
+
+        A louver the observer left shut is already at 0% and takes no part, so
+        with nothing open on the upwind side there is nothing to close there
+        and the downwind group takes the decrement instead.
+        """
+        observer_command = [FULLY_CLOSED, FULLY_CLOSED, 60.0] + [FULLY_CLOSED] * 31
+        self.model.louver_observer_command = observer_command
+        self.model.enter_mode(LouverControlMode.NIGHTTIME_LOUVER_CONTROL)
+        upwind = [True, True, False] + [False] * 31
+
+        targets = self.model.louver_targets(inside_windspeed=3.0, upwind=upwind)
+
+        self.assertEqual(targets[:3], [FULLY_CLOSED, FULLY_CLOSED, 35.0])
+
+    async def test_entering_nighttime_seeds_louver_targets(self) -> None:
+        """Each louver's target starts at the position the observer commanded.
+
+        Handing control over must not move anything by itself, and the
+        observer's differing positions have to survive the handover.
+        """
+        observer_command = [0.0, 40.0, 80.0] + [0.0] * 31
+
+        self.model.louver_observer_command = observer_command
+        self.model.enter_mode(LouverControlMode.NIGHTTIME_LOUVER_CONTROL)
+
+        self.assertEqual(self.model.expected_commanded[:3], [0.0, 40.0, 80.0])
+
+    async def test_unopened_louvers_never_join_nighttime_control(self) -> None:
+        """Louvers the observer left shut stay shut, and never go negative.
+
+        ``positionCommanded`` reports -1 for a louver under no command and 0
+        for one commanded shut. Neither may be trimmed: doing so would open a
+        louver the observer never opened, and trimming -1 upward would put a
+        nonsensical value into the target. Only louvers the observer opened
+        take part.
+        """
+        observer_command = [-1.0, 0.0, 40.0] + [0.0] * 31
+        self.model.louver_observer_command = observer_command
+        self.model.enter_mode(LouverControlMode.NIGHTTIME_LOUVER_CONTROL)
+        upwind = [False] * len(self.model.expected_commanded)
+
+        targets = self.model.louver_targets(inside_windspeed=1.0, upwind=upwind)
+
+        self.assertEqual(targets[:3], [-1.0, 0.0, 65.0])
+
+    async def test_entering_nighttime_without_daytime_history_uses_telemetry(self) -> None:
+        """A restart after sundown takes the baseline from telemetry.
+
+        The preferred baseline is the one captured during daytime control, but
+        an EAS that started up after sundown never ran it, so it has to fall
+        back to what MTDome reports as commanded.
+        """
+        self.declare_observer_command([40.0] * 34)
+        self.assertIsNone(self.model.louver_observer_command)
+
+        self.model.enter_mode(LouverControlMode.NIGHTTIME_LOUVER_CONTROL)
+
+        self.assertEqual(self.model.expected_commanded, [40.0] * 34)
+
+    async def test_below_threshold_moves_only_the_downwind_group(self) -> None:
+        """While the downwind louvers can still open, the upwind ones do not.
+
+        The two clauses are alternatives: open the downwind louvers if that is
+        possible, and only if it is not, open the upwind ones. Here F2 sits at
+        80 and has room to go further, so it takes the increment on its own
+        and A1 stays exactly where the observer put it.
+        """
+        a1 = find_louver("A1").index
+        f2 = find_louver("F2").index
+        commands = [FULLY_CLOSED] * len(LouverTable)
+        commands[a1] = 50.0
+        commands[f2] = 80.0
+        self.model.dome_azimuth = 0.0
+        self.model.louver_observer_command = commands
+        self.model.enter_mode(LouverControlMode.NIGHTTIME_LOUVER_CONTROL)
+
+        upwind = self.model.is_upwind(wind_direction=0.0)
+        self.assertTrue(upwind[a1], "A1 faces the wind")
+        self.assertFalse(upwind[f2], "F2 faces away from it")
+
+        targets = self.model.louver_targets(inside_windspeed=1.0, upwind=upwind)
+
+        self.assertEqual(targets[f2], FULLY_OPEN, "downwind opens by its interval, clamped")
+        self.assertEqual(targets[a1], 50.0, "upwind must not move while downwind still can")
+
+    def step(self, inside_windspeed: float, upwind: list[bool]) -> list[float]:
+        """Run one control pass and commit its targets.
+
+        Parameters
+        ----------
+        inside_windspeed : `float`
+            Windspeed (m/s) inside the dome for this pass.
+        upwind : `list` [`bool`]
+            Per-louver flags from `is_upwind`.
+
+        Returns
+        -------
+        `list` [`float`]
+            The targets after this pass.
+        """
+        targets = self.model.louver_targets(inside_windspeed=inside_windspeed, upwind=upwind)
+        self.model.expected_commanded = targets
+        return targets
+
+    async def test_successive_passes_accumulate(self) -> None:
+        """The targets step further open on every pass, not just the first.
+
+        A single interval of travel is not a control rule: while the inside
+        windspeed stays below the threshold the louvers must keep opening
+        until they reach it or run out of travel.
+        """
+        observer_command = [40.0, 25.0] + [0.0] * 32
+        self.model.louver_observer_command = observer_command
+        self.model.enter_mode(LouverControlMode.NIGHTTIME_LOUVER_CONTROL)
+        upwind = [True, False] + [False] * 32
+
+        walk = [self.step(1.0, upwind)[1] for _ in range(4)]
+
+        self.assertEqual(walk, [50.0, 75.0, 100.0, 100.0], "25 percent per pass, clamped at 100")
+
+    async def test_saturated_downwind_group_hands_over_to_upwind(self) -> None:
+        """Once the downwind louvers are fully open the upwind ones take over.
+
+        The handover reads the *current* targets, so it happens when the
+        downwind group has been stepped to the end of its travel -- not only
+        when the observer happened to command it there to begin with.
+        """
+        observer_command = [40.0, 75.0] + [0.0] * 32
+        self.model.louver_observer_command = observer_command
+        self.model.enter_mode(LouverControlMode.NIGHTTIME_LOUVER_CONTROL)
+        upwind = [True, False] + [False] * 32
+
+        self.step(1.0, upwind)  # downwind 75 -> 100, upwind holds
+        self.assertEqual(self.model.expected_commanded[:2], [40.0, 100.0])
+
+        targets = self.step(1.0, upwind)
+
+        self.assertEqual(targets[0], 50.0, "upwind now takes the increment")
+        self.assertEqual(targets[1], 100.0, "downwind is already fully open")
+
+    async def test_upwind_stepped_shut_hands_over_to_downwind(self) -> None:
+        """Once the upwind louvers are shut the downwind ones start closing.
+
+        This branch is only reachable because the targets accumulate: a louver
+        the observer opened has to be stepped down to zero before the downwind
+        group is asked to close, and a single pass could never get it there.
+        """
+        observer_command = [20.0, 60.0] + [0.0] * 32
+        self.model.louver_observer_command = observer_command
+        self.model.enter_mode(LouverControlMode.NIGHTTIME_LOUVER_CONTROL)
+        upwind = [True, False] + [False] * 32
+
+        self.assertEqual(self.step(3.0, upwind)[0], 10.0, "upwind closes by its interval")
+        self.assertEqual(self.step(3.0, upwind)[0], 0.0, "and again, down to shut")
+
+        targets = self.step(3.0, upwind)
+
+        self.assertEqual(targets[0], 0.0, "upwind has nothing left to close")
+        self.assertEqual(targets[1], 35.0, "so the downwind group closes instead")
 
     # ----- record_command -----
 
