@@ -23,6 +23,7 @@ import asyncio
 import logging
 import math
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 import pandas as pd
@@ -45,6 +46,65 @@ class MockDiurnalTimer:
 
     def is_night(self, time: Time) -> bool:
         return True
+
+
+def make_weather_model() -> "eas.weather_model.WeatherModel":
+    """Return a WeatherModel with no SAL connections, for pure unit tests."""
+    return eas.weather_model.WeatherModel(
+        log=logging.getLogger(),
+        diurnal_timer=MockDiurnalTimer(),
+        efd_name="mocked",
+        ess_index=301,
+        indoor_ess_index=112,
+        wind_average_window=1800,
+        wind_minimum_window=600,
+    )
+
+
+class TestWindDirectionAverage(unittest.IsolatedAsyncioTestCase):
+    async def test_average_wind_direction_wraps_around_north(self) -> None:
+        """The wind direction average must be circular, not arithmetic.
+
+        Nighttime louver grouping compares the wind direction against louver
+        azimuths, so an average of 350 and 10 degrees has to come out near 0,
+        not the 180 an arithmetic mean would give.
+        """
+        weather_model = make_weather_model()
+        now = utils.current_tai()
+
+        for direction in (350.0, 10.0):
+            await weather_model.air_flow_callback(
+                SimpleNamespace(private_sndStamp=now, speed=5.0, direction=direction)
+            )
+
+        self.assertAlmostEqual(
+            weather_model.average_wind_direction(window=60.0) % 360.0,
+            0.0,
+            places=6,
+        )
+
+
+class TestIndoorWindspeedAverage(unittest.IsolatedAsyncioTestCase):
+    async def test_average_indoor_windspeed_accepts_both_anemometer_types(self) -> None:
+        """2D and 3D anemometers both feed the inside windspeed average.
+
+        The 2D sensors publish ``airFlow`` with a scalar ``speed``; the 3D
+        sonic sensors publish ``airTurbulence``, whose ``speed`` is a vector
+        and whose scalar magnitude is ``speedMagnitude``. Both must land in the
+        same average, since nighttime control wants the mean across the
+        configured anemometers regardless of type.
+        """
+        weather_model = make_weather_model()
+        now = utils.current_tai()
+
+        await weather_model.indoor_air_flow_callback(
+            SimpleNamespace(private_sndStamp=now, speed=1.0, direction=0.0)
+        )
+        await weather_model.indoor_air_flow_callback(
+            SimpleNamespace(private_sndStamp=now, speed=[1.0, 2.0, 2.0], speedMagnitude=3.0)
+        )
+
+        self.assertAlmostEqual(weather_model.average_indoor_windspeed(window=15.0), 2.0)
 
 
 class TestGetLastTwilightTemperature(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):

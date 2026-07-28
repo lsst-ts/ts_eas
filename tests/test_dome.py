@@ -141,6 +141,38 @@ class TestDomeModel(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(self.model.is_closed)
 
+    async def test_louvers_open_reports_any_louver_open(self) -> None:
+        """`louvers_open` is true when any louver is at or above threshold.
+
+        Nighttime louver control starts a fixed delay after the louvers open,
+        so it needs a louver-only notion of "open" -- distinct from
+        `is_closed`, which also accounts for the shutter.
+        """
+        await self.model.louvers_callback(get_closed_louver_telemetry())
+        self.assertFalse(self.model.louvers_open)
+
+        await self.model.louvers_callback(get_open_louver_telemetry())
+        self.assertTrue(self.model.louvers_open)
+
+    async def test_louvers_open_time_records_transition(self) -> None:
+        """`louvers_open_time` stamps the closed->open louver transition.
+
+        The timestamp is set once when the louvers open, held steady while they
+        stay open so the venting delay measures from the opening rather than
+        from the latest telemetry, and cleared when they close again.
+        """
+        self.assertIsNone(self.model.louvers_open_time)
+
+        await self.model.louvers_callback(get_open_louver_telemetry())
+        first_open_time = self.model.louvers_open_time
+        self.assertIsNotNone(first_open_time)
+
+        await self.model.louvers_callback(get_open_louver_telemetry())
+        self.assertEqual(self.model.louvers_open_time, first_open_time)
+
+        await self.model.louvers_callback(get_closed_louver_telemetry())
+        self.assertIsNone(self.model.louvers_open_time)
+
     async def test_is_closed_none_when_shutter_telemetry_missing(self) -> None:
         """State is unknown when shutter telemetry is missing."""
         self.model.aperture_shutter_telemetry = None

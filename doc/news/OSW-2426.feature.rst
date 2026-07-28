@@ -1,0 +1,1 @@
+Split louver control out of ``DomeModel`` into new ``LouverModel``, and added nighttime louver control.
