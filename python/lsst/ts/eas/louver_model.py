@@ -24,6 +24,8 @@ __all__ = ["LouverControlMode", "LouverModel"]
 import asyncio
 import enum
 import logging
+import math
+from collections.abc import Collection
 from typing import Any, Callable
 
 import yaml
@@ -43,6 +45,7 @@ except ImportError:
 from .cmdwrapper import close_command_tasks, command_wrapper
 from .diurnal_timer import OBSERVATORY_LOCATION
 from .dome_model import DomeModel
+from .weather_model import WeatherModel
 
 DORMANT_TIME = 30  # Time to wait while sleeping, seconds
 
@@ -112,6 +115,9 @@ class LouverModel:
         A logger for log messages.
     dome_model : `DomeModel`
         The dome model, which owns MTDome louver telemetry.
+    weather_model : `WeatherModel`
+        The weather model, which owns the outside wind direction and the
+        inside anemometer windspeeds used by nighttime louver control.
     dome_remote : `~lsst.ts.salobj.Remote`
         SAL remote for the MTDome CSC. Used to send louver commands.
     louver_sun_angle : `float`
@@ -135,6 +141,12 @@ class LouverModel:
         Percent-open step applied to the upwind louvers per adjustment.
     downwind_interval : `float`
         Percent-open step applied to the downwind louvers per adjustment.
+    wind_interval : `float`
+        Time window (seconds) over which the outside wind direction is
+        averaged.
+    anemometer_interval : `float`
+        Time window (seconds) over which the inside anemometer windspeeds are
+        averaged.
     features_to_disable : `list` [`str`]
         List of feature names to disable. If ``"day_louvers"`` is present,
         louvers are not adjusted during the day.
@@ -149,6 +161,7 @@ class LouverModel:
         *,
         log: logging.Logger,
         dome_model: DomeModel,
+        weather_model: WeatherModel,
         dome_remote: salobj.Remote,
         louver_sun_angle: float,
         louver_exposed_command: float,
@@ -157,6 +170,8 @@ class LouverModel:
         inside_windspeed_deadband: float,
         upwind_interval: float,
         downwind_interval: float,
+        wind_interval: float,
+        anemometer_interval: float,
         features_to_disable: list[str],
         allow_send: Callable[[], bool] | None = None,
     ) -> None:
@@ -193,6 +208,11 @@ class LouverModel:
         self.upwind_interval: float = upwind_interval
         self.downwind_interval: float = downwind_interval
 
+        # Trailing windows (seconds) over which the wind measurements are
+        # averaged.
+        self.wind_interval: float = wind_interval
+        self.anemometer_interval: float = anemometer_interval
+
         # Per louver, the position the observer last commanded. MTDome's
         # positionCommanded can't be used for this, since it also reflects
         # EAS's own commands. None until EAS first reads louver telemetry.
@@ -205,6 +225,7 @@ class LouverModel:
 
         self.log = log
         self.dome_model = dome_model
+        self.weather_model = weather_model
         self.dome_remote = dome_remote
         self.features_to_disable = features_to_disable
         self.allow_send = allow_send
@@ -254,6 +275,14 @@ properties:
     description: Percent-open step applied to the downwind louvers per adjustment.
     type: number
     default: 25.0
+  wind_interval:
+    description: Time window (s) over which the outside wind direction is averaged.
+    type: number
+    default: 60.0
+  anemometer_interval:
+    description: Time window (s) over which the inside anemometer windspeeds are averaged.
+    type: number
+    default: 15.0
 required:
   - louver_sun_angle
   - louver_exposed_command
@@ -662,6 +691,74 @@ additionalProperties: false
                 await self.adjust_louvers(sun_azimuth)
             case LouverControlMode.IDLE:
                 pass
+
+    async def balance_louvers(self, still_capped: Collection[int] = ()) -> None:
+        """Adjust louvers to hold the inside windspeed near its threshold.
+
+        Groups the louvers by the current relative wind direction, steps the
+        targets one interval toward the threshold, and commands the result. The
+        grouping is recomputed every pass, so dome rotation alone moves a
+        louver between groups and changes which interval steps it.
+
+        Each pass first adopts any louver commands the observer has sent since
+        (see `observer_commands`), so that the observer keeps control of the
+        louvers: a louver they move is stepped from its new position, one they
+        shut is left shut, and one they open joins nighttime control.
+
+        Parameters
+        ----------
+        still_capped : `~collections.abc.Collection` [`int`], optional
+            Louvers still at the daytime sun cap. They have to be restored to
+            the position commanded by the observer after being changed by EAS,
+            so they are commanded on this pass whether or not EAS steps them.
+        """
+        if not self.expected_commanded or self.louver_observer_command is None:
+            # Neither a daytime baseline nor louver telemetry was available
+            # when this mode was entered, so there is nothing to control.
+            self.log.warning("No observer louver baseline; skipping nighttime louver adjustment.")
+            return
+
+        # Adopt what the observer has commanded since: a louver they moved is
+        # stepped from there, one they shut leaves nighttime control, and one
+        # they opened joins it. A louver still at the daytime sun cap reports
+        # EAS's command, not the observer's.
+        for index, commanded in self.observer_commands(expected=self.expected_commanded).items():
+            if index not in still_capped:
+                self.expected_commanded[index] = commanded
+                self.louver_observer_command[index] = commanded
+
+        targets = self.expected_commanded
+        wind_direction = self.weather_model.average_wind_direction(window=self.wind_interval)
+        inside_windspeed = self.weather_model.average_indoor_windspeed(window=self.anemometer_interval)
+
+        if self.dome_azimuth is None:
+            self.log.warning("No dome azimuth; skipping nighttime louver adjustment.")
+        elif math.isnan(wind_direction) or math.isnan(inside_windspeed):
+            # Grouping is meaningless without a wind direction, and there is
+            # nothing to steer toward without an inside windspeed.
+            self.log.warning("Wind measurements unavailable; skipping nighttime louver adjustment.")
+        else:
+            targets = self.louver_targets(
+                inside_windspeed=inside_windspeed, upwind=self.is_upwind(wind_direction)
+            )
+
+        adjusted = set(still_capped) | {
+            index
+            for index, (previous, target) in enumerate(zip(self.expected_commanded, targets))
+            if target != previous
+        }
+        if not adjusted:
+            # Nothing moved, so there is nothing to say. This covers both the
+            # deadband and the case where the louvers have run out of travel
+            # and the inside windspeed is simply not achievable in the current
+            # conditions -- which is a normal state, not a fault.
+            return
+
+        self.expected_commanded = targets
+        # Louvers not being moved are sent DO_NOT_MOVE, so EAS never
+        # overwrites a position the observer has just commanded.
+        command = [target if index in adjusted else DO_NOT_MOVE for index, target in enumerate(targets)]
+        await self.set_louvers(position=command)
 
     async def monitor(self) -> None:
         """Adjust louvers according to the selected control mode.

@@ -21,12 +21,13 @@
 
 import asyncio
 import logging
+import math
 import unittest
 from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
-from lsst.ts import salobj
+from lsst.ts import salobj, utils
 from lsst.ts.eas.cmdwrapper import close_command_tasks
 from lsst.ts.eas.louver_model import (
     DO_NOT_MOVE,
@@ -154,6 +155,21 @@ class FakeDomeModel:
 
     def __init__(self) -> None:
         self.louvers_telemetry: SimpleNamespace | None = None
+        self.louvers_open_time: float | None = None
+
+
+class FakeWeatherModel:
+    """Stand-in for WeatherModel, which owns the ESS wind measurements."""
+
+    def __init__(self) -> None:
+        self.wind_direction: float = math.nan
+        self.indoor_windspeed: float = math.nan
+
+    def average_wind_direction(self, window: float) -> float:
+        return self.wind_direction
+
+    def average_indoor_windspeed(self, window: float) -> float:
+        return self.indoor_windspeed
 
 
 async def spin_until(pred: Any, *, timeout: float = 5.0, step: float = 0.01) -> None:
@@ -208,10 +224,12 @@ class TestLouverModel(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.fake_remote = FakeDomeRemote()
         self.dome_model = FakeDomeModel()
+        self.weather_model = FakeWeatherModel()
         self.fake_remote.cmd_setLouvers.dome_model = self.dome_model
         self.model = LouverModel(
             log=logging.getLogger(),
             dome_model=self.dome_model,
+            weather_model=self.weather_model,
             dome_remote=self.fake_remote,
             louver_sun_angle=60.0,
             louver_exposed_command=50.0,
@@ -220,6 +238,8 @@ class TestLouverModel(unittest.IsolatedAsyncioTestCase):
             inside_windspeed_deadband=0.2,
             upwind_interval=10.0,
             downwind_interval=25.0,
+            wind_interval=60.0,
+            anemometer_interval=15.0,
             features_to_disable=[],
         )
 
@@ -439,6 +459,27 @@ class TestLouverModel(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.model.expected_commanded, [40.0] * 34)
 
+    async def test_nighttime_without_a_baseline_commands_nothing(self) -> None:
+        """With no observer baseline at all, the pass is skipped cleanly.
+
+        `enter_mode` seeds from the daytime baseline and falls back to
+        telemetry, but if neither is available the seed is empty. The control
+        rules must then skip the pass rather than index into an empty target
+        list, which would otherwise raise inside the monitor loop and leave
+        louver control silently doing nothing on every cycle.
+        """
+        self.model.mode = LouverControlMode.NIGHTTIME_LOUVER_CONTROL
+        self.model.enter_mode(LouverControlMode.NIGHTTIME_LOUVER_CONTROL)
+        self.model.dome_azimuth = 0.0
+        self.weather_model.wind_direction = 0.0
+        self.weather_model.indoor_windspeed = 1.0
+        self.fake_remote.evt_summaryState.set_state(salobj.State.ENABLED)
+
+        await self.model.balance_louvers()
+        await asyncio.sleep(STD_SLEEP)
+
+        self.assertEqual(self.fake_remote.cmd_setLouvers.calls, [])
+
     async def test_below_threshold_moves_only_the_downwind_group(self) -> None:
         """While the downwind louvers can still open, the upwind ones do not.
 
@@ -539,6 +580,96 @@ class TestLouverModel(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(targets[0], 0.0, "upwind has nothing left to close")
         self.assertEqual(targets[1], 35.0, "so the downwind group closes instead")
+
+    def start_nighttime_control(self, observer_command: list[float]) -> None:
+        """Enter nighttime control from telemetry, with the dome at azimuth 0
+        and wind out of the north, so C1, D1 and F1 are all downwind.
+
+        Parameters
+        ----------
+        observer_command : `list` [`float`]
+            Observer-commanded position per louver.
+        """
+        self.declare_observer_command(observer_command)
+        self.model.mode = LouverControlMode.NIGHTTIME_LOUVER_CONTROL
+        self.model.enter_mode(LouverControlMode.NIGHTTIME_LOUVER_CONTROL)
+        self.model.dome_azimuth = 0.0
+        self.weather_model.wind_direction = 0.0
+        self.fake_remote.evt_summaryState.set_state(salobj.State.ENABLED)
+
+    async def balance_once(self) -> list[float]:
+        """Run one nighttime pass and return the position it sent.
+
+        Returns
+        -------
+        `list` [`float`]
+            The position sent on this pass.
+        """
+        calls = self.fake_remote.cmd_setLouvers.calls
+        sent_before = len(calls)
+        await self.model.balance_louvers()
+        await spin_until(lambda: len(calls) > sent_before)
+        return calls[-1]["position"]
+
+    async def test_nighttime_adopts_observer_commands(self) -> None:
+        """The observer keeps control of the louvers at night.
+
+        A louver the observer moves is stepped from its new position, one
+        they shut is not reopened, and one they open joins nighttime control.
+        """
+        c1, d1, f1 = (find_louver(name).index for name in ("C1", "D1", "F1"))
+        command = [DO_NOT_MOVE] * 34
+        command[c1] = command[f1] = 40.0
+        self.start_nighttime_control(command)
+        self.weather_model.indoor_windspeed = 1.0  # below threshold: downwind opens
+
+        command[c1], command[d1], command[f1] = 70.0, 30.0, FULLY_CLOSED
+        self.declare_observer_command(command)
+        position = await self.balance_once()
+
+        self.assertEqual(position[c1], 95.0, "moved C1 is stepped from the observer's 70")
+        self.assertEqual(position[d1], 55.0, "newly opened D1 joins nighttime control")
+        self.assertEqual(position[f1], DO_NOT_MOVE, "shut F1 is left alone")
+
+    async def test_louver_eas_walks_shut_stays_under_control(self) -> None:
+        """A louver EAS itself stepped shut is not mistaken for an observer's.
+
+        The observer shutting a louver takes it out of nighttime control, but
+        EAS's own command echoed back as 0 must not, or the louver could never
+        reopen when the wind drops.
+        """
+        c1 = find_louver("C1").index
+        command = [DO_NOT_MOVE] * 34
+        command[c1] = 40.0
+        self.start_nighttime_control(command)
+
+        self.weather_model.indoor_windspeed = 3.0  # too windy: close
+        self.assertEqual((await self.balance_once())[c1], 15.0)
+        self.assertEqual((await self.balance_once())[c1], FULLY_CLOSED)
+
+        self.weather_model.indoor_windspeed = 1.0  # too still: open again
+        self.assertEqual((await self.balance_once())[c1], 25.0)
+
+    async def test_no_command_once_the_louvers_run_out_of_travel(self) -> None:
+        """Fully open and still too still is a normal state, not a fault.
+
+        On a calm night no louver position produces the target windspeed. The
+        loop opens everything, then falls silent rather than re-commanding
+        positions it has already reached: nothing changed, so nothing is said.
+        """
+        self.declare_observer_command([FULLY_OPEN] * 34)
+        self.model.dome_azimuth = 0.0
+        self.dome_model.louvers_open_time = utils.current_tai() - 1801.0
+        self.weather_model.wind_direction = 0.0
+        self.weather_model.indoor_windspeed = 0.0  # dead calm inside
+        self.fake_remote.evt_summaryState.set_state(salobj.State.ENABLED)
+        self.model.mode = LouverControlMode.NIGHTTIME_LOUVER_CONTROL
+        self.model.enter_mode(LouverControlMode.NIGHTTIME_LOUVER_CONTROL)
+
+        await self.model.balance_louvers()
+        await asyncio.sleep(STD_SLEEP)
+
+        self.assertEqual(self.fake_remote.cmd_setLouvers.calls, [])
 
     # ----- record_command -----
 

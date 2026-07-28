@@ -347,19 +347,21 @@ class EasCsc(salobj.ConfigurableCsc):
             log=self.log,
             **self.config.dome,
         )
-        self.louver_model = LouverModel(
-            log=self.log,
-            dome_model=self.dome_model,
-            dome_remote=self.dome_remote,
-            features_to_disable=self.config.features_to_disable,
-            allow_send=self._allow_send,
-            **self.config.louver,
-        )
 
         self.weather_model = WeatherModel(
             log=self.log,
             diurnal_timer=self.diurnal_timer,
             **self.config.weather,
+        )
+
+        self.louver_model = LouverModel(
+            log=self.log,
+            dome_model=self.dome_model,
+            weather_model=self.weather_model,
+            dome_remote=self.dome_remote,
+            features_to_disable=self.config.features_to_disable,
+            allow_send=self._allow_send,
+            **self.config.louver,
         )
         self.hvac_model = HvacModel(
             log=self.log,
