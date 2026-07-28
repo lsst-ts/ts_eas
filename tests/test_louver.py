@@ -28,7 +28,13 @@ from unittest import mock
 
 from lsst.ts import salobj
 from lsst.ts.eas.cmdwrapper import close_command_tasks
-from lsst.ts.eas.louver_model import LouverControlMode, LouverModel
+from lsst.ts.eas.louver_model import (
+    DO_NOT_MOVE,
+    FULLY_CLOSED,
+    FULLY_OPEN,
+    LouverControlMode,
+    LouverModel,
+)
 
 try:
     from lsst.ts.xml.tables.mtdome import find_louver
@@ -52,13 +58,86 @@ class FakeEvtSummaryState:
 
 
 class FakeDomeLouverCommand:
+    """Records setLouvers commands, checking the standing invariants on each.
+
+    Every command EAS sends is verified here rather than in individual tests,
+    so a violation is caught wherever it originates -- `adjust_louvers`,
+    `exit_mode`, or any future caller.
+
+    Attributes
+    ----------
+    observer_command : `list` [`float`] | None
+        The observer's standing command, as declared by the test through
+        `TestLouverModel.declare_observer_command`. While None the
+        observer-intent invariant is not checked, because the test has not
+        said what the observer asked for.
+    dome_model : `FakeDomeModel` | None
+        If set, each command is echoed into its louver telemetry's
+        ``positionCommanded``, as MTDome does, leaving a louver commanded
+        `DO_NOT_MOVE` as it was.
+    """
+
     def __init__(self) -> None:
         self.calls: list[dict] = []
         self.topic_info = SimpleNamespace(attr_name="cmd_setLouvers")
+        self.observer_command: list[float] | None = None
+        self.dome_model: FakeDomeModel | None = None
 
     async def set_start(self, **kwargs: Any) -> None:
         filtered = {k: v for k, v in kwargs.items() if k != "timeout"}
+        position = filtered.get("position")
+        if position is not None:
+            self.check_command_range(position)
+            self.check_observer_intent(position)
+            self.echo(position)
         self.calls.append(filtered)
+
+    def echo(self, position: list[float]) -> None:
+        """Report ``position`` as commanded in the dome model's telemetry."""
+        if self.dome_model is None or self.dome_model.louvers_telemetry is None:
+            return
+        telemetry = self.dome_model.louvers_telemetry
+        telemetry.positionCommanded = [
+            old if new == DO_NOT_MOVE else new for old, new in zip(telemetry.positionCommanded, position)
+        ]
+
+    def check_command_range(self, position: list[float]) -> None:
+        """Every commanded position is DO_NOT_MOVE or within 0-100 percent."""
+        for index, value in enumerate(position):
+            if value == DO_NOT_MOVE:
+                continue
+            if not FULLY_CLOSED <= value <= FULLY_OPEN:
+                raise AssertionError(
+                    f"Louver {index} commanded to {value}, which is outside "
+                    f"{FULLY_CLOSED}-{FULLY_OPEN} and is not the "
+                    f"{DO_NOT_MOVE} do-not-move sentinel."
+                )
+
+    def check_observer_intent(self, position: list[float]) -> None:
+        """EAS never opens a louver the observer did not open.
+
+        A louver the observer never commanded (-1) is left alone entirely, and
+        one the observer commanded shut (0) may be re-commanded shut but never
+        opened.
+        """
+        if self.observer_command is None:
+            return
+
+        for index, value in enumerate(position):
+            observer_value = self.observer_command[index]
+            if observer_value > FULLY_CLOSED:
+                continue
+            if value > FULLY_CLOSED:
+                raise AssertionError(
+                    f"Louver {index} commanded to {value} but the observer "
+                    f"commanded it to {observer_value}: EAS must not open a "
+                    "louver the observer did not open."
+                )
+            if observer_value < FULLY_CLOSED and value != DO_NOT_MOVE:
+                raise AssertionError(
+                    f"Louver {index} commanded to {value} but the observer "
+                    "never commanded it: EAS must leave it alone."
+                )
 
 
 class FakeDomeRemote:
@@ -127,6 +206,7 @@ class TestLouverModel(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.fake_remote = FakeDomeRemote()
         self.dome_model = FakeDomeModel()
+        self.fake_remote.cmd_setLouvers.dome_model = self.dome_model
         self.model = LouverModel(
             log=logging.getLogger(),
             dome_model=self.dome_model,
@@ -139,6 +219,21 @@ class TestLouverModel(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self) -> None:
         await close_command_tasks(self.model)
+
+    def declare_observer_command(self, command: list[float]) -> None:
+        """Set the observer's standing louver command.
+
+        Publishes it as MTDome ``positionCommanded`` telemetry and tells the
+        command harness about it, so that every command the model sends is
+        checked against what the observer actually asked for.
+
+        Parameters
+        ----------
+        command : `list` [`float`]
+            Observer-commanded position per louver.
+        """
+        self.dome_model.louvers_telemetry = SimpleNamespace(positionCommanded=list(command))
+        self.fake_remote.cmd_setLouvers.observer_command = list(command)
 
     async def run_monitor_until(self, pred: Any) -> None:
         """Run the control loop until `pred` holds, then cancel it.
@@ -180,6 +275,16 @@ class TestLouverModel(unittest.IsolatedAsyncioTestCase):
         self.model.features_to_disable = ["day_louvers"]
 
         self.assertIs(self.model.select_mode(45.0), LouverControlMode.IDLE)
+
+    # ----- record_command -----
+
+    def test_record_command_keeps_previous_value_for_do_not_move(self) -> None:
+        """MTDome keeps a louver's positionCommanded when sent DO_NOT_MOVE."""
+        self.model.expected_commanded = [0.0, 80.0] + [40.0] * 32
+
+        self.model.record_command([DO_NOT_MOVE, 50.0] + [DO_NOT_MOVE] * 32)
+
+        self.assertEqual(self.model.expected_commanded, [0.0, 50.0] + [40.0] * 32)
 
     # ----- azimuth callback -----
 
@@ -238,9 +343,7 @@ class TestLouverModel(unittest.IsolatedAsyncioTestCase):
           observer command (shaded louvers are uncapped) => 100.0
         """
         self.model.dome_azimuth = 0.0
-        self.dome_model.louvers_telemetry = SimpleNamespace(
-            positionCommanded=[-1.0] + [100.0] * 33,
-        )
+        self.declare_observer_command([-1.0] + [100.0] * 33)
         self.fake_remote.evt_summaryState.set_state(salobj.State.ENABLED)
 
         with (
@@ -262,9 +365,7 @@ class TestLouverModel(unittest.IsolatedAsyncioTestCase):
         """
         sun_az = 73.0
         self.model.dome_azimuth = (sun_az + 180.0) % 360.0
-        self.dome_model.louvers_telemetry = SimpleNamespace(
-            positionCommanded=[100.0] * 34,
-        )
+        self.declare_observer_command([100.0] * 34)
         self.fake_remote.evt_summaryState.set_state(salobj.State.ENABLED)
 
         await self.model.adjust_louvers(sun_az)
@@ -286,9 +387,7 @@ class TestLouverModel(unittest.IsolatedAsyncioTestCase):
         ``min(10, 50) == 10`` and shaded louvers are uncapped.
         """
         self.model.dome_azimuth = 0.0
-        self.dome_model.louvers_telemetry = SimpleNamespace(
-            positionCommanded=[10.0] * 34,
-        )
+        self.declare_observer_command([10.0] * 34)
         self.fake_remote.evt_summaryState.set_state(salobj.State.ENABLED)
 
         await self.model.adjust_louvers(90.0)
@@ -304,9 +403,7 @@ class TestLouverModel(unittest.IsolatedAsyncioTestCase):
         sun-facing louvers are capped to 50 while shaded louvers stay at 80.
         """
         self.model.dome_azimuth = 0.0
-        self.dome_model.louvers_telemetry = SimpleNamespace(
-            positionCommanded=[80.0] * 34,
-        )
+        self.declare_observer_command([80.0] * 34)
         self.fake_remote.evt_summaryState.set_state(salobj.State.ENABLED)
 
         await self.model.adjust_louvers(90.0)
@@ -321,9 +418,7 @@ class TestLouverModel(unittest.IsolatedAsyncioTestCase):
     async def test_adjust_louvers_closed_stays_closed(self) -> None:
         """Louvers the observer has not opened remain uncommanded (-1)."""
         self.model.dome_azimuth = 0.0
-        self.dome_model.louvers_telemetry = SimpleNamespace(
-            positionCommanded=[0.0] * 34,
-        )
+        self.declare_observer_command([0.0] * 34)
         self.fake_remote.evt_summaryState.set_state(salobj.State.ENABLED)
 
         await self.model.adjust_louvers(90.0)
@@ -347,9 +442,7 @@ class TestLouverModel(unittest.IsolatedAsyncioTestCase):
         # Cycle 1: dome points opposite the sun, so F1 faces the sun and is
         # capped from the observer command of 80 down to 50.
         self.model.dome_azimuth = (sun_az + 180.0) % 360.0
-        self.dome_model.louvers_telemetry = SimpleNamespace(
-            positionCommanded=[80.0] * 34,
-        )
+        self.declare_observer_command([80.0] * 34)
         self.fake_remote.evt_summaryState.set_state(salobj.State.ENABLED)
 
         await self.model.adjust_louvers(sun_az)
@@ -359,9 +452,7 @@ class TestLouverModel(unittest.IsolatedAsyncioTestCase):
 
         # Echo EAS's own command back as the new telemetry, exactly as MTDome
         # would report it.
-        self.dome_model.louvers_telemetry = SimpleNamespace(
-            positionCommanded=list(cycle1),
-        )
+        self.declare_observer_command(list(cycle1))
 
         # Cycle 2: dome now points at the sun, so F1 is shaded and must return
         # to the remembered observer command of 80, not stay at the 50 cap.
@@ -383,9 +474,7 @@ class TestLouverModel(unittest.IsolatedAsyncioTestCase):
 
         # Cycle 1: F1 faces the sun, capped from 80 to 50.
         self.model.dome_azimuth = (sun_az + 180.0) % 360.0
-        self.dome_model.louvers_telemetry = SimpleNamespace(
-            positionCommanded=[80.0] * 34,
-        )
+        self.declare_observer_command([80.0] * 34)
         self.fake_remote.evt_summaryState.set_state(salobj.State.ENABLED)
 
         await self.model.adjust_louvers(sun_az)
@@ -396,9 +485,7 @@ class TestLouverModel(unittest.IsolatedAsyncioTestCase):
         # command of 50 and so is taken as a fresh observer request.
         echoed = list(cycle1)
         echoed[f1_index] = 30.0
-        self.dome_model.louvers_telemetry = SimpleNamespace(
-            positionCommanded=echoed,
-        )
+        self.declare_observer_command(echoed)
 
         # Cycle 2: F1 still faces the sun; min(30, 50) == 30 confirms the
         # baseline was updated to 30.
@@ -410,23 +497,25 @@ class TestLouverModel(unittest.IsolatedAsyncioTestCase):
 
     # ----- leaving daytime control -----
 
-    async def test_leaving_daytime_resets_baseline(self) -> None:
-        """The observer baseline is cleared when daytime control ends.
+    async def test_leaving_daytime_keeps_the_observer_baseline(self) -> None:
+        """The observer baseline outlives daytime control.
 
-        The transition depends only on sun altitude, not on dome state.
+        After the restore, EAS expects MTDome to report the observer's own
+        command. The transition depends only on sun altitude, not on dome
+        state.
         """
         self.model.mode = LouverControlMode.DAYTIME_LOUVER_CONTROL
-        self.model.louver_operator_command = [80.0] * 34
-        self.model.louver_eas_command = [50.0] * 34
+        self.model.louver_observer_command = [80.0] * 34
+        self.model.expected_commanded = [50.0] * 34
 
         with mock.patch("lsst.ts.eas.louver_model.get_sun", return_value=make_sun_mock(-10.0)):
             await self.model.update_louvers()
 
         self.assertIs(self.model.mode, LouverControlMode.IDLE)
-        self.assertIsNone(self.model.louver_operator_command)
-        self.assertIsNone(self.model.louver_eas_command)
+        self.assertEqual(self.model.louver_observer_command, [80.0] * 34)
+        self.assertEqual(self.model.expected_commanded, [80.0] * 34)
 
-    async def test_leaving_daytime_opens_to_operator_command(self) -> None:
+    async def test_leaving_daytime_opens_to_observer_command(self) -> None:
         """At sundown each opened louver is restored to the observer command.
 
         A sun-facing louver may have been capped below the observer's command
@@ -436,7 +525,7 @@ class TestLouverModel(unittest.IsolatedAsyncioTestCase):
         observer did not open (<= 0) stay uncommanded (-1).
         """
         self.model.mode = LouverControlMode.DAYTIME_LOUVER_CONTROL
-        self.model.louver_operator_command = [-1.0] + [100.0] * 33
+        self.model.louver_observer_command = [-1.0] + [100.0] * 33
         self.fake_remote.evt_summaryState.set_state(salobj.State.ENABLED)
 
         with mock.patch("lsst.ts.eas.louver_model.get_sun", return_value=make_sun_mock(-10.0)):

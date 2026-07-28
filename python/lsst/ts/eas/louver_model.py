@@ -61,6 +61,13 @@ SUN_ALTITUDE_PRESSURE = 700 * u.hPa
 # Number of degrees in a complete circle.
 CIRCLE = 360.0
 
+# Percent-open limits for a louver.
+FULLY_CLOSED = 0.0
+FULLY_OPEN = 100.0
+
+# Value that tells MTDome to leave a louver where it is.
+DO_NOT_MOVE = -1.0
+
 
 class LouverControlMode(enum.Enum):
     """The active source of louver setpoints.
@@ -141,32 +148,27 @@ class LouverModel:
         # The setpoint source currently in effect.
         self.mode = LouverControlMode.IDLE
 
-        # Most recent actual azimuth of dome (degrees east of north)
+        # Most recent reported azimuth of dome (degrees east of north)
         self.dome_azimuth: float | None = None
 
         # Minimum angle between louver azimuth and sun azimuth (degrees)
         # at which a louver is considered to be "facing" the sun.
         self.louver_sun_angle: float = louver_sun_angle
 
-        # Maximum command position for a louver facing the sun.
+        # Maximum allowed command position for a louver facing the sun.
         self.louver_exposed_command: float = louver_exposed_command
 
         # Sun altitude (degrees) above which louvers are adjusted.
         self.sun_altitude_threshold: float = sun_altitude_threshold
 
-        # Observer-commanded position per louver. EAS caps a sun-facing louver
-        # at `louver_exposed_command` but never opens a louver beyond what the
-        # observer requested, so the observer's request must be remembered
-        # separately. This list stores observed louver commands issued by the
-        # operator so that they can be re-issued when the louver returns to a
-        # shaded position. If no command has been observed, the value is None.
-        self.louver_operator_command: list[float] | None = None
+        # Per louver, the position the observer last commanded. MTDome's
+        # positionCommanded can't be used for this, since it also reflects
+        # EAS's own commands. None until EAS first reads louver telemetry.
+        self.louver_observer_command: list[float] | None = None
 
-        # Position EAS last intended for each louver (with -1 "do not move"
-        # resolved to the value carried forward). Used to distinguish EAS's own
-        # commands echoed back in positionCommanded from fresh observer
-        # commands. None until the first daytime adjustment; reset at sundown.
-        self.louver_eas_command: list[float] | None = None
+        # Per louver, the positionCommanded EAS expects MTDome to report. A
+        # louver that reports something else was commanded by the observer.
+        self.expected_commanded: list[float] | None = None
 
         self.log = log
         self.dome_model = dome_model
@@ -212,6 +214,18 @@ additionalProperties: false
     def cadence(self) -> float:
         """Time (seconds) to wait between control loop passes."""
         return DORMANT_TIME
+
+    @property
+    def observer_opened(self) -> list[bool] | None:
+        """Per louver, whether the observer has it open (above 0).
+
+        EAS only moves louvers the observer has opened. None if the observer's
+        command is not known.
+        """
+        if self.louver_observer_command is None:
+            return None
+
+        return [position > FULLY_CLOSED for position in self.louver_observer_command]
 
     async def azimuth_callback(self, azimuth_telemetry: salobj.BaseMsgType) -> None:
         """Callback for MTDome.tel_azimuth.
@@ -298,9 +312,8 @@ additionalProperties: false
 
         Leaving `~LouverControlMode.DAYTIME_LOUVER_CONTROL` releases the
         daytime cap, so each louver the observer opened is commanded to its
-        observer-commanded position one last time and the cached
-        observer-commanded position is cleared. This happens at sundown, and
-        also if ``day_louvers`` is disabled while the sun is up, so that
+        observer-commanded position one last time. This happens at sundown,
+        and also if ``day_louvers`` is disabled while the sun is up, so that
         louvers are never left capped with nothing to lift the cap.
 
         Parameters
@@ -308,27 +321,79 @@ additionalProperties: false
         mode : `LouverControlMode`
             The mode being left.
         """
-        if mode is LouverControlMode.DAYTIME_LOUVER_CONTROL and self.louver_operator_command is not None:
-            await self.set_louvers(self.louver_operator_command)
-            self.louver_operator_command = None
-            self.louver_eas_command = None
+        if mode is not LouverControlMode.DAYTIME_LOUVER_CONTROL or self.louver_observer_command is None:
+            return
+
+        opened = self.observer_opened
+        assert opened is not None
+        command = [
+            position if is_open else DO_NOT_MOVE
+            for position, is_open in zip(self.louver_observer_command, opened)
+        ]
+        await self.set_louvers(command)
+        self.record_command(command)
+
+    def observer_commands(self, expected: list[float]) -> dict[int, float]:
+        """Return the louvers the observer has commanded, and their positions.
+
+        EAS commands louvers through the same path the observer uses, so
+        ``positionCommanded`` telemetry cannot say who set a value. A louver
+        whose reported command differs from what EAS expects it to be is
+        taken to have been commanded by the observer since. Daytime control
+        uses this to adopt the observer's commands.
+
+        Note that telemetry that has not yet caught up with EAS's own latest
+        command also differs, and is mistaken for an observer command.
+
+        Parameters
+        ----------
+        expected : `list` [`float`]
+            Per louver, the command EAS expects MTDome to report.
+
+        Returns
+        -------
+        `dict` [`int`, `float`]
+            Reported command per louver the observer has commanded. Empty if
+            there is no louver telemetry.
+        """
+        louvers_telemetry = self.dome_model.louvers_telemetry
+        if louvers_telemetry is None:
+            return {}
+
+        return {
+            index: commanded
+            for index, (commanded, eas_value) in enumerate(
+                zip(louvers_telemetry.positionCommanded[: len(LouverTable)], expected)
+            )
+            if abs(commanded - eas_value) > LOUVER_COMMAND_TOLERANCE
+        }
+
+    def record_command(self, command: list[float]) -> None:
+        """Update `expected_commanded` for a command EAS is sending.
+
+        MTDome keeps a louver's previous positionCommanded when it is sent
+        `DO_NOT_MOVE`, so those louvers keep their previous expected value.
+
+        Parameters
+        ----------
+        command : `list` [`float`]
+            Position per louver, or `DO_NOT_MOVE`.
+        """
+        previous = self.expected_commanded
+        if previous is None and self.dome_model.louvers_telemetry is not None:
+            previous = list(self.dome_model.louvers_telemetry.positionCommanded[: len(LouverTable)])
+        if previous is None:
+            previous = list(command)
+        self.expected_commanded = [old if new == DO_NOT_MOVE else new for old, new in zip(previous, command)]
 
     async def adjust_louvers(self, sun_azimuth: float) -> None:
-        """Adjust positions of louvers.
+        """Command the louvers' positions, capping louvers that face the sun.
 
-        EAS never opens a louver beyond the position the observer commanded. A
-        louver the observer has opened is capped at `louver_exposed_command`
-        while it faces the sun (within `louver_sun_angle`) and is otherwise
-        left at the observer's commanded position. A louver the observer has
-        not opened remains uncommanded.
-
-        Because EAS commands louvers through the same path the observer uses,
-        the `positionCommanded` telemetry is overwritten by EAS's own caps and
-        no longer reflects the observer's intent. The standing observer command
-        is therefore tracked separately in `self.louver_operator_command`.
-        A change in `positionCommanded` that differs from what EAS last sent
-        (`self.louver_eas_command`) is taken to be a fresh observer command and
-        updates the baseline.
+        First records any louver the observer has commanded since EAS last did
+        (see `observer_commands`) in `louver_observer_command`. Then sends each
+        louver the observer has opened to the observer's position, capped at
+        `louver_exposed_command` if it is within `louver_sun_angle` of the sun.
+        Other louvers are sent `DO_NOT_MOVE`.
 
         Parameters
         ----------
@@ -339,19 +404,14 @@ additionalProperties: false
         if louvers_telemetry is None or self.dome_azimuth is None:
             return
 
-        position_commanded = list(louvers_telemetry.positionCommanded[: len(LouverTable)])
-
         # Reconcile the observer baseline against the latest telemetry.
-        if self.louver_operator_command is None or self.louver_eas_command is None:
+        if self.louver_observer_command is None or self.expected_commanded is None:
             # First daytime adjustment: adopt the reported commands as the
             # observer's standing request.
-            self.louver_operator_command = list(position_commanded)
+            self.louver_observer_command = list(louvers_telemetry.positionCommanded[: len(LouverTable)])
         else:
-            for i, commanded in enumerate(position_commanded):
-                if commanded <= 0 or abs(commanded - self.louver_eas_command[i]) > LOUVER_COMMAND_TOLERANCE:
-                    # The observer moved this louver (closed it, or commanded a
-                    # position EAS did not). Adopt it as the new baseline.
-                    self.louver_operator_command[i] = commanded
+            for i, commanded in self.observer_commands(expected=self.expected_commanded).items():
+                self.louver_observer_command[i] = commanded
 
         louver_azimuth = [(self.dome_azimuth + louver.azimuth) % CIRCLE for louver in LouverTable]
         sun_distance = [
@@ -359,27 +419,20 @@ additionalProperties: false
         ]
 
         # Settle on what commands to send:
+        opened = self.observer_opened
+        assert opened is not None
         louver_command = [
             (
-                -1.0
-                if base <= 0  # <-- No command if the louver is closed.
+                DO_NOT_MOVE
+                if not is_open  # <-- No command if the louver is closed.
                 else min(base, self.louver_exposed_command)  # Min of command or `louver_exposed_command`...
                 if sd < self.louver_sun_angle  # ...if the louver is exposed to the sun...
                 else base  # ... or the observer's commanded position otherwise.
             )
-            for base, sd in zip(self.louver_operator_command, sun_distance)
+            for base, is_open, sd in zip(self.louver_observer_command, opened, sun_distance)
         ]
 
-        # Copy the non-negative values in `louver_command` to
-        # `self.louver_eas_command` for later reference.
-        self.louver_eas_command = [
-            previous if command < 0 else command
-            for command, previous in zip(
-                louver_command,
-                self.louver_eas_command if self.louver_eas_command is not None else louver_command,
-            )
-        ]
-
+        self.record_command(louver_command)
         await self.set_louvers(position=louver_command)
 
     async def update_louvers(self) -> None:
@@ -401,13 +454,6 @@ additionalProperties: false
                 await self.adjust_louvers(sun_azimuth)
             case LouverControlMode.IDLE:
                 pass
-
-    async def wait_for_next_cycle(self) -> None:
-        """Wait for the cadence to expire or for an update to be requested."""
-        try:
-            await asyncio.wait_for(self.update_requested.wait(), timeout=self.cadence)
-        except asyncio.TimeoutError:
-            pass
 
     async def monitor(self) -> None:
         """Adjust louvers according to the selected control mode.
@@ -437,7 +483,10 @@ additionalProperties: false
                 except Exception:
                     self.log.exception("In LouverModel control loop.")
 
-                await self.wait_for_next_cycle()
+                try:
+                    await asyncio.wait_for(self.update_requested.wait(), timeout=self.cadence)
+                except asyncio.TimeoutError:
+                    pass
         finally:
             self.monitor_start_event.clear()
 
