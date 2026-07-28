@@ -188,6 +188,11 @@ class EasCsc(salobj.ConfigurableCsc):
         self.ess_indoor_remote_index: int | None = None
         self.ess_outdoor_remote_index: int | None = None
 
+        # ESS remotes for the anemometers inside the dome, keyed by SAL index.
+        # Both the 2D (airFlow) and 3D (airTurbulence) sensors are subscribed,
+        # since the configured set may contain either kind.
+        self.ess_anemometer_remotes: dict[int, salobj.Remote] = {}
+
     async def handle_summary_state(self) -> None:
         """Override of the handle_summary_state function to
         set up the control loop.
@@ -257,6 +262,34 @@ class EasCsc(salobj.ConfigurableCsc):
             )
             self.ess_outdoor_remote_index = outdoor_ess_index
 
+    async def construct_anemometer_remotes(self, *, anemometer_ess_indices: list[int]) -> None:
+        """Build the ESS remotes for the anemometers inside the dome.
+
+        Remotes for indices no longer configured are closed, and remotes for
+        newly configured indices are created, so that a reconfiguration takes
+        effect without restarting the CSC.
+
+        Parameters
+        ----------
+        anemometer_ess_indices : `list` [`int`]
+            SAL indices of the ESS instances to read anemometers from.
+        """
+        wanted = set(anemometer_ess_indices)
+
+        for index in set(self.ess_anemometer_remotes) - wanted:
+            await self.ess_anemometer_remotes.pop(index).close()
+
+        for index in sorted(wanted - set(self.ess_anemometer_remotes)):
+            self.ess_anemometer_remotes[index] = salobj.Remote(
+                domain=self.domain,
+                name="ESS",
+                index=index,
+                readonly=True,
+                include=["airFlow", "airTurbulence"],
+            )
+
+        await asyncio.gather(*(remote.start_task for remote in self.ess_anemometer_remotes.values()))
+
     async def configure(self, config: SimpleNamespace) -> None:
         self.config = config
 
@@ -265,9 +298,24 @@ class EasCsc(salobj.ConfigurableCsc):
         if self.tma_model is not None:
             await self.tma_model.close()
 
+        # Validate the sub-schemas and update with defaults.
+        for object_type, attr in (
+            (WeatherModel, "weather"),
+            (HvacModel, "hvac"),
+            (TmaModel, "tma"),
+            (DomeModel, "dome"),
+            (LouverModel, "louver"),
+        ):
+            schema = object_type.get_config_schema()
+            validator = salobj.DefaultingValidator(schema)
+            setattr(config, attr, validator.validate(getattr(config, attr)))
+
         await self.construct_ess_remotes(
             indoor_ess_index=config.weather["indoor_ess_index"],
             outdoor_ess_index=config.weather["ess_index"],
+        )
+        await self.construct_anemometer_remotes(
+            anemometer_ess_indices=config.weather["anemometer_ess_indices"],
         )
 
         if self.ess_indoor_remote is None or self.ess_outdoor_remote is None:
@@ -294,18 +342,6 @@ class EasCsc(salobj.ConfigurableCsc):
 
         self.glass_temperature_model = GlassTemperatureModel(log=self.log)
         self.weatherforecast_model = WeatherForecastModel(log=self.log)
-
-        # Validate the sub-schemas and update with defaults.
-        for object_type, attr in (
-            (WeatherModel, "weather"),
-            (HvacModel, "hvac"),
-            (TmaModel, "tma"),
-            (DomeModel, "dome"),
-            (LouverModel, "louver"),
-        ):
-            schema = object_type.get_config_schema()
-            validator = salobj.DefaultingValidator(schema)
-            setattr(config, attr, validator.validate(getattr(config, attr)))
 
         self.dome_model = DomeModel(
             log=self.log,
@@ -432,6 +468,9 @@ class EasCsc(salobj.ConfigurableCsc):
         self.weatherforecast_remote.tel_hourlyTrend.callback = (
             self.weatherforecast_model.hourly_trend_callback
         )
+        for remote in self.ess_anemometer_remotes.values():
+            remote.tel_airFlow.callback = self.weather_model.indoor_air_flow_callback
+            remote.tel_airTurbulence.callback = self.weather_model.indoor_air_flow_callback
 
         # A single callback handles all four AHU telemetry topics; the AHU
         # number is bound per-topic so the model knows which unit reported.
@@ -474,6 +513,10 @@ class EasCsc(salobj.ConfigurableCsc):
         self.hvac_remote.tel_airHandlingUnit02Dome.callback = None
         self.hvac_remote.tel_airHandlingUnit03Dome.callback = None
         self.hvac_remote.tel_airHandlingUnit04Dome.callback = None
+
+        for remote in self.ess_anemometer_remotes.values():
+            remote.tel_airFlow.callback = None
+            remote.tel_airTurbulence.callback = None
 
     async def monitor_health(self) -> None:
         """Manage the `monitor_dome_shutter` control loop.
