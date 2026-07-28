@@ -63,6 +63,13 @@ class DomeModel:
         self.on_open: deque[asyncio.Event] = deque()
         self.was_closed: bool | None = None
 
+        # Time (TAI seconds) at which the louvers were observed to open, or
+        # None while they are closed or their state is unknown. Note that after
+        # an EAS restart with the louvers already open this records when EAS
+        # first *observed* them open, not the physical opening, the same caveat
+        # that applies to `DelayController.wait_for_open`.
+        self.louvers_open_time: float | None = None
+
         self.log = log
         self.dome_open_threshold = dome_open_threshold
 
@@ -103,6 +110,8 @@ additionalProperties: false
         self.refresh_telemetry()
 
     def refresh_telemetry(self) -> None:
+        self.refresh_louvers_open_time()
+
         is_closed = self.is_closed
 
         if self.was_closed is not False and is_closed is False:
@@ -113,6 +122,21 @@ additionalProperties: false
                 event.set()
 
         self.was_closed = is_closed
+
+    def refresh_louvers_open_time(self) -> None:
+        """Maintain `louvers_open_time` across louver open/close transitions.
+
+        The timestamp is stamped once on the transition to open and left alone
+        while the louvers remain open, so that a delay measured from it
+        reflects the opening rather than the most recent telemetry item.
+        """
+        louvers_open = self.louvers_open
+
+        if louvers_open:
+            if self.louvers_open_time is None:
+                self.louvers_open_time = utils.current_tai()
+        elif louvers_open is False:
+            self.louvers_open_time = None
 
     def set_pending_events(self) -> None:
         """Sets all events in the `on_open` deque.
@@ -126,6 +150,22 @@ additionalProperties: false
 
         for event in events_to_signal:
             event.set()
+
+    @property
+    def louvers_open(self) -> bool | None:
+        """Return true if any louver is currently open.
+
+        This is a louver-only notion of "open", distinct from `is_closed`,
+        which also accounts for the aperture shutter. Nighttime louver control
+        is gated on the louvers having been open for a venting delay, so it
+        needs to know about the louvers alone.
+
+        If the current state of the louvers is unknown, None is returned.
+        """
+        if self.louvers_telemetry is None:
+            return None
+
+        return any(position >= self.dome_open_threshold for position in self.louvers_telemetry.positionActual)
 
     @property
     def is_closed(self) -> bool | None:
