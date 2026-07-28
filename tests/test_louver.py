@@ -31,6 +31,7 @@ from lsst.ts import salobj, utils
 from lsst.ts.eas.cmdwrapper import close_command_tasks
 from lsst.ts.eas.louver_model import (
     DO_NOT_MOVE,
+    DORMANT_TIME,
     FULLY_CLOSED,
     FULLY_OPEN,
     LouverControlMode,
@@ -234,12 +235,14 @@ class TestLouverModel(unittest.IsolatedAsyncioTestCase):
             louver_sun_angle=60.0,
             louver_exposed_command=50.0,
             sun_altitude_threshold=0.0,
+            nighttime_vent_delay=1800.0,
             inside_windspeed_threshold=2.0,
             inside_windspeed_deadband=0.2,
             upwind_interval=10.0,
             downwind_interval=25.0,
             wind_interval=60.0,
             anemometer_interval=15.0,
+            nighttime_adjustment_interval=15.0,
             features_to_disable=[],
         )
 
@@ -301,6 +304,20 @@ class TestLouverModel(unittest.IsolatedAsyncioTestCase):
         self.model.features_to_disable = ["day_louvers"]
 
         self.assertIs(self.model.select_mode(45.0), LouverControlMode.IDLE)
+
+    async def test_nighttime_mode_after_vent_delay(self) -> None:
+        """Sun down, louvers open and vented long enough selects night control.
+
+        Nighttime control only starts once the louvers have been open for
+        ``nighttime_vent_delay`` seconds, so that the dome has had a chance
+        to vent before EAS begins balancing the inside windspeed.
+        """
+        self.dome_model.louvers_open_time = utils.current_tai() - 1801.0
+
+        self.assertIs(
+            self.model.select_mode(-10.0),
+            LouverControlMode.NIGHTTIME_LOUVER_CONTROL,
+        )
 
     async def test_louvers_grouped_by_relative_wind_direction(self) -> None:
         """Louvers within 90 degrees of the wind direction are upwind.
@@ -458,6 +475,84 @@ class TestLouverModel(unittest.IsolatedAsyncioTestCase):
         self.model.enter_mode(LouverControlMode.NIGHTTIME_LOUVER_CONTROL)
 
         self.assertEqual(self.model.expected_commanded, [40.0] * 34)
+
+    async def test_update_louvers_commands_nighttime_targets(self) -> None:
+        """A nighttime pass groups by wind, steps, and commands the result.
+
+        With the dome at azimuth 0 and wind out of the north, the A/B and M/N
+        panels are upwind and everything from C round to L is downwind. The
+        inside windspeed is below the threshold, so the downwind louvers open
+        by their 25 percent interval while the upwind ones hold station.
+        """
+        self.declare_observer_command([40.0] * 34)
+        self.model.dome_azimuth = 0.0
+        self.dome_model.louvers_open_time = utils.current_tai() - 1801.0
+        self.weather_model.wind_direction = 0.0
+        self.weather_model.indoor_windspeed = 1.0
+        self.fake_remote.evt_summaryState.set_state(salobj.State.ENABLED)
+
+        with mock.patch("lsst.ts.eas.louver_model.get_sun", return_value=make_sun_mock(-10.0)):
+            await self.model.update_louvers()
+        await spin_until(lambda: bool(self.fake_remote.cmd_setLouvers.calls))
+
+        self.assertIs(self.model.mode, LouverControlMode.NIGHTTIME_LOUVER_CONTROL)
+        position = self.fake_remote.cmd_setLouvers.calls[-1]["position"]
+        self.assertEqual(position[0], DO_NOT_MOVE, "A1 is upwind and is not being moved")
+        self.assertEqual(position[5], 65.0, "C1 is downwind and should open")
+
+    async def test_cadence_follows_the_active_mode(self) -> None:
+        """Nighttime runs on its adjustment interval, daytime on DORMANT_TIME.
+
+        Nighttime control steps by a fixed interval per pass, so its cadence
+        sets how fast the louvers converge; the daytime pass only tracks the
+        sun and can be far lazier.
+        """
+        self.model.mode = LouverControlMode.NIGHTTIME_LOUVER_CONTROL
+        self.assertEqual(self.model.cadence, 15.0)
+
+        self.model.mode = LouverControlMode.DAYTIME_LOUVER_CONTROL
+        self.assertEqual(self.model.cadence, DORMANT_TIME)
+
+    async def test_nighttime_commands_only_when_something_moves(self) -> None:
+        """A pass that changes nothing says nothing to MTDome.
+
+        The deadband is the ordinary case: repeating passes would otherwise
+        spam MTDome every adjustment interval with positions it is already
+        holding. Stepping must resume the moment the windspeed leaves the
+        deadband again, so silence in the band is not the loop giving up.
+        """
+        self.declare_observer_command([40.0] * 34)
+        self.model.dome_azimuth = 0.0
+        self.dome_model.louvers_open_time = utils.current_tai() - 1801.0
+        self.weather_model.wind_direction = 0.0
+        self.weather_model.indoor_windspeed = 1.0  # below the deadband: step
+        self.fake_remote.evt_summaryState.set_state(salobj.State.ENABLED)
+
+        with mock.patch("lsst.ts.eas.louver_model.get_sun", return_value=make_sun_mock(-10.0)):
+            await self.model.update_louvers()
+            await spin_until(lambda: bool(self.fake_remote.cmd_setLouvers.calls))
+            after_first = len(self.fake_remote.cmd_setLouvers.calls)
+
+            # Into the deadband: the louvers hold, so nothing is sent.
+            self.weather_model.indoor_windspeed = 2.0
+            await self.model.update_louvers()
+            await asyncio.sleep(STD_SLEEP)
+            self.assertEqual(
+                len(self.fake_remote.cmd_setLouvers.calls),
+                after_first,
+                "a pass that moves nothing should not be sent",
+            )
+
+            # Back out of the deadband: stepping resumes from where it stopped.
+            self.weather_model.indoor_windspeed = 1.0
+            await self.model.update_louvers()
+            await spin_until(lambda: len(self.fake_remote.cmd_setLouvers.calls) > after_first)
+            downwind = find_louver("F2").index
+            self.assertEqual(
+                self.fake_remote.cmd_setLouvers.calls[-1]["position"][downwind],
+                90.0,
+                "the second step accumulates on the first rather than repeating it",
+            )
 
     async def test_nighttime_without_a_baseline_commands_nothing(self) -> None:
         """With no observer baseline at all, the pass is skipped cleanly.
@@ -692,13 +787,14 @@ class TestLouverModel(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(self.model.dome_azimuth, 123.45)
 
     async def test_azimuth_callback_requests_update(self) -> None:
-        """azimuth_callback wakes the control loop but never commands.
+        """azimuth_callback wakes daytime control but never commands.
 
         The first reading and any change greater than
         `AZIMUTH_CHANGE_THRESHOLD` request an immediate pass; a sub-threshold
         change does not. The callback itself must not send a command, which is
         what keeps the control loop the single source of setpoints.
         """
+        self.model.mode = LouverControlMode.DAYTIME_LOUVER_CONTROL
         await self.model.azimuth_callback(SimpleNamespace(positionActual=10.0))
         self.assertTrue(self.model.update_requested.is_set())
         self.assertEqual(self.fake_remote.cmd_setLouvers.calls, [])
@@ -709,6 +805,20 @@ class TestLouverModel(unittest.IsolatedAsyncioTestCase):
 
         await self.model.azimuth_callback(SimpleNamespace(positionActual=10.5))
         self.assertTrue(self.model.update_requested.is_set())
+
+    async def test_azimuth_callback_does_not_wake_nighttime_control(self) -> None:
+        """A moving dome does not make nighttime control step faster.
+
+        Each nighttime pass takes a step, so waking it on every azimuth sample
+        would walk the louvers at the telemetry rate. The new azimuth is still
+        recorded for the next pass to group the louvers by.
+        """
+        self.model.mode = LouverControlMode.NIGHTTIME_LOUVER_CONTROL
+        await self.model.azimuth_callback(SimpleNamespace(positionActual=10.0))
+        await self.model.azimuth_callback(SimpleNamespace(positionActual=20.0))
+
+        self.assertEqual(self.model.dome_azimuth, 20.0)
+        self.assertFalse(self.model.update_requested.is_set())
 
     # ----- command gating -----
 
@@ -930,6 +1040,146 @@ class TestLouverModel(unittest.IsolatedAsyncioTestCase):
         position = self.fake_remote.cmd_setLouvers.calls[-1]["position"]
         self.assertEqual(position[0], -1.0)
         self.assertTrue(all(p == 100.0 for p in position[1:]))
+
+    def set_up_night_walk(self) -> tuple[int, int]:
+        """Run nighttime control for one step, from an observer command.
+
+        The observer opened A1 (upwind) to 80 and C1 (downwind) to 40. The
+        inside wind is below the threshold, so nighttime control steps C1 to
+        65, which MTDome then reports as commanded.
+
+        Returns
+        -------
+        `tuple` [`int`, `int`]
+            Indices of A1 and C1.
+        """
+        a1, c1 = (find_louver(name).index for name in ("A1", "C1"))
+        command = [DO_NOT_MOVE] * 34
+        command[a1], command[c1] = 80.0, 40.0
+        self.start_nighttime_control(command)
+        self.weather_model.indoor_windspeed = 1.0
+        return a1, c1
+
+    async def test_sunrise_returns_to_observer_command(self) -> None:
+        """Night to day mirrors day to night.
+
+        Daytime control applies its rules to the observer's standing command,
+        not to where the nighttime walk left the louvers: C1 goes back from 65
+        to the observer's 40, and A1, facing the sun, is capped at 50.
+        """
+        a1, c1 = self.set_up_night_walk()
+        self.assertEqual((await self.balance_once())[c1], 65.0)
+
+        calls = self.fake_remote.cmd_setLouvers.calls
+        sent_before = len(calls)
+        with mock.patch("lsst.ts.eas.louver_model.get_sun", return_value=make_sun_mock(10.0, azimuth=0.0)):
+            await self.model.update_louvers()
+        await spin_until(lambda: len(calls) > sent_before)
+
+        self.assertIs(self.model.mode, LouverControlMode.DAYTIME_LOUVER_CONTROL)
+        position = calls[-1]["position"]
+        self.assertEqual(position[c1], 40.0, "C1 returns to the observer's command")
+        self.assertEqual(position[a1], 50.0, "sun-facing A1 is capped")
+
+    async def test_observer_commands_between_night_and_day_are_kept(self) -> None:
+        """An observer command while EAS is idle becomes the standing command.
+
+        Nighttime control drops to IDLE when the louvers stop venting. The
+        observer then moves C1 to 30, and daytime control takes 30, not the
+        nighttime target or the earlier command, as the observer's request.
+        """
+        a1, c1 = self.set_up_night_walk()
+        await self.balance_once()
+
+        with mock.patch("lsst.ts.eas.louver_model.get_sun", return_value=make_sun_mock(-10.0)):
+            await self.model.update_louvers()
+        self.assertIs(self.model.mode, LouverControlMode.IDLE)
+
+        assert self.dome_model.louvers_telemetry is not None
+        command = list(self.dome_model.louvers_telemetry.positionCommanded)
+        command[c1] = 30.0
+        self.declare_observer_command(command)
+
+        calls = self.fake_remote.cmd_setLouvers.calls
+        sent_before = len(calls)
+        with mock.patch("lsst.ts.eas.louver_model.get_sun", return_value=make_sun_mock(10.0, azimuth=0.0)):
+            await self.model.update_louvers()
+        await spin_until(lambda: len(calls) > sent_before)
+
+        self.assertEqual(calls[-1]["position"][c1], 30.0)
+        self.assertEqual(self.model.louver_observer_command[c1], 30.0)
+
+    def set_up_direct_day_to_night(self) -> tuple[int, int, int, int]:
+        """Put the model in daytime control just before a direct handover.
+
+        The observer opened every louver to 80. Daytime control capped A1
+        (upwind) and C1 (downwind) at 50, so ``positionCommanded`` telemetry
+        shows 50 for them. The louvers have been open longer than the vent
+        delay, so the next pass after sundown goes straight to nighttime
+        control, with the dome at azimuth 0 and wind out of the north.
+
+        Returns
+        -------
+        `tuple` [`int`, `int`, `int`, `int`]
+            Indices of A1 (capped, upwind), B1 (uncapped, upwind), C1 (capped,
+            downwind) and F1 (uncapped, downwind).
+        """
+        a1, b1, c1, f1 = (find_louver(name).index for name in ("A1", "B1", "C1", "F1"))
+        eas_command = [80.0] * 34
+        eas_command[a1] = eas_command[c1] = 50.0
+
+        self.dome_model.louvers_telemetry = SimpleNamespace(positionCommanded=list(eas_command))
+        self.fake_remote.cmd_setLouvers.observer_command = [80.0] * 34
+        self.model.mode = LouverControlMode.DAYTIME_LOUVER_CONTROL
+        self.model.louver_observer_command = [80.0] * 34
+        self.model.expected_commanded = eas_command
+        self.model.dome_azimuth = 0.0
+        self.dome_model.louvers_open_time = utils.current_tai() - 1801.0
+        self.weather_model.wind_direction = 0.0
+        self.fake_remote.evt_summaryState.set_state(salobj.State.ENABLED)
+        return a1, b1, c1, f1
+
+    async def test_direct_day_to_night_starts_from_observer_command(self) -> None:
+        """A direct handover steps from the observer's command, not the cap.
+
+        Telemetry still shows the daytime caps at sundown, so nighttime control
+        must seed from the cached observer command. Its first command must
+        also carry the restore of the capped louvers it does not step, since a
+        separate restore command would be superseded before it was sent.
+        """
+        a1, b1, c1, f1 = self.set_up_direct_day_to_night()
+        self.weather_model.indoor_windspeed = 1.0  # below threshold: downwind opens
+
+        with mock.patch("lsst.ts.eas.louver_model.get_sun", return_value=make_sun_mock(-10.0)):
+            await self.model.update_louvers()
+        await spin_until(lambda: bool(self.fake_remote.cmd_setLouvers.calls))
+        await asyncio.sleep(STD_SLEEP)
+
+        self.assertIs(self.model.mode, LouverControlMode.NIGHTTIME_LOUVER_CONTROL)
+        calls = self.fake_remote.cmd_setLouvers.calls
+        self.assertEqual(len(calls), 1, "the restore goes out in the first nighttime command")
+        position = calls[0]["position"]
+        self.assertEqual(position[c1], 100.0, "capped downwind C1 steps from 80, not from 50")
+        self.assertEqual(position[f1], 100.0, "uncapped downwind F1 steps from 80")
+        self.assertEqual(position[a1], 80.0, "capped upwind A1 is restored to 80")
+        self.assertEqual(position[b1], DO_NOT_MOVE, "uncapped upwind B1 is already at 80")
+        self.assertEqual(self.model.louver_observer_command, [80.0] * 34)
+
+    async def test_direct_day_to_night_restores_without_wind_data(self) -> None:
+        """The restore does not wait for wind measurements and is sent once."""
+        a1, b1, c1, f1 = self.set_up_direct_day_to_night()
+        self.weather_model.indoor_windspeed = math.nan
+
+        with mock.patch("lsst.ts.eas.louver_model.get_sun", return_value=make_sun_mock(-10.0)):
+            await self.model.update_louvers()
+            await spin_until(lambda: bool(self.fake_remote.cmd_setLouvers.calls))
+            await self.model.update_louvers()
+        await asyncio.sleep(STD_SLEEP)
+
+        calls = self.fake_remote.cmd_setLouvers.calls
+        self.assertEqual(len(calls), 1, "a pass with nothing to restore and no wind data sends nothing")
+        position = calls[0]["position"]
+        self.assertEqual([position[i] for i in (a1, b1, c1, f1)], [80.0, DO_NOT_MOVE, 80.0, DO_NOT_MOVE])
 
     async def test_monitor_skips_adjust_louvers_when_sun_is_down(self) -> None:
         """monitor() should not call adjust_louvers after sundown."""

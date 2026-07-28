@@ -33,7 +33,7 @@ from astropy import units as u
 from astropy.coordinates import AltAz, get_sun
 from astropy.time import Time
 
-from lsst.ts import salobj
+from lsst.ts import salobj, utils
 
 try:
     from lsst.ts.xml.tables.mtdome import LouverTable
@@ -131,6 +131,9 @@ class LouverModel:
     sun_altitude_threshold : `float`
         Sun altitude (degrees) above which louver positions are adjusted
         based on sun azimuth.
+    nighttime_vent_delay : `float`
+        Time (seconds) after the louvers open before nighttime louver control
+        begins, allowing the dome to vent first.
     inside_windspeed_threshold : `float`
         Target windspeed (m/s) inside the dome during nighttime louver
         control.
@@ -147,9 +150,13 @@ class LouverModel:
     anemometer_interval : `float`
         Time window (seconds) over which the inside anemometer windspeeds are
         averaged.
+    nighttime_adjustment_interval : `float`
+        Time (seconds) between nighttime louver adjustments. Also the control
+        loop cadence while nighttime control is active.
     features_to_disable : `list` [`str`]
         List of feature names to disable. If ``"day_louvers"`` is present,
-        louvers are not adjusted during the day.
+        louvers are not adjusted during the day. If ``"night_louvers"`` is
+        present, louvers are not adjusted during the night.
     allow_send : `Callable` [[], `bool`] | None, optional
         Callable that returns ``True`` when commands may be sent (i.e., when
         EAS is in the ENABLED state). If ``None``, commands are always
@@ -166,12 +173,14 @@ class LouverModel:
         louver_sun_angle: float,
         louver_exposed_command: float,
         sun_altitude_threshold: float,
+        nighttime_vent_delay: float,
         inside_windspeed_threshold: float,
         inside_windspeed_deadband: float,
         upwind_interval: float,
         downwind_interval: float,
         wind_interval: float,
         anemometer_interval: float,
+        nighttime_adjustment_interval: float,
         features_to_disable: list[str],
         allow_send: Callable[[], bool] | None = None,
     ) -> None:
@@ -198,6 +207,10 @@ class LouverModel:
         # Sun altitude (degrees) above which louvers are adjusted.
         self.sun_altitude_threshold: float = sun_altitude_threshold
 
+        # Venting time (seconds) after the louvers open before nighttime
+        # control begins.
+        self.nighttime_vent_delay: float = nighttime_vent_delay
+
         # Target inside windspeed (m/s) and the half-width of the band around
         # it within which no adjustment is made.
         self.inside_windspeed_threshold: float = inside_windspeed_threshold
@@ -209,9 +222,10 @@ class LouverModel:
         self.downwind_interval: float = downwind_interval
 
         # Trailing windows (seconds) over which the wind measurements are
-        # averaged.
+        # averaged, and the cadence (seconds) between nighttime adjustments.
         self.wind_interval: float = wind_interval
         self.anemometer_interval: float = anemometer_interval
+        self.nighttime_adjustment_interval: float = nighttime_adjustment_interval
 
         # Per louver, the position the observer last commanded. MTDome's
         # positionCommanded can't be used for this, since it also reflects
@@ -257,6 +271,12 @@ properties:
       on sun azimuth.
     type: number
     default: -1.0
+  nighttime_vent_delay:
+    description: >-
+      Time (seconds) after the louvers open before nighttime louver control
+      begins, allowing the dome to vent first.
+    type: number
+    default: 1800.0
   inside_windspeed_threshold:
     description: Target windspeed (m/s) inside the dome during nighttime louver control.
     type: number
@@ -283,6 +303,10 @@ properties:
     description: Time window (s) over which the inside anemometer windspeeds are averaged.
     type: number
     default: 15.0
+  nighttime_adjustment_interval:
+    description: Time (s) between nighttime louver adjustments.
+    type: number
+    default: 15.0
 required:
   - louver_sun_angle
   - louver_exposed_command
@@ -292,7 +316,15 @@ additionalProperties: false
 
     @property
     def cadence(self) -> float:
-        """Time (seconds) to wait between control loop passes."""
+        """Time (seconds) to wait between control loop passes.
+
+        Nighttime control steps the targets by a fixed interval each pass, so
+        its cadence sets how quickly the louvers converge and is configurable.
+        Every other mode only needs to keep up with the sun.
+        """
+        if self.mode is LouverControlMode.NIGHTTIME_LOUVER_CONTROL:
+            return self.nighttime_adjustment_interval
+
         return DORMANT_TIME
 
     @property
@@ -310,11 +342,11 @@ additionalProperties: false
     async def azimuth_callback(self, azimuth_telemetry: salobj.BaseMsgType) -> None:
         """Callback for MTDome.tel_azimuth.
 
-        Data from this telemetry item is used to track the current dome
-        azimuth, which is required to compute per-louver sun angles. When the
-        dome azimuth changes by more than `AZIMUTH_CHANGE_THRESHOLD` (or is
-        being read for the first time), the control loop is asked to run
-        immediately rather than waiting out its cadence.
+        Records the dome azimuth. By day, a change of more than
+        `AZIMUTH_CHANGE_THRESHOLD` runs the louver update immediately, so the
+        sun caps keep up with a moving dome. At night it does not, because
+        each nighttime pass moves the louvers one step, and waking on every
+        azimuth sample would step them too fast.
 
         Parameters
         ----------
@@ -324,6 +356,9 @@ additionalProperties: false
         new_azimuth = azimuth_telemetry.positionActual
         previous_azimuth = self.dome_azimuth
         self.dome_azimuth = new_azimuth
+
+        if self.mode is not LouverControlMode.DAYTIME_LOUVER_CONTROL:
+            return
 
         if previous_azimuth is None or abs(new_azimuth - previous_azimuth) > AZIMUTH_CHANGE_THRESHOLD:
             self.update_requested.set()
@@ -379,11 +414,16 @@ additionalProperties: false
         `LouverControlMode`
             The mode whose setpoints should be applied.
         """
-        if "day_louvers" in self.features_to_disable:
-            return LouverControlMode.IDLE
-
         if sun_altitude > self.sun_altitude_threshold:
+            if "day_louvers" in self.features_to_disable:
+                return LouverControlMode.IDLE
             return LouverControlMode.DAYTIME_LOUVER_CONTROL
+
+        # The sun is down.
+        if "night_louvers" in self.features_to_disable:
+            return LouverControlMode.IDLE
+        if self.vent_delay_elapsed():
+            return LouverControlMode.NIGHTTIME_LOUVER_CONTROL
 
         return LouverControlMode.IDLE
 
@@ -485,6 +525,23 @@ additionalProperties: false
             for azimuth in louver_azimuth
         ]
 
+    def vent_delay_elapsed(self) -> bool:
+        """Return whether the louvers have been open long enough to vent.
+
+        Returns
+        -------
+        `bool`
+            True if the louvers have been open for at least
+            `nighttime_vent_delay`
+            seconds. False if they are closed, their state is unknown, or the
+            delay has not yet elapsed.
+        """
+        louvers_open_time = self.dome_model.louvers_open_time
+        if louvers_open_time is None:
+            return False
+
+        return (utils.current_tai() - louvers_open_time) >= self.nighttime_vent_delay
+
     def enter_mode(self, mode: LouverControlMode) -> set[int]:
         """Prepare for `mode`.
 
@@ -543,7 +600,7 @@ additionalProperties: false
 
         return list(louvers_telemetry.positionCommanded[: len(LouverTable)])
 
-    async def exit_mode(self, mode: LouverControlMode) -> None:
+    async def exit_mode(self, mode: LouverControlMode, next_mode: LouverControlMode) -> None:
         """Perform the actions required when leaving `mode`.
 
         Leaving `~LouverControlMode.DAYTIME_LOUVER_CONTROL` releases the
@@ -556,18 +613,21 @@ additionalProperties: false
         ----------
         mode : `LouverControlMode`
             The mode being left.
+        next_mode : `LouverControlMode`
+            The mode being entered.
         """
         if mode is not LouverControlMode.DAYTIME_LOUVER_CONTROL or self.louver_observer_command is None:
             return
 
-        opened = self.observer_opened
-        assert opened is not None
-        command = [
-            position if is_open else DO_NOT_MOVE
-            for position, is_open in zip(self.louver_observer_command, opened)
-        ]
-        await self.set_louvers(command)
-        self.record_command(command)
+        if next_mode is not LouverControlMode.NIGHTTIME_LOUVER_CONTROL:
+            opened = self.observer_opened
+            assert opened is not None
+            command = [
+                position if is_open else DO_NOT_MOVE
+                for position, is_open in zip(self.louver_observer_command, opened)
+            ]
+            await self.set_louvers(command)
+            self.record_command(command)
 
     def observer_commands(self, expected: list[float]) -> dict[int, float]:
         """Return the louvers the observer has commanded, and their positions.
@@ -681,14 +741,18 @@ additionalProperties: false
         sun_altitude, sun_azimuth = self.get_sun_altaz()
 
         new_mode = self.select_mode(sun_altitude)
+        still_capped: set[int] = set()
         if new_mode is not self.mode:
             self.log.info(f"Louver control mode {self.mode.name} -> {new_mode.name}")
-            await self.exit_mode(self.mode)
+            await self.exit_mode(self.mode, new_mode)
             self.mode = new_mode
+            still_capped = self.enter_mode(new_mode)
 
         match self.mode:
             case LouverControlMode.DAYTIME_LOUVER_CONTROL:
                 await self.adjust_louvers(sun_azimuth)
+            case LouverControlMode.NIGHTTIME_LOUVER_CONTROL:
+                await self.balance_louvers(still_capped=still_capped)
             case LouverControlMode.IDLE:
                 pass
 

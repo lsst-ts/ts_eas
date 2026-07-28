@@ -64,6 +64,7 @@ CONFIG_SCHEMA = yaml.safe_load(
             * `require_dome_open`: functionality will operate even when the dome is closed.
             * `day_louvers`: louver positions will not be adjusted based on sun position during the day.
             * `ahu_off_catchup`: daytime AHU catch-up regulation (for when AHUs are turned off) will not run.
+            * `night_louvers`: louver positions will not be adjusted based on wind during the night.
         type: array
         items:
           type: string
@@ -82,6 +83,7 @@ CONFIG_SCHEMA = yaml.safe_load(
             - require_dome_open
             - day_louvers
             - ahu_off_catchup
+            - night_louvers
       twilight_definition:
         description: >
           Definition of twilight. Can be a number (in degrees) between -90 and 0, corresponding
