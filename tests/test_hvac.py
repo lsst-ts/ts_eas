@@ -214,11 +214,17 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         )
         self.weatherforecast = WeatherForecastModel(log=self.log)
 
-    def make_model(self, **overrides: float | list[int] | list[str] | None) -> hvac_model.HvacModel:
+    def make_model(
+        self, **overrides: float | list[int] | list[float] | list[str] | None
+    ) -> hvac_model.HvacModel:
         params = dict(
             ahu_setpoint_delta=0.0,
             ahu_setpoint_delta_closed_at_night=0.0,
             ahu_control=[1, 2, 3, 4],
+            ahu_off_catchup_deltas=[0.0, -1.0, -2.0, -3.0],
+            ahu_off_catchup_rate=1.0,
+            ahu_off_catchup_poll_interval=900.0,
+            ahu_off_catchup_threshold=1.0,
             setpoint_lower_limit=6.0,
             wind_threshold=10.0,
             vec04_hold_time=0.0,
@@ -558,6 +564,48 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         ):
             # AHUs enabled on close
             self.assertIn(ahu, self.hvac.enable_called)
+
+    async def test_dome_transition_clears_hold_retains_setpoint(self) -> None:
+        """A dome open/close transition should clear the catch-up hold."""
+        hvac_model.HVAC_SLEEP_TIME = STD_SLEEP
+        self.dome.is_closed = False
+        self.weather.average_windspeed = 3.0
+
+        model = self.make_model()
+        task = asyncio.create_task(model.control_ahus_and_vec04())
+
+        # Let the loop settle into the dome-open state.
+        await asyncio.sleep(STD_SLEEP)
+
+        # Simulate a stale, latched daytime catch-up state.
+        model.cached_ahu_setpoint = 10.0
+        model.catchup_delta = -3.0
+
+        # Close the dome: the transition should reset the catch-up state.
+        self.dome.is_closed = True
+        await asyncio.sleep(STD_SLEEP)
+
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass  # expected
+
+        # The catch-up hold is cleared, but the base setpoint is retained so it
+        # can be re-commanded to the AHUs on the re-close.
+        self.assertEqual(model.cached_ahu_setpoint, 10.0)
+        self.assertEqual(model.catchup_delta, 0.0)
+
+        # And the AHUs are enabled on close, and the base setpoint is
+        # re-commanded to them immediately (not deferred to the next forecast).
+        for ahu in (
+            DeviceId.airHandlingUnit01Dome,
+            DeviceId.airHandlingUnit02Dome,
+            DeviceId.airHandlingUnit03Dome,
+            DeviceId.airHandlingUnit04Dome,
+        ):
+            self.assertIn(ahu, self.hvac.enable_called)
+            self.assertEqual(self.hvac.ahu_setpoints.get(ahu), 10.0)
 
     async def test_ahu_control_limits_shutter_commands(self) -> None:
         """Only configured AHUs should be enabled and disabled."""
@@ -946,6 +994,239 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(task, timeout=STD_TIMEOUT)
 
         self.hvac.ahu_setpoints.clear()
+
+    async def test_disabled_ahus_change_delta(self) -> None:
+        """Each number of AHUs off selects the matching catch-up delta."""
+        deltas = [0.0, -1.0, -2.0, -3.0]
+
+        # Index i is the expected delta when i AHUs are off (0 AHUs off -> 0).
+        expected_by_n_off = [0.0] + deltas
+        for n_off, expected in enumerate(expected_by_n_off):
+            model = self.make_model(ahu_off_catchup_deltas=deltas)
+            # Turn the first n_off AHUs off; the rest report on.
+            for ahu in range(1, 5):
+                working_state = ahu > n_off
+                await model.ahu_working_state_callback(ahu, types.SimpleNamespace(workingState=working_state))
+            self.assertEqual(model.catchup_delta, expected)
+
+    async def test_catchup_delta_latches_until_all_on(self) -> None:
+        """The catch-up delta holds until every AHU is back on, and the
+        setpoint is re-applied whenever the delta changes."""
+        model = self.make_model(ahu_off_catchup_deltas=[0.0, -1.0, -2.0, -3.0])
+
+        # A base setpoint must be known for the callback to re-apply setpoints
+        # (normally set by sunrise/forecast). Record the setpoints applied
+        # instead of commanding the AHUs, so the catch-up behavior is visible.
+        base_setpoint = 10.0
+        model.cached_ahu_setpoint = base_setpoint
+        applied_setpoints: list[float] = []
+
+        async def record(setpoint: float, respect_lower_limit: bool = True) -> None:
+            applied_setpoints.append(setpoint)
+
+        model.apply_ahu_setpoints = record  # type: ignore[method-assign]
+
+        async def set_ahu(ahu: int, on: bool) -> None:
+            await model.ahu_working_state_callback(ahu, types.SimpleNamespace(workingState=on))
+
+        # All four AHUs start on: no offset, nothing applied.
+        for ahu in range(1, 5):
+            await set_ahu(ahu, True)
+        self.assertEqual(model.catchup_delta, 0.0)
+        self.assertEqual(applied_setpoints, [])
+
+        # Three AHUs go off: hold the three-off delta and lower the setpoint as
+        # the delta deepens (one-off is a zero delta, so no setpoint yet).
+        await set_ahu(1, False)
+        await set_ahu(2, False)
+        await set_ahu(3, False)
+        self.assertEqual(model.catchup_delta, -2.0)
+        self.assertEqual(applied_setpoints, [base_setpoint - 1.0, base_setpoint - 2.0])
+
+        # Two come back (one still off): the delta is held, not relaxed, so no
+        # new setpoint is applied.
+        await set_ahu(1, True)
+        await set_ahu(2, True)
+        self.assertEqual(model.catchup_delta, -2.0)
+        self.assertEqual(applied_setpoints, [base_setpoint - 1.0, base_setpoint - 2.0])
+
+        # All four off deepens the held delta even after partial recovery, and
+        # lowers the setpoint further.
+        await set_ahu(1, False)
+        await set_ahu(2, False)
+        await set_ahu(4, False)
+        self.assertEqual(model.catchup_delta, -3.0)
+        self.assertEqual(
+            applied_setpoints,
+            [base_setpoint - 1.0, base_setpoint - 2.0, base_setpoint - 3.0],
+        )
+
+        # Everything comes back on: the hold releases and the base setpoint is
+        # restored.
+        for ahu in range(1, 5):
+            await set_ahu(ahu, True)
+        self.assertEqual(model.catchup_delta, 0.0)
+        self.assertEqual(
+            applied_setpoints,
+            [base_setpoint - 1.0, base_setpoint - 2.0, base_setpoint - 3.0, base_setpoint],
+        )
+
+        # Recovery also spawns the ambient-overshoot catch-up loop; cancel it
+        # so it does not linger past the test.
+        model.cancel_ahu_off_catchup()
+
+    async def test_ahu_off_catchup_lowers_setpoint_on_overshoot(self) -> None:
+        for rate, expected in ((1.0, 7.0), (0.5, 8.5)):
+            with self.subTest(rate=rate):
+                model = self.make_model(ahu_off_catchup_rate=rate, ahu_off_catchup_threshold=1.0)
+                model.cached_ahu_setpoint = 10.0
+                model.ahu_working_states = [True, True, True, True]
+                self.weather.current_indoor_temperature = 13.0  # excess of 3 °C
+
+                applied: list[float] = []
+
+                async def record(setpoint: float, respect_lower_limit: bool = True) -> None:
+                    applied.append(setpoint)
+
+                model.apply_ahu_setpoints = record  # type: ignore[method-assign]
+
+                stop = await model.apply_ahu_off_catchup()
+
+                # Still overshooting, so the loop should continue.
+                self.assertFalse(stop)
+                self.assertEqual(applied, [expected])
+
+    async def test_ahu_off_catchup_completes_within_threshold(self) -> None:
+        """Once ambient is within the threshold, the base setpoint is restored
+        and the loop reports completion."""
+        model = self.make_model(ahu_off_catchup_rate=1.0, ahu_off_catchup_threshold=1.0)
+        model.cached_ahu_setpoint = 10.0
+        model.ahu_working_states = [True, True, True, True]
+        self.weather.current_indoor_temperature = 10.5  # excess of 0.5 °C (<= threshold)
+
+        applied: list[float] = []
+
+        async def record(setpoint: float, respect_lower_limit: bool = True) -> None:
+            applied.append(setpoint)
+
+        model.apply_ahu_setpoints = record  # type: ignore[method-assign]
+
+        stop = await model.apply_ahu_off_catchup()
+
+        self.assertTrue(stop)
+        self.assertEqual(applied, [10.0])
+
+    async def test_ahu_off_catchup_clamps_to_lower_limit(self) -> None:
+        """The catch-up setpoint never drops below setpoint_lower_limit."""
+        model = self.make_model(
+            ahu_off_catchup_rate=1.0,
+            ahu_off_catchup_threshold=1.0,
+            setpoint_lower_limit=6.0,
+        )
+        model.cached_ahu_setpoint = 7.0
+        model.ahu_working_states = [True, True, True, True]
+        self.weather.current_indoor_temperature = 20.0  # large overshoot
+
+        self.hvac.ahu_setpoints.clear()
+        stop = await model.apply_ahu_off_catchup()
+        await asyncio.sleep(STD_SLEEP)  # let the command task reach the mock
+
+        self.assertFalse(stop)
+        for ahu in (
+            DeviceId.airHandlingUnit01Dome,
+            DeviceId.airHandlingUnit02Dome,
+            DeviceId.airHandlingUnit03Dome,
+            DeviceId.airHandlingUnit04Dome,
+        ):
+            self.assertEqual(self.hvac.ahu_setpoints[ahu], 6.0)
+        self.hvac.ahu_setpoints.clear()
+
+    async def test_ahu_off_catchup_stops_when_context_gone(self) -> None:
+        """The catch-up reports completion (and sends nothing) when its
+        regulating context no longer holds."""
+        applied: list[float] = []
+
+        async def record(setpoint: float, respect_lower_limit: bool = True) -> None:
+            applied.append(setpoint)
+
+        # (case name, is night, dome closed, fourth AHU on, features disabled)
+        cases: list[tuple[str, bool, bool, bool, list[str]]] = [
+            ("night", True, True, True, []),
+            ("dome_open", False, False, True, []),
+            ("ahu_off", False, True, False, []),
+            ("disabled", False, True, True, ["ahu_off_catchup"]),
+        ]
+        for name, night, dome_closed, fourth_on, features in cases:
+            with self.subTest(case=name):
+                model = self.make_model(features_to_disable=features)
+                model.cached_ahu_setpoint = 10.0
+                model.ahu_working_states = [True, True, True, fourth_on]
+                self.diurnal._night = night
+                self.dome.is_closed = dome_closed
+                self.weather.current_indoor_temperature = 20.0
+                applied.clear()
+                model.apply_ahu_setpoints = record  # type: ignore[method-assign]
+
+                stop = await model.apply_ahu_off_catchup()
+
+                self.assertTrue(stop)
+                self.assertEqual(applied, [])
+
+    async def test_ahu_off_catchup_waits_for_data(self) -> None:
+        """Missing base setpoint or ambient temperature keeps the loop polling
+        without sending a command."""
+
+        async def record(setpoint: float, respect_lower_limit: bool = True) -> None:
+            raise AssertionError("No setpoint should be sent while data is missing.")
+
+        # No base setpoint yet.
+        model = self.make_model()
+        model.ahu_working_states = [True, True, True, True]
+        model.cached_ahu_setpoint = None
+        model.apply_ahu_setpoints = record  # type: ignore[method-assign]
+        self.assertFalse(await model.apply_ahu_off_catchup())
+
+        # Base setpoint known but ambient temperature unavailable.
+        model.cached_ahu_setpoint = 10.0
+        self.weather.current_indoor_temperature = math.nan
+        self.assertFalse(await model.apply_ahu_off_catchup())
+
+    async def test_recovery_manages_catchup_task(self) -> None:
+        """Recovery (all AHUs back on after any number were off) spawns the
+        catch-up loop, and an AHU going off again cancels it."""
+        model = self.make_model(ahu_off_catchup_deltas=[0.0, -1.0, -2.0, -3.0])
+        model.cached_ahu_setpoint = 10.0
+
+        async def record(setpoint: float, respect_lower_limit: bool = True) -> None:
+            pass
+
+        model.apply_ahu_setpoints = record  # type: ignore[method-assign]
+
+        async def set_ahu(ahu: int, on: bool) -> None:
+            await model.ahu_working_state_callback(ahu, types.SimpleNamespace(workingState=on))
+
+        # All AHUs on from the start: no recovery, so no catch-up task.
+        for ahu in range(1, 5):
+            await set_ahu(ahu, True)
+        self.assertIsNone(model.ahu_off_catchup_task)
+
+        # A single AHU goes off: still no overshoot task (stage one owns the
+        # setpoint). One off uses a zero delta, so this also confirms the
+        # trigger does not depend on a non-zero catch-up having been held.
+        await set_ahu(1, False)
+        self.assertIsNone(model.ahu_off_catchup_task)
+
+        # Back on: AHU recovery spawns the overshoot task.
+        await set_ahu(1, True)
+        task = model.ahu_off_catchup_task
+        self.assertIsNotNone(task)
+
+        # An AHU goes off again: the task is cancelled and cleared.
+        await set_ahu(3, False)
+        self.assertIsNone(model.ahu_off_catchup_task)
+        await asyncio.sleep(0)  # let the cancellation settle
+        assert task is not None
+        self.assertTrue(task.cancelled())
 
     def basic_make_csc(
         self,
