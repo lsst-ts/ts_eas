@@ -502,7 +502,7 @@ additionalProperties: false
         sin_sum = sum(math.sin(math.radians(direction)) for direction in recent)
         cos_sum = sum(math.cos(math.radians(direction)) for direction in recent)
 
-        if sin_sum == 0.0 and cos_sum == 0.0:
+        if math.hypot(sin_sum, cos_sum) <= 1e-12:
             # Diametrically opposed samples cancel and the mean is undefined.
             self.log.warning("Wind direction samples cancelled out; no mean direction.")
             return math.nan
