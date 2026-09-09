@@ -43,6 +43,10 @@ LONG_SLEEP = 15
 SPIN_SLEEP = 0.1
 
 TEST_CONFIG_DIR = pathlib.Path(__file__).parents[1].joinpath("tests", "config")
+
+# One of the in-dome anemometer ESS indices, used to check that the anemometer
+# remotes are built and their telemetry reaches the weather model.
+ANEMOMETER_INDEX = 123
 TEST_WIND_DATA_DIR = pathlib.Path(__file__).parent
 
 logging.basicConfig(format="%(asctime)s:%(levelname)s:%(name)s:%(message)s", level=logging.DEBUG)
@@ -136,6 +140,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         self.hvac = salobj.Controller("HVAC")
         self.ess = salobj.Controller("ESS", 301)
         self.ess112: salobj.Controller | None = salobj.Controller("ESS", 112)
+        self.ess_anemometer = salobj.Controller("ESS", ANEMOMETER_INDEX)
         self.mtmount = MTMountMock()
 
         eas.hvac_model.HVAC_SLEEP_TIME = 1
@@ -146,6 +151,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 self.hvac.start_task,
                 self.ess.start_task,
                 self.ess112.start_task,
+                self.ess_anemometer.start_task,
                 self.mtmount.start_task,
             ),
             timeout=STD_TIMEOUT,
@@ -155,6 +161,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         await self.hvac.evt_summaryState.set_write(summaryState=salobj.State.ENABLED)
         await self.ess.evt_summaryState.set_write(summaryState=salobj.State.ENABLED)
         await self.ess112.evt_summaryState.set_write(summaryState=salobj.State.ENABLED)
+        await self.ess_anemometer.evt_summaryState.set_write(summaryState=salobj.State.ENABLED)
 
         emit_ess112_temperature_task = asyncio.create_task(self.emit_ess112_temperature())
 
@@ -178,6 +185,7 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             await self.mtdome.close()
             await self.hvac.close()
             await self.ess.close()
+            await self.ess_anemometer.close()
             await self.mtmount.close()
             await ess112.close()
 
@@ -685,6 +693,47 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.ahu4_state, True)
         self.assertEqual(self.vec04_state, False)
 
+    async def test_anemometer_telemetry_reaches_weather_model(self) -> None:
+        """Inside anemometer telemetry feeds the inside windspeed average.
+
+        Exercises the whole path: the ESS remotes are built from the configured
+        anemometer indices, their airFlow callback is connected, and the
+        samples land where nighttime louver control reads them.
+        """
+        async with (
+            self.mock_extra_cscs(),
+            self.make_csc(
+                initial_state=salobj.State.ENABLED,
+                config_dir=TEST_CONFIG_DIR,
+                simulation_mode=1,
+            ),
+        ):
+            await asyncio.wait_for(self.csc.monitor_start_event.wait(), timeout=STD_TIMEOUT)
+
+            self.assertIn(ANEMOMETER_INDEX, self.csc.ess_anemometer_remotes)
+
+            await self.ess_anemometer.tel_airFlow.set_write(
+                sensorName="",
+                timestamp=0,
+                direction=45.0,
+                directionStdDev=0.0,
+                speed=3.0,
+                speedStdDev=0.0,
+                maxSpeed=3.0,
+                location="",
+            )
+
+            async def wait_for_sample() -> None:
+                while not self.csc.weather_model.indoor_wind_history:
+                    await asyncio.sleep(SPIN_SLEEP)
+
+            await asyncio.wait_for(wait_for_sample(), timeout=STD_TIMEOUT)
+
+        self.assertAlmostEqual(
+            self.csc.weather_model.average_indoor_windspeed(window=STD_TIMEOUT),
+            3.0,
+        )
+
     async def test_louvers_commanded_when_sun_is_up(self) -> None:
         """cmd_setLouvers should be sent when the sun is above the horizon."""
         louver_positions = [50.0] * 34
@@ -695,8 +744,8 @@ class CscTestCase(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         mock_sun.transform_to.return_value = mock_altaz
 
         with (
-            mock.patch("lsst.ts.eas.dome_model.DORMANT_TIME", 1.0),
-            mock.patch("lsst.ts.eas.dome_model.get_sun", return_value=mock_sun),
+            mock.patch("lsst.ts.eas.louver_model.DORMANT_TIME", 1.0),
+            mock.patch("lsst.ts.eas.louver_model.get_sun", return_value=mock_sun),
         ):
             async with (
                 self.mock_extra_cscs(),
