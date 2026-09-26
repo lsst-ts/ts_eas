@@ -24,6 +24,7 @@ import logging
 import math
 import types
 import unittest
+import unittest.mock
 from pathlib import Path
 from types import SimpleNamespace
 from typing import NotRequired, TypedDict
@@ -607,6 +608,36 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             self.assertIn(ahu, self.hvac.enable_called)
             self.assertEqual(self.hvac.ahu_setpoints.get(ahu), 10.0)
 
+    async def test_reclose_resend_skipped_outside_daytime_control(self) -> None:
+        """The dome re-close resend of the cached setpoint is skipped at night
+        and with room_setpoint disabled."""
+        hvac_model.HVAC_SLEEP_TIME = STD_SLEEP
+        for name, night, features in (
+            ("night", True, []),
+            ("room_setpoint_disabled", False, ["room_setpoint"]),
+        ):
+            with self.subTest(case=name):
+                self.hvac.ahu_setpoints.clear()
+                self.hvac.enable_called.clear()
+                self.diurnal._night = night
+                self.dome.is_closed = False
+
+                model = self.make_model(features_to_disable=features)
+                model.cached_ahu_setpoint = 10.0
+                task = asyncio.create_task(model.control_ahus_and_vec04())
+                await asyncio.sleep(STD_SLEEP)
+                self.dome.is_closed = True
+                await asyncio.sleep(STD_SLEEP)
+
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass  # expected
+
+                self.assertIn(DeviceId.airHandlingUnit01Dome, self.hvac.enable_called)
+                self.assertEqual(self.hvac.ahu_setpoints, {})
+
     async def test_ahu_control_limits_shutter_commands(self) -> None:
         """Only configured AHUs should be enabled and disabled."""
         hvac_model.HVAC_SLEEP_TIME = STD_SLEEP
@@ -1074,6 +1105,123 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         # Recovery also spawns the ambient-overshoot catch-up loop; cancel it
         # so it does not linger past the test.
         model.cancel_ahu_off_catchup()
+
+    async def test_catchup_callback_inactive_outside_daytime_control(self) -> None:
+        """AHUs going off sends no catch-up setpoint at night, with the dome
+        open, or with AHU setpoint control disabled."""
+        applied: list[float] = []
+
+        async def record(setpoint: float, respect_lower_limit: bool = True) -> None:
+            applied.append(setpoint)
+
+        # (case name, is night, dome closed, features disabled)
+        cases: list[tuple[str, bool, bool, list[str]]] = [
+            ("night", True, True, []),
+            ("dome_open", False, False, []),
+            ("room_setpoint_disabled", False, True, ["room_setpoint"]),
+            ("ahu_disabled", False, True, ["ahu"]),
+        ]
+        for name, night, dome_closed, features in cases:
+            with self.subTest(case=name):
+                model = self.make_model(features_to_disable=features)
+                model.cached_ahu_setpoint = 10.0
+                self.diurnal._night = night
+                self.dome.is_closed = dome_closed
+                applied.clear()
+                model.apply_ahu_setpoints = record  # type: ignore[method-assign]
+
+                for ahu in range(1, 5):
+                    await model.ahu_working_state_callback(ahu, types.SimpleNamespace(workingState=True))
+                for ahu in (1, 2, 3):
+                    await model.ahu_working_state_callback(ahu, types.SimpleNamespace(workingState=False))
+                for ahu in (1, 2, 3):
+                    await model.ahu_working_state_callback(ahu, types.SimpleNamespace(workingState=True))
+
+                self.assertEqual(model.catchup_delta, 0.0)
+                self.assertEqual(applied, [])
+                self.assertIsNone(model.ahu_off_catchup_task)
+
+    async def test_catchup_ignores_ahus_off_from_dome_open(self) -> None:
+        """AHUs disabled while the dome was open do not start a catch-up
+        episode when they report off after the dome re-closes."""
+        model = self.make_model(ahu_off_catchup_deltas=[0.0, -1.0, -2.0, -3.0])
+        model.cached_ahu_setpoint = 10.0
+        applied: list[float] = []
+
+        async def record(setpoint: float, respect_lower_limit: bool = True) -> None:
+            applied.append(setpoint)
+
+        model.apply_ahu_setpoints = record  # type: ignore[method-assign]
+
+        async def set_ahu(ahu: int, on: bool) -> None:
+            await model.ahu_working_state_callback(ahu, types.SimpleNamespace(workingState=on))
+
+        for ahu in range(1, 5):
+            await set_ahu(ahu, True)
+
+        # Dome opens and EAS disables the AHUs.
+        self.dome.is_closed = False
+        for ahu in range(1, 5):
+            await set_ahu(ahu, False)
+
+        # Dome re-closes; the AHUs keep reporting off until they restart.
+        self.dome.is_closed = True
+        for ahu in range(1, 5):
+            await set_ahu(ahu, False)
+        self.assertEqual(model.catchup_delta, 0.0)
+        for ahu in range(1, 5):
+            await set_ahu(ahu, True)
+        self.assertEqual(model.catchup_delta, 0.0)
+        self.assertEqual(applied, [])
+        self.assertIsNone(model.ahu_off_catchup_task)
+
+        # Once all AHUs have been seen on, a real daytime outage catches up.
+        await set_ahu(1, False)
+        await set_ahu(2, False)
+        self.assertEqual(model.catchup_delta, -1.0)
+        self.assertEqual(applied, [9.0])
+        model.cancel_ahu_off_catchup()
+
+    async def test_catchup_arms_after_timeout_with_ahu_still_off(self) -> None:
+        """An AHU still off once AHU_CATCHUP_ARM_TIMEOUT has passed after a
+        re-close counts as an outage, so further AHUs going off catch up."""
+        with unittest.mock.patch.object(hvac_model, "AHU_CATCHUP_ARM_TIMEOUT", 0.5):
+            model = self.make_model(ahu_off_catchup_deltas=[0.0, -1.0, -2.0, -3.0])
+            model.cached_ahu_setpoint = 10.0
+            applied: list[float] = []
+
+            async def record(setpoint: float, respect_lower_limit: bool = True) -> None:
+                applied.append(setpoint)
+
+            model.apply_ahu_setpoints = record  # type: ignore[method-assign]
+
+            async def set_ahu(ahu: int, on: bool) -> None:
+                await model.ahu_working_state_callback(ahu, types.SimpleNamespace(workingState=on))
+
+            for ahu in range(1, 5):
+                await set_ahu(ahu, True)
+
+            # Dome opens and EAS disables the AHUs.
+            self.dome.is_closed = False
+            for ahu in range(1, 5):
+                await set_ahu(ahu, False)
+
+            # Dome re-closes; AHUs 1, 3 and 4 restart but AHU 2 has faulted.
+            self.dome.is_closed = True
+            for ahu in (1, 3, 4):
+                await set_ahu(ahu, True)
+            await set_ahu(2, False)
+            self.assertEqual(model.catchup_delta, 0.0)
+            self.assertEqual(applied, [])
+
+            # After the timeout, AHU 2 counts as an outage, so AHU 3 tripping
+            # makes two AHUs off.
+            await asyncio.sleep(1.0)
+            await set_ahu(2, False)
+            await set_ahu(3, False)
+            self.assertEqual(model.catchup_delta, -1.0)
+            self.assertEqual(applied, [9.0])
+            model.cancel_ahu_off_catchup()
 
     async def test_ahu_off_catchup_lowers_setpoint_on_overshoot(self) -> None:
         for rate, expected in ((1.0, 7.0), (0.5, 8.5)):

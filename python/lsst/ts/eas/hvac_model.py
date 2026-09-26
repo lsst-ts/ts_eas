@@ -43,6 +43,9 @@ HVAC_SLEEP_TIME = 60.0  # How often to check the HVAC state (seconds)
 STD_TIMEOUT = 5  # seconds
 N_CHILLERS = 2  # EAS controls two HVAC glycol chillers.
 N_AHUS = 4  # The HVAC system has four dome air handling units (AHUs/UMAs).
+# Time after daytime AHU control resumes (seconds) after which AHUs still off
+# are treated as an outage rather than as still restarting.
+AHU_CATCHUP_ARM_TIMEOUT = 300.0
 
 
 class HvacModel:
@@ -201,6 +204,19 @@ class HvacModel:
         # overwriting it.
         self.catchup_delta: float = 0.0
 
+        # Whether an AHU going off starts a catch-up episode. Cleared whenever
+        # daytime AHU control is inactive (e.g. while the dome is open and EAS
+        # has disabled the AHUs) and set again once all AHUs report on, so
+        # AHUs still restarting after a re-close do not count as an outage.
+        # It is also set once AHU_CATCHUP_ARM_TIMEOUT has passed since daytime
+        # control resumed, so an AHU that never restarts (a fault, or one
+        # left off for maintenance) does not block catch-up all day.
+        self.ahu_catchup_armed: bool = True
+
+        # When daytime AHU control last became active (TAI), or
+        # None while it is inactive. Used for AHU_CATCHUP_ARM_TIMEOUT.
+        self.daytime_control_start: float | None = None
+
         # The ambient-overshoot catch-up coroutine. It is spawned by
         # ahu_working_state_callback when all AHUs return to on after one or
         # more were off, and cancelled when any AHU goes off again.
@@ -287,10 +303,32 @@ class HvacModel:
         if "ahu_off_catchup" in self.features_to_disable:
             return
 
+        if not self.is_daytime_ahu_control_active():
+            # Outside daytime closed-dome control there is nothing to catch
+            # up, and the nighttime or dome-open logic owns the setpoint.
+            self.catchup_delta = 0.0
+            self.ahu_catchup_armed = False
+            self.daytime_control_start = None
+            self.cancel_ahu_off_catchup()
+            return
+
+        if self.daytime_control_start is None:
+            self.daytime_control_start = utils.current_tai()
+
         # Count AHUs that are explicitly off (None means no telemetry yet, so a
         # lack of data never triggers a catch-up offset). All four AHUs count,
         # regardless of whether EAS is configured to control them.
         n_off = sum(1 for state in self.ahu_working_states if state is False)
+
+        if not self.ahu_catchup_armed:
+            if n_off == 0:
+                self.ahu_catchup_armed = True
+                return
+            if utils.current_tai() - self.daytime_control_start < AHU_CATCHUP_ARM_TIMEOUT:
+                return
+            # AHUs still off this long after control resumed are not just
+            # restarting: treat them as an outage from here on.
+            self.ahu_catchup_armed = True
         old_catchup_delta = self.catchup_delta
 
         if n_off > 0:
@@ -317,7 +355,8 @@ class HvacModel:
         # If the offset changed, re-apply the cached setpoint with the new
         # offset: this lowers the setpoint as AHUs go off and restores it to
         # the target once they are all back on. Skipped until a base setpoint
-        # is known (e.g. while the dome is open, see control_ahus_and_vec04).
+        # is known (i.e. after startup, until the sunrise or forecast logic
+        # has set cached_ahu_setpoint).
         if self.catchup_delta != old_catchup_delta and self.cached_ahu_setpoint is not None:
             self.log.debug(
                 "Apply AHU setpoints [6] catchup_delta=%.2f => %.2f",
@@ -325,6 +364,19 @@ class HvacModel:
                 self.cached_ahu_setpoint + self.catchup_delta,
             )
             await self.apply_ahu_setpoints(self.cached_ahu_setpoint + self.catchup_delta)
+
+    def is_daytime_ahu_control_active(self) -> bool:
+        """Return True if EAS is regulating the AHU setpoint for daytime.
+
+        That is: it is day, the dome is closed, and neither ``room_setpoint``
+        nor ``ahu`` is in `features_to_disable`.
+        """
+        return (
+            "room_setpoint" not in self.features_to_disable
+            and "ahu" not in self.features_to_disable
+            and self.dome_model.is_closed is True
+            and not self.diurnal_timer.is_night(Time.now())
+        )
 
     def start_ahu_off_catchup(self) -> None:
         """Spawn the ambient-overshoot catch-up loop if not already running."""
@@ -658,7 +710,14 @@ additionalProperties: false
             # current base setpoint now (after the enable, so it is not a no-op
             # on a still-disabled AHU) so they do not run at the stale catch-up
             # value they held at dome open until the next forecast refresh.
-            if shutter_closed and enable_device_list and self.cached_ahu_setpoint is not None:
+            # At night or with room_setpoint disabled, the cached daytime
+            # setpoint does not apply, so leave the setpoint to other logic.
+            if (
+                shutter_closed
+                and enable_device_list
+                and self.cached_ahu_setpoint is not None
+                and self.is_daytime_ahu_control_active()
+            ):
                 self.log.debug("Apply AHU setpoints [1] %.2f", self.cached_ahu_setpoint)
                 await self.apply_ahu_setpoints(self.cached_ahu_setpoint)
             await asyncio.sleep(HVAC_SLEEP_TIME)
