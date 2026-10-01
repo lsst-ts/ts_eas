@@ -1,0 +1,9 @@
+name: enforce_rebase
+
+on:
+  pull_request:
+    types: [assigned, opened, synchronize, reopened, labeled, unlabeled]
+
+jobs:
+  call-workflow:
+    uses: lsst-ts/tssw_workflows/.github/workflows/enforce_rebase.yaml@main
