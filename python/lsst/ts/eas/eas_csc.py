@@ -22,6 +22,7 @@
 __all__ = ["EasCsc", "run_eas"]
 
 import asyncio
+import functools
 import math
 import typing
 from types import SimpleNamespace
@@ -165,7 +166,13 @@ class EasCsc(salobj.ConfigurableCsc):
         self.hvac_remote = salobj.Remote(
             domain=self.domain,
             name="HVAC",
-            include=["summaryState"],
+            include=[
+                "summaryState",
+                "airHandlingUnit01Dome",
+                "airHandlingUnit02Dome",
+                "airHandlingUnit03Dome",
+                "airHandlingUnit04Dome",
+            ],
         )
         self.weatherforecast_remote = salobj.Remote(
             domain=self.domain,
@@ -392,6 +399,7 @@ class EasCsc(salobj.ConfigurableCsc):
         assert self.glass_temperature_model is not None, "Glass model not initialized."
         assert self.weather_model is not None, "Weather Model not initialized."
         assert self.weatherforecast_model is not None, "WeatherForecast model not initialized."
+        assert self.hvac_model is not None, "HVAC Model not initialized."
 
         if self.ess_indoor_remote is None or self.ess_outdoor_remote is None:
             raise RuntimeError(
@@ -416,6 +424,21 @@ class EasCsc(salobj.ConfigurableCsc):
             self.weatherforecast_model.hourly_trend_callback
         )
 
+        # A single callback handles all four AHU telemetry topics; the AHU
+        # number is bound per-topic so the model knows which unit reported.
+        self.hvac_remote.tel_airHandlingUnit01Dome.callback = functools.partial(
+            self.hvac_model.ahu_working_state_callback, 1
+        )
+        self.hvac_remote.tel_airHandlingUnit02Dome.callback = functools.partial(
+            self.hvac_model.ahu_working_state_callback, 2
+        )
+        self.hvac_remote.tel_airHandlingUnit03Dome.callback = functools.partial(
+            self.hvac_model.ahu_working_state_callback, 3
+        )
+        self.hvac_remote.tel_airHandlingUnit04Dome.callback = functools.partial(
+            self.hvac_model.ahu_working_state_callback, 4
+        )
+
     def disconnect_callbacks(self) -> None:
         """Disconnects callbacks from their remotes."""
         if self.ess_indoor_remote is None or self.ess_outdoor_remote is None:
@@ -437,6 +460,10 @@ class EasCsc(salobj.ConfigurableCsc):
         self.ess_indoor_remote.tel_dewPoint.callback = None
         self.ess_indoor_remote.tel_temperature.callback = None
         self.weatherforecast_remote.tel_hourlyTrend.callback = None
+        self.hvac_remote.tel_airHandlingUnit01Dome.callback = None
+        self.hvac_remote.tel_airHandlingUnit02Dome.callback = None
+        self.hvac_remote.tel_airHandlingUnit03Dome.callback = None
+        self.hvac_remote.tel_airHandlingUnit04Dome.callback = None
 
     async def monitor_health(self) -> None:
         """Manage the `monitor_dome_shutter` control loop.

@@ -24,6 +24,7 @@ import logging
 import math
 import types
 import unittest
+import unittest.mock
 from pathlib import Path
 from types import SimpleNamespace
 from typing import NotRequired, TypedDict
@@ -33,7 +34,7 @@ import jsonschema
 import yaml
 from astropy.time import Time, TimeDelta
 
-from lsst.ts import salobj
+from lsst.ts import salobj, utils
 from lsst.ts.eas import hvac_model
 from lsst.ts.eas.weatherforecast_model import DELTA_TIME, WeatherForecastModel
 from lsst.ts.xml.enums.HVAC import DeviceId
@@ -219,6 +220,10 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             ahu_setpoint_delta=0.0,
             ahu_setpoint_delta_closed_at_night=0.0,
             ahu_control=[1, 2, 3, 4],
+            ahu_off_catchup_deltas=[0.0, -1.0, -2.0, -3.0],
+            ahu_off_catchup_rate=1.0,
+            ahu_off_catchup_poll_interval=900.0,
+            ahu_off_catchup_threshold=1.0,
             setpoint_lower_limit=6.0,
             wind_threshold=10.0,
             vec04_hold_time=0.0,
@@ -946,6 +951,214 @@ class TestHvac(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(task, timeout=STD_TIMEOUT)
 
         self.hvac.ahu_setpoints.clear()
+
+    # --- AHU-OFF CATCH-UP TESTS --- #
+
+    def make_catchup_model(
+        self, **overrides: float | list[int] | list[float] | list[str] | None
+    ) -> tuple[hvac_model.HvacModel, list[float]]:
+        """Make a model in daytime catch-up context: base setpoint 10 (already
+        sent) and the dome closed for longer than the AHU start-up time.
+        Returns the model and the list of AHU setpoints it sends."""
+        model = self.make_model(**overrides)
+        model.base_ahu_setpoint = 10.0
+        model.last_ahu_setpoint = 10.0
+        model.dome_closed_since = utils.current_tai() - 2 * hvac_model.AHU_STARTUP_TIME
+        model.ahu_working_states = [True] * 4
+        sent: list[float] = []
+
+        async def record(commands: list[dict]) -> None:
+            sent.append(commands[0]["workingSetpoint"])
+
+        model.config_lower_ahu = record  # type: ignore[method-assign]
+        return model, sent
+
+    async def set_ahus(self, model: hvac_model.HvacModel, states: list[bool]) -> None:
+        """Feed one workingState sample for each of AHUs 1-4."""
+        for ahu, state in enumerate(states, start=1):
+            await model.ahu_working_state_callback(ahu, SimpleNamespace(workingState=state))
+
+    async def test_catchup_delta_per_number_off(self) -> None:
+        for n_off, expected in enumerate([0.0, 0.0, -1.0, -2.0, -3.0]):
+            with self.subTest(n_off=n_off):
+                model, sent = self.make_catchup_model()
+                await self.set_ahus(model, [ahu > n_off for ahu in range(1, 5)])
+                self.assertEqual(model.compute_catchup_offset(), expected)
+                self.assertEqual(sent[-1:], [10.0 + expected] if expected else [])
+
+    async def test_catchup_holds_deepest_until_all_on(self) -> None:
+        model, sent = self.make_catchup_model()
+        self.weather.current_indoor_temperature = 10.5  # no overshoot
+
+        await self.set_ahus(model, [False, False, False, True])
+        self.assertEqual(sent, [9.0, 8.0])
+
+        # Partial recovery holds the deepest level; all four off deepens it.
+        await self.set_ahus(model, [True, True, False, True])
+        self.assertEqual(sent, [9.0, 8.0])
+        await self.set_ahus(model, [False, False, False, False])
+        self.assertEqual(sent, [9.0, 8.0, 7.0])
+
+        # All back on: within the threshold, so straight back to the base.
+        await self.set_ahus(model, [True, True, True, True])
+        self.assertEqual(sent, [9.0, 8.0, 7.0, 10.0])
+        self.assertFalse(model.catchup_recovering)
+
+    async def test_catchup_recovery_lowers_until_caught_up(self) -> None:
+        for rate, expected in ((1.0, 7.0), (0.5, 8.5)):
+            with self.subTest(rate=rate):
+                model, sent = self.make_catchup_model(ahu_off_catchup_rate=rate)
+                self.weather.current_indoor_temperature = 13.0  # 3 C over the base
+
+                # One AHU off (delta 0) and back on starts the recovery at once.
+                await self.set_ahus(model, [False, True, True, True])
+                await self.set_ahus(model, [True, True, True, True])
+                self.assertEqual(sent, [expected])
+
+                # Caught up, but not reassessed until the poll interval passes.
+                self.weather.current_indoor_temperature = 10.5
+                await model.update_ahu_setpoint()
+                self.assertEqual(sent, [expected])
+                assert model.catchup_assessed_at is not None
+                model.catchup_assessed_at -= model.ahu_off_catchup_poll_interval
+                await model.update_ahu_setpoint()
+                self.assertEqual(sent, [expected, 10.0])
+                self.assertFalse(model.catchup_recovering)
+
+    async def test_catchup_recovery_limits(self) -> None:
+        # Never below the lower limit.
+        model, sent = self.make_catchup_model(setpoint_lower_limit=6.0)
+        self.weather.current_indoor_temperature = 20.0
+        await self.set_ahus(model, [False, True, True, True])
+        await self.set_ahus(model, [True, True, True, True])
+        self.assertEqual(sent, [6.0])
+
+        # Waits for an indoor temperature, then assesses.
+        model, sent = self.make_catchup_model()
+        self.weather.current_indoor_temperature = math.nan
+        await self.set_ahus(model, [False, True, True, True])
+        await self.set_ahus(model, [True, True, True, True])
+        self.assertEqual(sent, [])
+        self.weather.current_indoor_temperature = 13.0
+        await model.update_ahu_setpoint()
+        self.assertEqual(sent, [7.0])
+
+    async def test_ahu_off_during_recovery_starts_fresh(self) -> None:
+        model, sent = self.make_catchup_model()
+        self.weather.current_indoor_temperature = 15.0
+        await self.set_ahus(model, [False, False, True, True])
+        await self.set_ahus(model, [True, True, True, True])
+        self.assertEqual(sent, [9.0, 6.0])  # recovery: max(10 - 5, 6)
+
+        # AHUs off again: a fresh episode, from the base (one off is delta 0).
+        await self.set_ahus(model, [False, False, True, True])
+        self.assertEqual(sent, [9.0, 6.0, 10.0, 9.0])
+        self.assertFalse(model.catchup_recovering)
+
+    async def test_catchup_only_by_day_with_dome_settled_closed(self) -> None:
+        cases = {
+            "dome open": dict(dome_closed_since=None),
+            "AHUs starting up": dict(dome_closed_since=utils.current_tai()),
+            "feature disabled": dict(features=["ahu_off_catchup"]),
+        }
+        for name, case in cases.items():
+            with self.subTest(case=name):
+                model, sent = self.make_catchup_model(features_to_disable=case.get("features", []))
+                if "dome_closed_since" in case:
+                    model.dome_closed_since = case["dome_closed_since"]
+                await self.set_ahus(model, [False, False, False, False])
+                self.assertEqual(model.compute_catchup_offset(), 0.0)
+                self.assertEqual(model.catchup_n_off, 0)
+                self.assertEqual(sent, [])
+
+    async def test_no_daytime_setpoint_at_night(self) -> None:
+        model, sent = self.make_catchup_model()
+        await self.set_ahus(model, [False, False, True, True])
+        self.assertEqual(sent, [9.0])
+
+        # At night the episode ends and nothing is sent except when forced.
+        self.diurnal._night = True
+        await self.set_ahus(model, [False, False, True, True])
+        self.assertEqual(sent, [9.0])
+        self.assertEqual(model.catchup_n_off, 0)
+        await model.update_ahu_setpoint(force=True)
+        self.assertEqual(sent, [9.0, 10.0])
+
+    async def test_forecast_keeps_catchup_offset(self) -> None:
+        model, sent = self.make_catchup_model()
+        await self.set_ahus(model, [False, False, True, True])
+        await model.apply_forecast_setpoints(11.0)
+        await model.apply_forecast_setpoints(11.0)  # re-sent even if unchanged
+        self.assertEqual(sent, [9.0, 10.0, 10.0])
+
+    async def run_dome_loop(self, model: hvac_model.HvacModel, sent: list[float]) -> asyncio.Task:
+        """Start control_ahus_and_vec04 (dome closed) and let it settle,
+        dropping the base setpoint its first pass sends."""
+        hvac_model.HVAC_SLEEP_TIME = STD_SLEEP
+        self.weather.average_windspeed = 3.0
+        task = asyncio.create_task(model.control_ahus_and_vec04())
+        await asyncio.sleep(STD_SLEEP)
+        sent.clear()
+        return task
+
+    async def stop_dome_loop(self, task: asyncio.Task) -> None:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass  # expected
+
+    async def test_dome_open_does_not_relatch_catchup(self) -> None:
+        """AHUs that report off once EAS has disabled them for an open dome
+        don't bring the catch-up offset back."""
+        model, sent = self.make_catchup_model()
+        with unittest.mock.patch.object(hvac_model, "AHU_STARTUP_TIME", 0.0):
+            task = await self.run_dome_loop(model, sent)
+            try:
+                await self.set_ahus(model, [False, False, True, True])
+                self.assertEqual(sent, [9.0])
+
+                # Dome opens: the base is sent and the AHUs are disabled.
+                self.dome.is_closed = False
+                await asyncio.sleep(STD_SLEEP)
+                self.assertEqual(sent, [9.0, 10.0])
+                self.assertIn(DeviceId.airHandlingUnit01Dome, self.hvac.disable_called)
+
+                # The disabled AHUs report off: still no offset.
+                await self.set_ahus(model, [False, False, False, False])
+                self.assertEqual(sent, [9.0, 10.0])
+                self.assertEqual(model.compute_catchup_offset(), 0.0)
+            finally:
+                await self.stop_dome_loop(task)
+
+    async def test_dome_reclose_startup_does_not_count_as_off(self) -> None:
+        """After a re-close, AHUs starting up don't count as off, and their
+        coming back on doesn't start a recovery; a later failure does count."""
+        model, sent = self.make_catchup_model()
+        self.weather.current_indoor_temperature = 15.0  # a recovery would show
+        task = await self.run_dome_loop(model, sent)
+        try:
+            self.dome.is_closed = False
+            await asyncio.sleep(STD_SLEEP)
+            await self.set_ahus(model, [False, False, False, False])
+
+            # Re-close: the base is re-sent after the AHUs are enabled, and
+            # their start-up doesn't count.
+            self.dome.is_closed = True
+            await asyncio.sleep(STD_SLEEP)
+            self.assertIn(DeviceId.airHandlingUnit01Dome, self.hvac.enable_called)
+            await self.set_ahus(model, [False, False, False, False])
+            await self.set_ahus(model, [True, True, True, True])
+            self.assertEqual(sent, [10.0])
+            self.assertFalse(model.catchup_recovering)
+
+            # Once the start-up time has passed, a failure counts.
+            assert model.dome_closed_since is not None
+            model.dome_closed_since -= hvac_model.AHU_STARTUP_TIME
+            await self.set_ahus(model, [False, False, True, True])
+            self.assertEqual(sent, [10.0, 9.0])
+        finally:
+            await self.stop_dome_loop(task)
 
     def basic_make_csc(
         self,
