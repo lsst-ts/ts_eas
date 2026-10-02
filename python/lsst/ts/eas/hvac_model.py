@@ -42,6 +42,10 @@ from .weatherforecast_model import WeatherForecastModel
 HVAC_SLEEP_TIME = 60.0  # How often to check the HVAC state (seconds)
 STD_TIMEOUT = 5  # seconds
 N_CHILLERS = 2  # EAS controls two HVAC glycol chillers.
+N_AHUS = 4  # The HVAC system has four dome air handling units (AHUs/UMAs).
+# After the dome closes (and EAS enables the AHUs), how long AHUs may report
+# off while they start up before that counts toward the AHU-off catch-up.
+AHU_STARTUP_TIME = 300.0  # seconds
 
 
 class HvacModel:
@@ -74,6 +78,19 @@ class HvacModel:
     ahu_control : `list`[`int`]
         The AHU numbers that EAS is allowed to control. Values correspond
         to AHUs 1 through 4.
+    ahu_off_catchup_deltas : `list`[`float`]
+        Four setpoint deltas (°C) applied to the daytime AHU setpoint while
+        AHUs are off, indexed by the number of AHUs off minus one. The deepest
+        delta reached is held until all four AHUs are back on.
+    ahu_off_catchup_rate : `float`
+        Once all AHUs are back on after some were off, the daytime AHU
+        setpoint is lowered by this amount (°C) for each 1 °C the indoor
+        temperature exceeds the base setpoint.
+    ahu_off_catchup_poll_interval : `float`
+        How often (s) that lowering is reassessed.
+    ahu_off_catchup_threshold : `float`
+        The excess (°C) of indoor temperature over the base setpoint above
+        which that lowering applies.
     setpoint_lower_limit : `float`
         The minimum allowed setpoint for thermal control. If a lower setpoint
         than this is indicated from the ESS temperature readings, this setpoint
@@ -118,6 +135,7 @@ class HvacModel:
          * forecast
          * forecast_ahu
          * glycol_chillers
+         * ahu_off_catchup
         Any other values are ignored.
     """
 
@@ -133,6 +151,10 @@ class HvacModel:
         ahu_setpoint_delta: float,
         ahu_setpoint_delta_closed_at_night: float,
         ahu_control: list[int],
+        ahu_off_catchup_deltas: list[float],
+        ahu_off_catchup_rate: float,
+        ahu_off_catchup_poll_interval: float,
+        ahu_off_catchup_threshold: float,
         setpoint_lower_limit: float,
         wind_threshold: float,
         vec04_hold_time: float,
@@ -157,12 +179,34 @@ class HvacModel:
 
         self.last_vec04_time: float = 0  # Last time VEC-04 was changed (UNIX TAI seconds).
 
+        # Latest workingState telemetry for AHUs 1-4 (None: none received).
+        self.ahu_working_states: list[bool | None] = [None] * N_AHUS
+
+        # The daytime AHU setpoint before any catch-up offset, set at sunrise
+        # and by the forecast; None until known.
+        self.base_ahu_setpoint: float | None = None
+
+        # The last daytime AHU setpoint sent by update_ahu_setpoint, or None
+        # if the AHUs may not hold it (they were disabled since).
+        self.last_ahu_setpoint: float | None = None
+
+        # When the dome was last seen to close (UNIX TAI seconds), or None
+        # while it is open or its state is not yet known.
+        self.dome_closed_since: float | None = None
+
+        # The current AHU-off catch-up episode (see compute_catchup_offset).
+        self.reset_catchup()
+
         # Configuration parameters:
         self.dome_model = dome_model
         self.weather_model = weather_model
         self.weatherforecast_model = weatherforecast_model
         self.ahu_setpoint_delta = ahu_setpoint_delta
         self.ahu_setpoint_delta_closed_at_night = ahu_setpoint_delta_closed_at_night
+        self.ahu_off_catchup_deltas = ahu_off_catchup_deltas
+        self.ahu_off_catchup_rate = ahu_off_catchup_rate
+        self.ahu_off_catchup_poll_interval = ahu_off_catchup_poll_interval
+        self.ahu_off_catchup_threshold = ahu_off_catchup_threshold
         self.closed_at_night_setpoint_cadence = (
             closed_at_night_setpoint_cadence
             if closed_at_night_setpoint_cadence is not None
@@ -208,6 +252,128 @@ class HvacModel:
         """
         return tuple(DeviceId[AHU(ahu).name] for ahu in self.ahu_control)
 
+    async def ahu_working_state_callback(self, ahu: int, data: salobj.BaseMsgType) -> None:
+        """Record one AHU's workingState and update the daytime setpoint.
+
+        This single callback is registered for all four
+        ``HVAC.airHandlingUnit0<N>Dome`` telemetry topics; ``ahu`` (bound
+        with :func:`functools.partial`) is the AHU number, 1-4.
+
+        Parameters
+        ----------
+        ahu : `int`
+            The AHU number (1-4) this telemetry sample is for.
+        data : `~lsst.ts.salobj.BaseMsgType`
+            A newly received airHandlingUnit telemetry item.
+        """
+        self.ahu_working_states[ahu - 1] = bool(data.workingState)
+        await self.update_ahu_setpoint()
+
+    def reset_catchup(self) -> None:
+        """End any AHU-off catch-up episode."""
+        # Stage 1: the most AHUs off at once in this episode.
+        self.catchup_n_off = 0
+        # Stage 2: active, its offset, and when it was last assessed.
+        self.catchup_recovering = False
+        self.catchup_recovery_offset = 0.0
+        self.catchup_assessed_at: float | None = None
+
+    def compute_catchup_offset(self) -> float:
+        """Return the AHU-off catch-up offset for the current state.
+
+        The catch-up applies during the day, once the dome has been closed
+        for `AHU_STARTUP_TIME` (so AHUs that EAS disabled for an open dome,
+        or that are still starting up after it re-closed, don't count as
+        off). Outside that, the episode ends and the offset is zero.
+
+        Stage 1: while any AHU is off, the offset is the
+        ``ahu_off_catchup_deltas`` entry for the most AHUs off at once in
+        this episode. Stage 2: once all are back on, the offset is
+        ``-ahu_off_catchup_rate`` times the indoor temperature's excess over
+        the base setpoint, reassessed every
+        ``ahu_off_catchup_poll_interval``, until that excess is within
+        ``ahu_off_catchup_threshold``.
+
+        Returns
+        -------
+        offset : `float`
+            The offset (°C, <= 0) to add to the base AHU setpoint.
+        """
+        now = utils.current_tai()
+        if (
+            "ahu_off_catchup" in self.features_to_disable
+            or self.dome_closed_since is None
+            or now - self.dome_closed_since < AHU_STARTUP_TIME
+            or self.diurnal_timer.is_night(Time.now())
+        ):
+            self.reset_catchup()
+            return 0.0
+
+        n_off = sum(1 for state in self.ahu_working_states if state is False)
+        if n_off > 0:
+            if self.catchup_recovering:
+                self.reset_catchup()
+            self.catchup_n_off = max(self.catchup_n_off, n_off)
+            return self.ahu_off_catchup_deltas[self.catchup_n_off - 1]
+
+        if self.catchup_n_off > 0:
+            # All AHUs are back on: start Stage 2, assessed at once.
+            self.reset_catchup()
+            self.catchup_recovering = True
+        if not self.catchup_recovering:
+            return 0.0
+
+        if (
+            self.catchup_assessed_at is None
+            or now - self.catchup_assessed_at >= self.ahu_off_catchup_poll_interval
+        ):
+            indoor_temperature = self.weather_model.current_indoor_temperature
+            if self.base_ahu_setpoint is not None and not math.isnan(indoor_temperature):
+                self.catchup_assessed_at = now
+                excess = indoor_temperature - max(self.base_ahu_setpoint, self.setpoint_lower_limit)
+                if excess <= self.ahu_off_catchup_threshold:
+                    self.reset_catchup()
+                    return 0.0
+                self.catchup_recovery_offset = -self.ahu_off_catchup_rate * excess
+        return self.catchup_recovery_offset
+
+    async def update_ahu_setpoint(self, force: bool = False) -> None:
+        """Send the daytime AHU setpoint: the base plus the catch-up offset.
+
+        This is the only sender of daytime AHU setpoints. It sends nothing
+        until a base setpoint is known. Unless ``force`` is set (sunrise and
+        the forecast, which set the base), it sends nothing at night, when
+        `apply_setpoint_at_night` owns the setpoint, and only sends when the
+        setpoint differs from the last one sent.
+
+        Parameters
+        ----------
+        force : `bool`
+            Send the setpoint even if it is unchanged, or if it is night.
+        """
+        offset = self.compute_catchup_offset()
+        if self.base_ahu_setpoint is None:
+            return
+        if not force and self.diurnal_timer.is_night(Time.now()):
+            return
+        setpoint = max(self.base_ahu_setpoint + offset, self.setpoint_lower_limit)
+        if not force and setpoint == self.last_ahu_setpoint:
+            return
+        self.last_ahu_setpoint = setpoint
+        self.log.debug("Apply AHU setpoint %.2f (catch-up offset %.2f)", setpoint, offset)
+        await self.config_lower_ahu(
+            [
+                {
+                    "device_id": device_id,
+                    "workingSetpoint": setpoint,
+                    "maxFanSetpoint": math.nan,
+                    "minFanSetpoint": math.nan,
+                    "antiFreezeTemperature": math.nan,
+                }
+                for device_id in self.get_controlled_ahus()
+            ]
+        )
+
     @classmethod
     def get_config_schema(cls) -> str:
         return yaml.safe_load(
@@ -241,6 +407,36 @@ properties:
       type: integer
       enum: [1, 2, 3, 4]
     uniqueItems: true
+  ahu_off_catchup_deltas:
+    type: array
+    default: [0.0, -1.0, -2.0, -3.0]
+    description: >-
+      Daytime AHU setpoint deltas (°C) while one, two, three or four AHUs are
+      off with the dome closed. The deepest delta reached is held until all
+      four are back on.
+    items:
+      type: number
+    minItems: 4
+    maxItems: 4
+  ahu_off_catchup_rate:
+    type: number
+    default: 1.0
+    description: >-
+      Once all AHUs are back on, lower the setpoint by this much (°C) per 1 °C
+      the indoor temperature exceeds the base setpoint, down to
+      setpoint_lower_limit.
+  ahu_off_catchup_poll_interval:
+    type: number
+    default: 900.0
+    exclusiveMinimum: 0
+    description: >-
+      How often (s) that HVAC catch-up is reassessed.
+  ahu_off_catchup_threshold:
+    type: number
+    default: 1.0
+    description: >-
+      That HVAC catch-up continues while the indoor temperature exceeds the
+      base setpoint by more than this (°C).
   setpoint_lower_limit:
     type: number
     default: 6.0
@@ -431,6 +627,10 @@ additionalProperties: false
                 cached_shutter_closed = shutter_closed
                 ahus = self.get_controlled_ahus()
                 if shutter_closed:
+                    self.dome_closed_since = utils.current_tai()
+                    # The AHUs were disabled while the dome was open and may
+                    # not hold the last setpoint sent, so send it again below.
+                    self.last_ahu_setpoint = None
                     if "ahu" not in self.features_to_disable:
                         # Enable the configured AHUs
                         self.log.info("Enabling HVAC AHUs!")
@@ -442,6 +642,10 @@ additionalProperties: false
                         disable_device_list.append(DeviceId.airExtractionFan04Dome)
                         self.last_vec04_time = utils.current_tai()
                 else:
+                    # With the dome open the catch-up doesn't apply: send the
+                    # base setpoint before the AHUs are disabled below.
+                    self.dome_closed_since = None
+                    await self.update_ahu_setpoint()
                     if "ahu" not in self.features_to_disable:
                         self.log.info("Disabling HVAC AHUs!")
                         disable_device_list.extend(ahus)
@@ -450,6 +654,9 @@ additionalProperties: false
                 await self.disable_devices(disable_device_list)
             if enable_device_list:
                 await self.enable_devices(enable_device_list)
+            # After any enable, and every pass (which keeps the catch-up's
+            # periodic reassessment going without AHU telemetry).
+            await self.update_ahu_setpoint()
             await asyncio.sleep(HVAC_SLEEP_TIME)
 
     async def wait_for_sunrise(self) -> None:
@@ -467,22 +674,8 @@ additionalProperties: false
                 if self.diurnal_timer.is_running and last_twilight_temperature is not None:
                     if "room_setpoint" not in self.features_to_disable:
                         # Time to set the room setpoint based on last twilight
-                        setpoint = max(
-                            last_twilight_temperature + self.ahu_setpoint_delta,
-                            self.setpoint_lower_limit,
-                        )
-                        await self.config_lower_ahu(
-                            [
-                                {
-                                    "device_id": device_id,
-                                    "workingSetpoint": setpoint,
-                                    "maxFanSetpoint": math.nan,
-                                    "minFanSetpoint": math.nan,
-                                    "antiFreezeTemperature": math.nan,
-                                }
-                                for device_id in self.get_controlled_ahus()
-                            ]
-                        )
+                        self.base_ahu_setpoint = last_twilight_temperature + self.ahu_setpoint_delta
+                        await self.update_ahu_setpoint(force=True)
 
     def clear_twilight_forecast_callback(self) -> None:
         if self.twilight_forecast_callback_id is None:
@@ -511,22 +704,8 @@ additionalProperties: false
 
     async def apply_forecast_setpoints(self, predicted_temperature: float) -> None:
         if "room_setpoint" not in self.features_to_disable and "forecast_ahu" not in self.features_to_disable:
-            setpoint = max(
-                predicted_temperature + self.forecast_ahu_setpoint_delta,
-                self.setpoint_lower_limit,
-            )
-            await self.config_lower_ahu(
-                [
-                    {
-                        "device_id": device_id,
-                        "workingSetpoint": setpoint,
-                        "maxFanSetpoint": math.nan,
-                        "minFanSetpoint": math.nan,
-                        "antiFreezeTemperature": math.nan,
-                    }
-                    for device_id in self.get_controlled_ahus()
-                ]
-            )
+            self.base_ahu_setpoint = predicted_temperature + self.forecast_ahu_setpoint_delta
+            await self.update_ahu_setpoint(force=True)
 
     async def monitor_twilight_forecast(self) -> None:
         """Run forecast callback between noon and evening twilight."""
