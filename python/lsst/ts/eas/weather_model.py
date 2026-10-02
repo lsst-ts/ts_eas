@@ -69,6 +69,9 @@ class WeatherModel:
         Time over which to average windspeed for threshold determination. (s)
     wind_minimum_window : `float`
         Minimum amount of time to collect wind data before acting on it. (s)
+    anemometer_ess_indices : `list` [`int`] | None, optional
+        SAL indices of the ESS instances providing the anemometers inside the
+        dome, whose windspeeds are averaged for nighttime louver control.
     """
 
     def __init__(
@@ -81,6 +84,7 @@ class WeatherModel:
         indoor_ess_index: int,
         wind_average_window: float,
         wind_minimum_window: float,
+        anemometer_ess_indices: list[int] | None = None,
     ) -> None:
         self.log = log
         self.diurnal_timer = diurnal_timer
@@ -88,6 +92,7 @@ class WeatherModel:
         self.efd_name = efd_name
         self.ess_index = ess_index
         self.indoor_ess_index = indoor_ess_index
+        self.anemometer_ess_indices = anemometer_ess_indices or []
 
         self.monitor_start_event = asyncio.Event()
 
@@ -96,6 +101,16 @@ class WeatherModel:
 
         # A deque containing tuples of timestamp, windspeed
         self.wind_history: deque = deque()
+
+        # A deque containing tuples of wind direction (degrees), timestamp.
+        # Kept separately from `wind_history` because nighttime louver control
+        # averages direction over a much shorter window than the windspeed
+        # average used for the VEC-04 fan.
+        self.wind_direction_history: deque[tuple[float, float]] = deque()
+
+        # A deque containing tuples of windspeed (m/s), timestamp, pooled
+        # across all of the configured indoor anemometers.
+        self.indoor_wind_history: deque[tuple[float, float]] = deque()
 
         # A deque containing tuples of timestamp, temperature
         self.temperature_history: deque[tuple[float, float]] = deque(maxlen=MAX_TEMPERATURE_SAMPLES)
@@ -144,6 +159,14 @@ properties:
     description: The SAL index to use for indoor weather information.
     type: integer
     default: 112
+  anemometer_ess_indices:
+    description: >-
+      SAL indices of the ESS instances providing the anemometers inside the
+      dome, whose windspeeds are averaged for nighttime louver control.
+    type: array
+    items:
+      type: integer
+    default: [123, 124, 125, 126]
   wind_average_window:
     description: Time window (s) of past windspeed telemetry to use in calculating an average.
     type: number
@@ -287,11 +310,14 @@ additionalProperties: false
         """
         now = air_flow.private_sndStamp
         self.wind_history.append((air_flow.speed, now))
+        self.wind_direction_history.append((air_flow.direction, now))
 
         # Prune old data
         time_horizon = now - self.wind_average_window
         while self.wind_history and self.wind_history[0][1] < time_horizon:
             self.wind_history.popleft()
+        while self.wind_direction_history and self.wind_direction_history[0][1] < time_horizon:
+            self.wind_direction_history.popleft()
 
     async def temperature_callback(self, temperature: salobj.BaseMsgType) -> None:
         """Callback for ESS.tel_temperature.
@@ -397,6 +423,91 @@ additionalProperties: false
         # Compute average directly
         speeds = [s for s, _ in self.wind_history]
         return sum(speeds) / len(speeds)
+
+    async def indoor_air_flow_callback(self, air_flow: salobj.BaseMsgType) -> None:
+        """Callback for indoor anemometer telemetry.
+
+        Shared by every configured anemometer and by both topics they publish:
+        ``airFlow`` from the 2D sensors, whose ``speed`` is a scalar, and
+        ``airTurbulence`` from the 3D sonic sensors, whose ``speed`` is a
+        vector and whose scalar magnitude is ``speedMagnitude``. Samples from
+        all of them share one deque, because the control law wants their mean
+        rather than per-sensor values.
+
+        Parameters
+        ----------
+        air_flow : `~lsst.ts.salobj.BaseMsgType`
+            A newly received airFlow or airTurbulence telemetry item.
+        """
+        now = air_flow.private_sndStamp
+        speed = getattr(air_flow, "speedMagnitude", None)
+        if speed is None:
+            speed = air_flow.speed
+
+        self.indoor_wind_history.append((speed, now))
+
+        # Prune old data.
+        time_horizon = now - self.wind_average_window
+        while self.indoor_wind_history and self.indoor_wind_history[0][1] < time_horizon:
+            self.indoor_wind_history.popleft()
+
+    def average_indoor_windspeed(self, window: float) -> float:
+        """Return the average inside windspeed over `window` seconds.
+
+        Parameters
+        ----------
+        window : `float`
+            Length (seconds) of the trailing time window to average over.
+
+        Returns
+        -------
+        `float`
+            Mean windspeed (m/s) across all anemometer samples in the window,
+            or NaN if there are none.
+        """
+        time_horizon = utils.current_tai() - window
+        recent = [speed for speed, time in self.indoor_wind_history if time >= time_horizon]
+
+        if not recent:
+            self.log.warning("No indoor windspeed samples collected.")
+            return math.nan
+
+        return sum(recent) / len(recent)
+
+    def average_wind_direction(self, window: float) -> float:
+        """Return the average outdoor wind direction over `window` seconds.
+
+        The average is circular: directions are converted to unit vectors,
+        summed, and converted back with `~math.atan2`, so that samples either
+        side of north average to north rather than to south.
+
+        Parameters
+        ----------
+        window : `float`
+            Length (seconds) of the trailing time window to average over.
+
+        Returns
+        -------
+        `float`
+            Average wind direction in degrees, in the range [0, 360), or NaN if
+            there are no samples in the window or they cancel out exactly.
+        """
+        time_horizon = utils.current_tai() - window
+        recent = [direction for direction, time in self.wind_direction_history if time >= time_horizon]
+
+        if not recent:
+            self.log.warning("No wind direction samples collected.")
+            return math.nan
+
+        sin_sum = sum(math.sin(math.radians(direction)) for direction in recent)
+        cos_sum = sum(math.cos(math.radians(direction)) for direction in recent)
+
+        if math.hypot(sin_sum, cos_sum) <= 1e-12:
+            # Diametrically opposed samples cancel and the mean is undefined.
+            self.log.warning("Wind direction samples cancelled out; no mean direction.")
+            return math.nan
+
+        return math.degrees(math.atan2(sin_sum, cos_sum)) % 360.0
 
     @property
     def current_temperature(self) -> float:

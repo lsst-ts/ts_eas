@@ -44,6 +44,9 @@ CONFIG_SCHEMA = yaml.safe_load(
       dome:
         description: Dome configuration items.
         type: object
+      louver:
+        description: Louver configuration items.
+        type: object
       features_to_disable:
         description: >-
           List of EAS functionalities to disable. Options are:
@@ -60,6 +63,7 @@ CONFIG_SCHEMA = yaml.safe_load(
             * `closed_at_night`: Nighttime closed-dome setpoint control will not run.
             * `require_dome_open`: functionality will operate even when the dome is closed.
             * `day_louvers`: louver positions will not be adjusted based on sun position during the day.
+            * `night_louvers`: louver positions will not be adjusted based on wind during the night.
         type: array
         items:
           type: string
@@ -77,6 +81,7 @@ CONFIG_SCHEMA = yaml.safe_load(
             - closed_at_night
             - require_dome_open
             - day_louvers
+            - night_louvers
       twilight_definition:
         description: >
           Definition of twilight. Can be a number (in degrees) between -90 and 0, corresponding
@@ -93,6 +98,7 @@ CONFIG_SCHEMA = yaml.safe_load(
       - hvac
       - tma
       - dome
+      - louver
       - features_to_disable
       - twilight_definition
     additionalProperties: false
