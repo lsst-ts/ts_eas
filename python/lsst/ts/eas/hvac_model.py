@@ -317,6 +317,8 @@ class HvacModel:
             return self.ahu_off_catchup_deltas[self.catchup_n_off - 1]
 
         if self.catchup_n_off > 0:
+            if not all(state is True for state in self.ahu_working_states):
+                return self.ahu_off_catchup_deltas[self.catchup_n_off - 1]
             # All AHUs are back on: start Stage 2, assessed at once.
             self.reset_catchup()
             self.catchup_recovering = True
@@ -416,6 +418,7 @@ properties:
       four are back on.
     items:
       type: number
+      maximum: 0
     minItems: 4
     maxItems: 4
   ahu_off_catchup_rate:
@@ -628,6 +631,7 @@ additionalProperties: false
                 ahus = self.get_controlled_ahus()
                 if shutter_closed:
                     self.dome_closed_since = utils.current_tai()
+                    self.ahu_working_states = [None] * N_AHUS
                     # The AHUs were disabled while the dome was open and may
                     # not hold the last setpoint sent, so send it again below.
                     self.last_ahu_setpoint = None
