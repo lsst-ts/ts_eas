@@ -28,7 +28,7 @@ CONFIG_SCHEMA = yaml.safe_load(
     $schema: http://json-schema.org/draft-07/schema#
     $id: https://github.com/lsst-ts/ts_eas/blob/main/python/lsst/ts/eas/config_schema.py
     # title must end with one or more spaces followed by the schema version, which must begin with "v"
-    title: EAS v9
+    title: EAS v10
     description: Schema for EAS configuration files.
     type: object
     properties:
@@ -43,6 +43,9 @@ CONFIG_SCHEMA = yaml.safe_load(
         type: object
       dome:
         description: Dome configuration items.
+        type: object
+      louver:
+        description: Louver configuration items.
         type: object
       features_to_disable:
         description: >-
@@ -60,6 +63,8 @@ CONFIG_SCHEMA = yaml.safe_load(
             * `closed_at_night`: Nighttime closed-dome setpoint control will not run.
             * `require_dome_open`: functionality will operate even when the dome is closed.
             * `day_louvers`: louver positions will not be adjusted based on sun position during the day.
+            * `ahu_off_catchup`: daytime AHU catch-up regulation (for when AHUs are turned off) will not run.
+            * `night_louvers`: louver positions will not be adjusted based on wind during the night.
         type: array
         items:
           type: string
@@ -77,6 +82,8 @@ CONFIG_SCHEMA = yaml.safe_load(
             - closed_at_night
             - require_dome_open
             - day_louvers
+            - ahu_off_catchup
+            - night_louvers
       twilight_definition:
         description: >
           Definition of twilight. Can be a number (in degrees) between -90 and 0, corresponding
@@ -93,6 +100,7 @@ CONFIG_SCHEMA = yaml.safe_load(
       - hvac
       - tma
       - dome
+      - louver
       - features_to_disable
       - twilight_definition
     additionalProperties: false
