@@ -8,6 +8,28 @@ Version History
 
 .. towncrier release notes start
 
+v0.18.0 (2026-10-15)
+====================
+
+New Features
+------------
+
+- Added catchup for HVAC when one or more AHUs are disabled. (`OSW-1891 <https://rubinobs.atlassian.net//browse/OSW-1891>`_)
+- Split louver control out of ``DomeModel`` into new ``LouverModel``, and added nighttime louver control. (`OSW-2426 <https://rubinobs.atlassian.net//browse/OSW-2426>`_)
+
+
+Documentation
+-------------
+
+- Added insert-license pre-commit hook. (`OSW-2878 <https://rubinobs.atlassian.net//browse/OSW-2878>`_)
+
+
+Other Changes and Additions
+---------------------------
+
+- Adopted the standard TSSW GitHub workflows, set up the towncrier version history, removed scons support, and aligned the packaging with the developer guide. (`SSW-3006 <https://rubinobs.atlassian.net//browse/SSW-3006>`_)
+
+
 v0.17.2 (2026-07-01)
 ====================
 
