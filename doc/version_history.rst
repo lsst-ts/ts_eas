@@ -1,3 +1,13 @@
+.. py:currentmodule:: lsst.ts.eas
+
+.. _lsst.ts.eas.version_history:
+
+###############
+Version History
+###############
+
+.. towncrier release notes start
+
 v0.17.2 (2026-07-01)
 ====================
 

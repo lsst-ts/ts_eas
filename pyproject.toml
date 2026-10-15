@@ -1,5 +1,5 @@
 [build-system]
-requires = [ "setuptools", "setuptools_scm" ]
+requires = ["setuptools>=64", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,6 +7,7 @@ name = "ts_eas"
 description = "Interface to control the EAS system."
 license = { text = "GPL" }
 classifiers = [ "Programming Language :: Python :: 3" ]
+readme = "README.rst"
 urls = { documentation = "https://ts-eas.lsst.io", source_code = "https://github.com/lsst-ts/ts_eas" }
 dynamic = [ "version" ]
 

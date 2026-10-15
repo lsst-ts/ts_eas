@@ -13,15 +13,16 @@
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 __all__ = ["EasCsc", "run_eas"]
 
 import asyncio
+import functools
 import math
 import typing
 from types import SimpleNamespace
@@ -35,6 +36,7 @@ from .diurnal_timer import DiurnalTimer
 from .dome_model import DomeModel
 from .glass_temperature_model import GlassTemperatureModel
 from .hvac_model import HvacModel
+from .louver_model import LouverModel
 from .tma_model import TmaModel
 from .weather_model import WeatherModel
 from .weatherforecast_model import WeatherForecastModel
@@ -118,6 +120,7 @@ class EasCsc(salobj.ConfigurableCsc):
         self.tma_model: TmaModel | None = None
 
         self.dome_model: DomeModel | None = None
+        self.louver_model: LouverModel | None = None
         self.glass_temperature_model: GlassTemperatureModel | None = None
         self.weather_model: WeatherModel | None = None
         self.weatherforecast_model: WeatherForecastModel | None = None
@@ -165,7 +168,13 @@ class EasCsc(salobj.ConfigurableCsc):
         self.hvac_remote = salobj.Remote(
             domain=self.domain,
             name="HVAC",
-            include=["summaryState"],
+            include=[
+                "summaryState",
+                "airHandlingUnit01Dome",
+                "airHandlingUnit02Dome",
+                "airHandlingUnit03Dome",
+                "airHandlingUnit04Dome",
+            ],
         )
         self.weatherforecast_remote = salobj.Remote(
             domain=self.domain,
@@ -178,6 +187,11 @@ class EasCsc(salobj.ConfigurableCsc):
         self.ess_outdoor_remote: salobj.Remote | None = None
         self.ess_indoor_remote_index: int | None = None
         self.ess_outdoor_remote_index: int | None = None
+
+        # ESS remotes for the anemometers inside the dome, keyed by SAL index.
+        # Both the 2D (airFlow) and 3D (airTurbulence) sensors are subscribed,
+        # since the configured set may contain either kind.
+        self.ess_anemometer_remotes: dict[int, salobj.Remote] = {}
 
     async def handle_summary_state(self) -> None:
         """Override of the handle_summary_state function to
@@ -213,8 +227,8 @@ class EasCsc(salobj.ConfigurableCsc):
     async def close_tasks(self) -> None:
         """Stop active tasks."""
         await self.shutdown_health_monitor()
-        if self.dome_model is not None:
-            await self.dome_model.close()
+        if self.louver_model is not None:
+            await self.louver_model.close()
         if self.hvac_model is not None:
             await self.hvac_model.close()
         if self.tma_model is not None:
@@ -248,6 +262,34 @@ class EasCsc(salobj.ConfigurableCsc):
             )
             self.ess_outdoor_remote_index = outdoor_ess_index
 
+    async def construct_anemometer_remotes(self, *, anemometer_ess_indices: list[int]) -> None:
+        """Build the ESS remotes for the anemometers inside the dome.
+
+        Remotes for indices no longer configured are closed, and remotes for
+        newly configured indices are created, so that a reconfiguration takes
+        effect without restarting the CSC.
+
+        Parameters
+        ----------
+        anemometer_ess_indices : `list` [`int`]
+            SAL indices of the ESS instances to read anemometers from.
+        """
+        wanted = set(anemometer_ess_indices)
+
+        for index in set(self.ess_anemometer_remotes) - wanted:
+            await self.ess_anemometer_remotes.pop(index).close()
+
+        for index in sorted(wanted - set(self.ess_anemometer_remotes)):
+            self.ess_anemometer_remotes[index] = salobj.Remote(
+                domain=self.domain,
+                name="ESS",
+                index=index,
+                readonly=True,
+                include=["airFlow", "airTurbulence"],
+            )
+
+        await asyncio.gather(*(remote.start_task for remote in self.ess_anemometer_remotes.values()))
+
     async def configure(self, config: SimpleNamespace) -> None:
         self.config = config
 
@@ -256,9 +298,24 @@ class EasCsc(salobj.ConfigurableCsc):
         if self.tma_model is not None:
             await self.tma_model.close()
 
+        # Validate the sub-schemas and update with defaults.
+        for object_type, attr in (
+            (WeatherModel, "weather"),
+            (HvacModel, "hvac"),
+            (TmaModel, "tma"),
+            (DomeModel, "dome"),
+            (LouverModel, "louver"),
+        ):
+            schema = object_type.get_config_schema()
+            validator = salobj.DefaultingValidator(schema)
+            setattr(config, attr, validator.validate(getattr(config, attr)))
+
         await self.construct_ess_remotes(
             indoor_ess_index=config.weather["indoor_ess_index"],
             outdoor_ess_index=config.weather["ess_index"],
+        )
+        await self.construct_anemometer_remotes(
+            anemometer_ess_indices=config.weather["anemometer_ess_indices"],
         )
 
         if self.ess_indoor_remote is None or self.ess_outdoor_remote is None:
@@ -286,22 +343,8 @@ class EasCsc(salobj.ConfigurableCsc):
         self.glass_temperature_model = GlassTemperatureModel(log=self.log)
         self.weatherforecast_model = WeatherForecastModel(log=self.log)
 
-        # Validate the sub-schemas and update with defaults.
-        for object_type, attr in (
-            (WeatherModel, "weather"),
-            (HvacModel, "hvac"),
-            (TmaModel, "tma"),
-            (DomeModel, "dome"),
-        ):
-            schema = object_type.get_config_schema()
-            validator = salobj.DefaultingValidator(schema)
-            setattr(config, attr, validator.validate(getattr(config, attr)))
-
         self.dome_model = DomeModel(
             log=self.log,
-            dome_remote=self.dome_remote,
-            features_to_disable=self.config.features_to_disable,
-            allow_send=self._allow_send,
             **self.config.dome,
         )
 
@@ -309,6 +352,16 @@ class EasCsc(salobj.ConfigurableCsc):
             log=self.log,
             diurnal_timer=self.diurnal_timer,
             **self.config.weather,
+        )
+
+        self.louver_model = LouverModel(
+            log=self.log,
+            dome_model=self.dome_model,
+            weather_model=self.weather_model,
+            dome_remote=self.dome_remote,
+            features_to_disable=self.config.features_to_disable,
+            allow_send=self._allow_send,
+            **self.config.louver,
         )
         self.hvac_model = HvacModel(
             log=self.log,
@@ -389,9 +442,11 @@ class EasCsc(salobj.ConfigurableCsc):
 
         # Models should be initialized before this method is called.
         assert self.dome_model is not None, "Dome model not initialized."
+        assert self.louver_model is not None, "Louver model not initialized."
         assert self.glass_temperature_model is not None, "Glass model not initialized."
         assert self.weather_model is not None, "Weather Model not initialized."
         assert self.weatherforecast_model is not None, "WeatherForecast model not initialized."
+        assert self.hvac_model is not None, "HVAC Model not initialized."
 
         if self.ess_indoor_remote is None or self.ess_outdoor_remote is None:
             raise RuntimeError(
@@ -402,7 +457,7 @@ class EasCsc(salobj.ConfigurableCsc):
             )
 
         self.dome_remote.tel_apertureShutter.callback = self.dome_model.aperture_shutter_callback
-        self.dome_remote.tel_azimuth.callback = self.dome_model.azimuth_callback
+        self.dome_remote.tel_azimuth.callback = self.louver_model.azimuth_callback
         self.dome_remote.tel_louvers.callback = self.dome_model.louvers_callback
         self.ess_ts1_remote.tel_temperature.callback = self.glass_temperature_model.temperature_callback
         self.ess_ts2_remote.tel_temperature.callback = self.glass_temperature_model.temperature_callback
@@ -414,6 +469,24 @@ class EasCsc(salobj.ConfigurableCsc):
         self.ess_indoor_remote.tel_temperature.callback = self.weather_model.indoor_temperature_callback
         self.weatherforecast_remote.tel_hourlyTrend.callback = (
             self.weatherforecast_model.hourly_trend_callback
+        )
+        for remote in self.ess_anemometer_remotes.values():
+            remote.tel_airFlow.callback = self.weather_model.indoor_air_flow_callback
+            remote.tel_airTurbulence.callback = self.weather_model.indoor_air_flow_callback
+
+        # A single callback handles all four AHU telemetry topics; the AHU
+        # number is bound per-topic so the model knows which unit reported.
+        self.hvac_remote.tel_airHandlingUnit01Dome.callback = functools.partial(
+            self.hvac_model.ahu_working_state_callback, 1
+        )
+        self.hvac_remote.tel_airHandlingUnit02Dome.callback = functools.partial(
+            self.hvac_model.ahu_working_state_callback, 2
+        )
+        self.hvac_remote.tel_airHandlingUnit03Dome.callback = functools.partial(
+            self.hvac_model.ahu_working_state_callback, 3
+        )
+        self.hvac_remote.tel_airHandlingUnit04Dome.callback = functools.partial(
+            self.hvac_model.ahu_working_state_callback, 4
         )
 
     def disconnect_callbacks(self) -> None:
@@ -428,6 +501,7 @@ class EasCsc(salobj.ConfigurableCsc):
 
         self.dome_remote.tel_apertureShutter.callback = None
         self.dome_remote.tel_azimuth.callback = None
+        self.dome_remote.tel_louvers.callback = None
         self.ess_ts1_remote.tel_temperature.callback = None
         self.ess_ts2_remote.tel_temperature.callback = None
         self.ess_ts3_remote.tel_temperature.callback = None
@@ -437,6 +511,14 @@ class EasCsc(salobj.ConfigurableCsc):
         self.ess_indoor_remote.tel_dewPoint.callback = None
         self.ess_indoor_remote.tel_temperature.callback = None
         self.weatherforecast_remote.tel_hourlyTrend.callback = None
+        self.hvac_remote.tel_airHandlingUnit01Dome.callback = None
+        self.hvac_remote.tel_airHandlingUnit02Dome.callback = None
+        self.hvac_remote.tel_airHandlingUnit03Dome.callback = None
+        self.hvac_remote.tel_airHandlingUnit04Dome.callback = None
+
+        for remote in self.ess_anemometer_remotes.values():
+            remote.tel_airFlow.callback = None
+            remote.tel_airTurbulence.callback = None
 
     async def monitor_health(self) -> None:
         """Manage the `monitor_dome_shutter` control loop.
@@ -446,7 +528,7 @@ class EasCsc(salobj.ConfigurableCsc):
         disconnects of the remotes, as well as any other form of
         recoverable failure.
         """
-        assert self.dome_model is not None, "Dome Model not initialized."
+        assert self.louver_model is not None, "Louver Model not initialized."
         assert self.hvac_model is not None, "HVAC Model not initialized."
         assert self.tma_model is not None, "TMA Model not initialized."
         assert self.diurnal_timer is not None, "Timer not initialized."
@@ -462,7 +544,7 @@ class EasCsc(salobj.ConfigurableCsc):
                     self.weather_model.monitor,
                     self.hvac_model.monitor,
                     self.tma_model.monitor,
-                    self.dome_model.monitor,
+                    self.louver_model.monitor,
                 )
             ]
 
@@ -472,7 +554,7 @@ class EasCsc(salobj.ConfigurableCsc):
                 self.weather_model.monitor_start_event.wait(),
                 self.hvac_model.monitor_start_event.wait(),
                 self.tma_model.monitor_start_event.wait(),
-                self.dome_model.monitor_start_event.wait(),
+                self.louver_model.monitor_start_event.wait(),
             )
             self.log.debug("Monitors started.")
             self.monitor_start_event.set()
