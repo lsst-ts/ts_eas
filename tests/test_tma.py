@@ -20,6 +20,7 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 import asyncio
+import contextlib
 import logging
 import math
 import typing
@@ -36,6 +37,18 @@ STD_TIMEOUT = 60
 STD_SLEEP = 0.5
 
 logging.basicConfig(format="%(asctime)s:%(levelname)s:%(name)s:%(message)s", level=logging.DEBUG)
+
+
+@contextlib.asynccontextmanager
+async def running(coro: typing.Coroutine[typing.Any, typing.Any, None]) -> typing.AsyncIterator[None]:
+    """Run ``coro`` as a task for the duration of the context."""
+    task = asyncio.create_task(coro)
+    try:
+        yield
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
 
 class M1M3TSMock(salobj.BaseCsc):
@@ -57,6 +70,10 @@ class M1M3TSMock(salobj.BaseCsc):
     async def do_applySetpoints(self, data: salobj.BaseMsgType) -> None:
         self.glycol_setpoint = data.glycolSetpoint
         self.heater_setpoint = data.heatersSetpoint
+        await self.evt_appliedSetpoints.set_write(
+            glycolSetpoint=data.glycolSetpoint,
+            heatersSetpoint=data.heatersSetpoint,
+        )
 
     async def do_applySetpoint(self, data: salobj.BaseMsgType) -> None:
         self.glycol_setpoint = data.glycolSetpoint
@@ -112,11 +129,14 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
         dome_closed: bool = False,
         run_monitor: bool = True,
         glass_temperature: float | None = 0.0,
+        initial_heater_setpoint: float | None = None,
         **model_args: typing.Any,
     ) -> tuple[float | None, float | None, float | None, list[float] | None]:
         self.diurnal_timer = eas.diurnal_timer.DiurnalTimer()
         self.diurnal_timer.is_running = True
         self.diurnal_timer.is_night = lambda _: night
+        self.diurnal_timer.sun_altitude_at = lambda _: -10.0 if night else 10.0
+        self.diurnal_timer.seconds_until_twilight = lambda _: 6 * 3600.0
 
         self.weather_model = WeatherModelMock(self.last_twilight_temperature)
         self.weather_model.current_temperature = indoor_temperature
@@ -131,6 +151,11 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             salobj.Remote(name="MTMount", domain=mock_m1m3ts.domain) as mtmount_remote,
         ):
             await mock_mtmount.evt_summaryState.set_write(summaryState=salobj.State.ENABLED)
+            if initial_heater_setpoint is not None:
+                await mock_m1m3ts.evt_appliedSetpoints.set_write(
+                    glycolSetpoint=initial_heater_setpoint - 1.0,
+                    heatersSetpoint=initial_heater_setpoint,
+                )
 
             m1m3ts_delay_mode = model_args.get("m1m3ts_delay_mode", {"mode": "time_delay", "delay": 0.0})
             self.tma_model = eas.tma_model.TmaModel(
@@ -168,11 +193,12 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 },
                 m1m3ts_delay_mode=m1m3ts_delay_mode,
                 features_to_disable=model_args["features_to_disable"],
+                sunrise_rate=model_args.get("sunrise_rate"),
             )
             if run_monitor:
                 model_task = asyncio.create_task(self.tma_model.monitor())
             else:
-                model_task = asyncio.create_task(self.tma_model.apply_setpoint_at_night())
+                model_task = asyncio.create_task(self.run_at_night())
 
             await asyncio.sleep(2 * cadence)
 
@@ -199,6 +225,10 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 mock_mtmount.top_end_setpoint,
                 mock_m1m3ts.fan_rpm,
             )
+
+    async def run_at_night(self) -> None:
+        """Run the nighttime setpoint source and the M1M3TS sender."""
+        await asyncio.gather(self.tma_model.apply_setpoint_at_night(), self.tma_model.drive_m1m3ts())
 
     async def test_apply_setpoint_at_night(self) -> None:
         """Nighttime closed-dome control should mirror the HVAC behavior."""
@@ -288,6 +318,27 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 else:
                     self.assertIsNone(top_end_setpoint)
 
+    async def test_night_slews_from_last_setpoint(self) -> None:
+        """Closed-dome night setpoints should slew from M1M3TS, not jump."""
+        _, heater_setpoint, _, _ = await self.run_with_parameters(
+            indoor_temperature=6.0,
+            night=True,
+            dome_closed=True,
+            run_monitor=False,
+            initial_heater_setpoint=19.0,
+            glycol_setpoint_delta=-2.0,
+            heater_setpoint_delta=-1.0,
+            top_end_setpoint_delta=-0.5,
+            features_to_disable=[],
+        )
+
+        # Cooling is at most fast_cooling_rate (10 °C/hour), so over the few
+        # seconds of the test the setpoint moves only a small fraction of a
+        # degree toward 6 - 1 = 5.
+        assert heater_setpoint is not None
+        self.assertLess(heater_setpoint, 19.0)
+        self.assertGreater(heater_setpoint, 18.0)
+
     async def test_m1m3ts_applysetpoints(self) -> None:
         """M1M3TS.applySetpoint should be called at sunrise."""
         glycol_setpoint_delta = -2
@@ -299,6 +350,8 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             glycol_setpoint_delta=glycol_setpoint_delta,
             heater_setpoint_delta=heater_setpoint_delta,
             top_end_setpoint_delta=top_end_setpoint_delta,
+            # Fast enough to reach the twilight temperature in one step.
+            sunrise_rate=1e6,
             signal_sunrise=True,
             features_to_disable=[],
         )
@@ -317,6 +370,30 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             places=4,
         )
 
+    async def test_sunrise_slews_toward_twilight_temperature(self) -> None:
+        """Sunrise should step toward the twilight temperature, not jump."""
+        heater_setpoint_delta = -1.0
+        # 360 °C/hour at the 10 s test cadence is 1 °C per step.
+        sunrise_rate = 360.0
+
+        glycol_setpoint, heater_setpoint, _, _ = await self.run_with_parameters(
+            indoor_temperature=10,
+            glycol_setpoint_delta=-2.0,
+            heater_setpoint_delta=heater_setpoint_delta,
+            top_end_setpoint_delta=-0.5,
+            sunrise_rate=sunrise_rate,
+            signal_sunrise=True,
+            features_to_disable=[],
+        )
+
+        # Before sunrise the mirror tracked the indoor temperature (10).
+        # The run ends at most two steps after the sunrise target is set.
+        start = 10 + heater_setpoint_delta
+        assert heater_setpoint is not None and glycol_setpoint is not None
+        self.assertGreater(heater_setpoint, start)
+        self.assertLessEqual(heater_setpoint, start + 2.0)
+        self.assertAlmostEqual(glycol_setpoint, heater_setpoint - 1.0, places=4)
+
     async def test_m1m3ts_applysetpoints_ignores_fan_adjustment(self) -> None:
         """Sunrise applySetpoints should ignore the fan-driven adjustment."""
         glycol_setpoint_delta = -3.0
@@ -328,6 +405,8 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             glycol_setpoint_delta=glycol_setpoint_delta,
             heater_setpoint_delta=heater_setpoint_delta,
             top_end_setpoint_delta=top_end_setpoint_delta,
+            # Fast enough to reach the twilight temperature in one step.
+            sunrise_rate=1e6,
             signal_sunrise=True,
             features_to_disable=[],
         )
@@ -600,6 +679,8 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
 
         weather_model = WeatherModelMock(self.last_twilight_temperature)
         dome_model = DomeModelMock(is_closed=True)
+        diurnal_timer.sun_altitude_at = lambda _: 10.0
+        diurnal_timer.seconds_until_twilight = lambda _: 6 * 3600.0
 
         async with (
             M1M3TSMock() as mock_m1m3ts,
@@ -642,8 +723,9 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 forecast_heater_setpoint_delta=-0.5,
             )
 
-            await tma_model.apply_forecast_setpoints(predicted_temperature=0.0)
-            await asyncio.sleep(STD_SLEEP)
+            async with running(tma_model.drive_m1m3ts()):
+                await tma_model.apply_forecast_setpoints(predicted_temperature=0.0)
+                await asyncio.sleep(STD_SLEEP)
 
             expected_heater_setpoint = -0.5
             expected_glycol_setpoint = expected_heater_setpoint + tma_model.fan_glycol_heater_offset_max
@@ -704,8 +786,9 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             tma_model.delay_controller.state = eas.delay_controller.DelayState.WAITING
             tma_model.tma_forecast_active = True
 
-            await tma_model.apply_forecast_setpoints(predicted_temperature=0.0)
-            await asyncio.sleep(STD_SLEEP)
+            async with running(tma_model.drive_m1m3ts()):
+                await tma_model.apply_forecast_setpoints(predicted_temperature=0.0)
+                await asyncio.sleep(STD_SLEEP)
 
             self.assertIsNone(mock_m1m3ts.heater_setpoint)
             self.assertIsNone(mock_m1m3ts.glycol_setpoint)
@@ -765,8 +848,9 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 forecast_top_end_setpoint_delta=-0.25,
             )
 
-            await tma_model.apply_forecast_setpoints(predicted_temperature=1.5)
-            await asyncio.sleep(STD_SLEEP)
+            async with running(tma_model.drive_m1m3ts()):
+                await tma_model.apply_forecast_setpoints(predicted_temperature=1.5)
+                await asyncio.sleep(STD_SLEEP)
 
             self.assertIsNone(mock_m1m3ts.heater_setpoint)
             self.assertIsNone(mock_m1m3ts.glycol_setpoint)
@@ -827,7 +911,7 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
                 features_to_disable=[],
             )
 
-            task = asyncio.create_task(tma_model.follow_ess_indoor())
+            task = asyncio.gather(tma_model.follow_ess_indoor(), tma_model.drive_m1m3ts())
             await asyncio.sleep(0)  # Give the task a chance to start.
 
             # Delay controller has registered an open event.
@@ -863,6 +947,71 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             done, pending = await asyncio.wait({task}, timeout=STD_TIMEOUT)
             if pending:
                 self.fail("follow_ess_indoor did not stop before timeout")
+
+    async def test_delay_hold_clears_m1m3ts_target(self) -> None:
+        """A target left over from before the delay hold should be cleared
+        so that nothing is sent while the delay controller is WAITING.
+        """
+        cadence = 0.05
+
+        async with (
+            M1M3TSMock() as mock_m1m3ts,
+            MTMountMock() as mock_mtmount,
+            salobj.Remote(name="MTM1M3TS", domain=mock_m1m3ts.domain) as m1m3ts_remote,
+            salobj.Remote(name="MTMount", domain=mock_m1m3ts.domain) as mtmount_remote,
+        ):
+            await mock_mtmount.evt_summaryState.set_write(summaryState=salobj.State.ENABLED)
+
+            diurnal_timer = eas.diurnal_timer.DiurnalTimer()
+            diurnal_timer.is_running = True
+
+            weather_model = WeatherModelMock(self.last_twilight_temperature)
+            weather_model.current_indoor_temperature = 10.0
+            dome_model = DomeModelMock(is_closed=False)
+
+            tma_model = eas.tma_model.TmaModel(
+                log=mock_m1m3ts.log,
+                diurnal_timer=diurnal_timer,
+                dome_model=dome_model,
+                glass_temperature_model=SimpleNamespace(median_temperature=0.0),
+                weather_model=weather_model,
+                weatherforecast_model=WeatherForecastModel(log=mock_m1m3ts.log),
+                m1m3ts_remote=m1m3ts_remote,
+                mtmount_remote=mtmount_remote,
+                glycol_setpoint_delta=-2,
+                heater_setpoint_delta=0.0,
+                top_end_setpoint_delta=-1,
+                m1m3_extra_delta_closed_at_night=0.0,
+                top_end_setpoint_delta_closed_at_night=-1,
+                m1m3_setpoint_cadence=cadence,
+                setpoint_deadband_heating=0,
+                setpoint_deadband_cooling=0,
+                maximum_heating_rate=100,
+                slow_cooling_rate=1,
+                fast_cooling_rate=10,
+                glass_offset_limit_low=-1000.0,
+                glass_offset_limit_high=-1000.0,
+                fan_speed={
+                    "fan_speed_min": 700.0,
+                    "fan_speed_max": 2000.0,
+                    "fan_glycol_heater_offset_min": -1.0,
+                    "fan_glycol_heater_offset_max": -4.0,
+                    "fan_throttle_turn_on_temp_diff": 0.0,
+                    "fan_throttle_max_temp_diff": 1.0,
+                },
+                m1m3ts_delay_mode={"mode": "time_delay", "delay": STD_TIMEOUT},
+                features_to_disable=[],
+            )
+
+            # A stale target, e.g. from the closed-dome night loop.
+            tma_model.set_m1m3ts_target(5.0, 1.0)
+
+            async with running(tma_model.follow_ess_indoor()):
+                await asyncio.sleep(4 * cadence)
+                self.assertEqual(tma_model.delay_controller.state, eas.delay_controller.DelayState.WAITING)
+                self.assertIsNone(tma_model.m1m3ts_target)
+
+            await tma_model.close()
 
     def test_closed_at_night_setpoint_cadence_schema(self) -> None:
         """closed_at_night_setpoint_cadence setting affects cadence."""

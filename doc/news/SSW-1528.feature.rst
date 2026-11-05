@@ -1,0 +1,1 @@
+All M1M3TS setpoints now go through one sender that slews toward a target at a rate set by the setpoint source; sunrise uses the new ``sunrise_rate``, and closed-dome night and forecast setpoints slew at the normal heating and cooling rates instead of jumping.

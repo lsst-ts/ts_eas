@@ -203,49 +203,28 @@ class TestDelayPolicies(unittest.TestCase):
 
 
 class TestEveningControlledConvergence(unittest.IsolatedAsyncioTestCase):
-    async def test_on_hold_slews_toward_target(self) -> None:
-        """Controlled convergence should slew setpoints toward the target."""
-        tolerance_positive = 0.2
-        tolerance_negative = 0.2
+    async def test_on_hold_sets_target_and_slew_rate(self) -> None:
+        """Controlled convergence should hand over the target and slew_rate."""
         slew_rate = 360.0
-        cadence = 10.0
         target = 12.0
-        initial_setpoint = 10.0
-        near_target_setpoint = 11.5
-        expected_after_first = 11.0
         policy = delay_controller.make_evening_controlled_convergence_policy(
-            tolerance_positive=tolerance_positive,
-            tolerance_negative=tolerance_negative,
+            tolerance_positive=0.2,
+            tolerance_negative=0.2,
             slew_rate=slew_rate,
         )
-        applied: list[float] = []
+        targets: list[tuple[float, float]] = []
 
-        async def apply_setpoints(value: float) -> None:
-            applied.append(value)
+        def set_target(setpoint: float, rate: float) -> None:
+            targets.append((setpoint, rate))
 
-        await policy.on_hold(
-            target_setpoint=target,
-            last_m1m3ts_setpoint=initial_setpoint,
-            cadence=cadence,
-            apply_setpoints_callback=apply_setpoints,
-        )
-        self.assertAlmostEqual(applied[-1], expected_after_first, places=6)
-
-        await policy.on_hold(
-            target_setpoint=target,
-            last_m1m3ts_setpoint=near_target_setpoint,
-            cadence=cadence,
-            apply_setpoints_callback=apply_setpoints,
-        )
-        self.assertAlmostEqual(applied[-1], target, places=6)
-
-        await policy.on_hold(
-            target_setpoint=target,
-            last_m1m3ts_setpoint=None,
-            cadence=cadence,
-            apply_setpoints_callback=apply_setpoints,
-        )
-        self.assertAlmostEqual(applied[-1], target, places=6)
+        for last_m1m3ts_setpoint in (10.0, None):
+            await policy.on_hold(
+                target_setpoint=target,
+                last_m1m3ts_setpoint=last_m1m3ts_setpoint,
+                cadence=10.0,
+                apply_setpoints_callback=set_target,
+            )
+            self.assertEqual(targets[-1], (target, slew_rate))
 
     async def test_on_hold_requires_callback(self) -> None:
         """Controlled convergence should send an apply callback."""
@@ -393,7 +372,6 @@ class TestDelayControllerIntegration(unittest.IsolatedAsyncioTestCase):
         cadence = 10.0
         open_time = 100.0
         now = 101.0
-        expected_applied = 11.0
         policy = delay_controller.make_evening_controlled_convergence_policy(
             tolerance_positive=tolerance_positive,
             tolerance_negative=tolerance_negative,
@@ -403,21 +381,21 @@ class TestDelayControllerIntegration(unittest.IsolatedAsyncioTestCase):
         controller.state = delay_controller.DelayState.WAITING
         controller.open_time = open_time
 
-        applied: list[float] = []
+        targets: list[tuple[float, float]] = []
 
-        async def apply_setpoints(value: float) -> None:
-            applied.append(value)
+        def set_target(setpoint: float, rate: float) -> None:
+            targets.append((setpoint, rate))
 
         with mock.patch.object(delay_controller, "current_tai", return_value=now):
             ready = await controller.gate(
                 target_setpoint=target_setpoint,
                 last_m1m3ts_setpoint=last_m1m3ts_setpoint,
                 cadence=cadence,
-                apply_setpoints_callback=apply_setpoints,
+                apply_setpoints_callback=set_target,
             )
 
         self.assertFalse(ready)
-        self.assertAlmostEqual(applied[-1], expected_applied, places=6)
+        self.assertEqual(targets[-1], (target_setpoint, slew_rate))
 
     async def test_gate_requires_callback_for_controlled_convergence(self) -> None:
         """Controlled convergence should require a callback."""
@@ -504,8 +482,10 @@ class TestDelayControllerIntegration(unittest.IsolatedAsyncioTestCase):
         last_setpoint = starting_setpoint
         applied: list[float] = []
 
-        async def apply_setpoints(value: float) -> None:
-            applied.append(value)
+        def set_target(setpoint: float, rate: float) -> None:
+            # Stand in for TmaModel.drive_m1m3ts: one step per cadence.
+            step = rate * cadence / 3600.0
+            applied.append(last_setpoint + max(-step, min(step, setpoint - last_setpoint)))
 
         ready = False
         for _ in range(max_iterations):
@@ -513,7 +493,7 @@ class TestDelayControllerIntegration(unittest.IsolatedAsyncioTestCase):
                 target_setpoint=target,
                 last_m1m3ts_setpoint=last_setpoint,
                 cadence=cadence,
-                apply_setpoints_callback=apply_setpoints,
+                apply_setpoints_callback=set_target,
             )
             if ready:
                 break

@@ -113,6 +113,10 @@ class TmaModel:
     fast_cooling_rate : `float`
         Cooling rate to be used during the day. Limits how quickly the setpoint
         can fall, in degrees Celsius per hour.
+    sunrise_rate : `float` | `None`, optional
+        Rate (°C/hour) at which the M1M3TS setpoint is slewed toward the
+        twilight temperature after sunrise. If `None`, ``slow_cooling_rate``
+        is used.
     features_to_disable : `list[str]`
         A list of features that should be disabled. The following strings can
         be used:
@@ -155,6 +159,7 @@ class TmaModel:
         forecast_heater_setpoint_delta: float | None = None,
         forecast_top_end_setpoint_delta: float | None = None,
         closed_at_night_setpoint_cadence: float | None = None,
+        sunrise_rate: float | None = None,
         allow_send: Callable[[], bool] | None = None,
     ) -> None:
         self.log = log
@@ -208,6 +213,7 @@ class TmaModel:
         self.maximum_heating_rate = maximum_heating_rate
         self.slow_cooling_rate = slow_cooling_rate
         self.fast_cooling_rate = fast_cooling_rate
+        self.sunrise_rate = sunrise_rate if sunrise_rate is not None else slow_cooling_rate
         if glass_offset_limit_low > glass_offset_limit_high:
             raise ValueError(
                 f"glass_offset_limit_low ({glass_offset_limit_low}) must be "
@@ -223,6 +229,17 @@ class TmaModel:
         # If true, applySetpoints needs to be called to
         # refresh the setpoints on M1M3
         self.m1m3_setpoints_are_stale: bool = True
+
+        # The M1M3TS target setpoint (°C, before the glycol and heater deltas)
+        # and the rate (°C/hour) at which to slew toward it. Setpoint sources
+        # only set these, with `set_m1m3ts_target`; `drive_m1m3ts` is the only
+        # sender of applySetpoints. The deltas are None to use the configured
+        # glycol_setpoint_delta and heater_setpoint_delta.
+        self.m1m3ts_target: float | None = None
+        self.m1m3ts_rate: float = self.slow_cooling_rate
+        self.m1m3ts_glycol_setpoint_delta: float | None = None
+        self.m1m3ts_heater_setpoint_delta: float | None = None
+        self.m1m3ts_target_changed = asyncio.Event()
 
         self.delay_controller: DelayController = DelayController(
             policy=make_delay_policy_from_config(self.m1m3ts_delay_mode),
@@ -365,6 +382,13 @@ properties:
         while observing.
     type: number
     default: 10.0
+  sunrise_rate:
+    description: >-
+        Rate (°C/hour) at which the MTM1M3 setpoint is slewed toward the
+        twilight temperature after sunrise. If absent, slow_cooling_rate is used.
+    type: [number, "null"]
+    default: null
+    exclusiveMinimum: 0
   glass_offset_limit_low:
     description: >-
         Minimum allowed offset (°C) of the M1M3TS heater setpoint relative to the
@@ -505,6 +529,7 @@ additionalProperties: false
             await asyncio.gather(
                 self.follow_ess_indoor(),
                 self.apply_setpoint_at_night(),
+                self.drive_m1m3ts(),
                 self.monitor_twilight_forecast(),
                 self.wait_for_sunrise(),
             )
@@ -550,17 +575,14 @@ additionalProperties: false
         self,
         setpoint: float,
         *,
-        delta_adjustment: float = 0.0,
         glycol_setpoint_delta: float | None = None,
         heater_setpoint_delta: float | None = None,
     ) -> None:
         glycol_delta = self.glycol_setpoint_delta if glycol_setpoint_delta is None else glycol_setpoint_delta
         heater_delta = self.heater_setpoint_delta if heater_setpoint_delta is None else heater_setpoint_delta
         if "m1m3ts" not in self.features_to_disable:
-            glycol_setpoint = (
-                setpoint + glycol_delta + self.glycol_setpoint_delta_adjustment + delta_adjustment
-            )
-            heaters_setpoint = setpoint + heater_delta + delta_adjustment
+            glycol_setpoint = setpoint + glycol_delta + self.glycol_setpoint_delta_adjustment
+            heaters_setpoint = setpoint + heater_delta
 
             # Clamp the heater setpoint to the configured offset band around
             # M1M3 glass temperature, shifting glycol by the same amount so the
@@ -684,12 +706,12 @@ additionalProperties: false
 
                 if self.dome_model.is_closed is not False:
                     self.delay_controller.reset()
-                    # Force a setpoint resend once tracking is allowed again
-                    # after a dome closure/reopen cycle.
-                    self.m1m3_setpoints_are_stale = True
                     self.log.debug("Waiting for dome open.")
                     await self.delay_controller.wait_for_open(self.dome_model)
                     self.log.debug("Dome has been opened.")
+                    # Force a setpoint resend once tracking is allowed again
+                    # after a dome closure/reopen cycle.
+                    self.m1m3_setpoints_are_stale = True
                 elif self.delay_controller.open_time is None:
                     await self.delay_controller.wait_for_open(self.dome_model)
 
@@ -725,20 +747,20 @@ additionalProperties: false
                     top_end_chiller_state=ThermalCommandState.ON,
                 )
 
-            msg = self.m1m3ts_remote.evt_appliedSetpoints.get()
-            if msg is None:
-                last_m1m3ts_setpoint = None
-            else:
-                last_m1m3ts_setpoint = msg.heatersSetpoint - self.heater_setpoint_delta
+            last_m1m3ts_setpoint = self.last_m1m3ts_setpoint()
 
             if "m1m3ts" in self.features_to_disable or "require_dome_open" in self.features_to_disable:
                 delay_ready = True
             else:
+                if not self.delay_controller.is_ready():
+                    # While held, send nothing unless the policy's on_hold
+                    # sets a new target.
+                    self.clear_m1m3ts_target()
                 delay_ready = await self.delay_controller.gate(
                     target_setpoint=indoor_temperature,
                     last_m1m3ts_setpoint=last_m1m3ts_setpoint,
                     cadence=self.m1m3_setpoint_cadence,
-                    apply_setpoints_callback=self.apply_setpoints,
+                    apply_setpoints_callback=self.set_m1m3ts_target,
                 )
             if not delay_ready:
                 await asyncio.sleep(self.m1m3_setpoint_cadence)
@@ -748,72 +770,149 @@ additionalProperties: false
             if "fanspeed" not in self.features_to_disable and not math.isnan(indoor_temperature):
                 await self.set_fan_speed(setpoint=indoor_temperature)
 
-            # Maximum cooling rate depends on environmental conditions:
-            #  * If the dome is open or
-            #    sunrise time > current time > twilight-2hours
-            #    then we use the slow cooling rate
-            #    (currently 1 degree per hour)
-            #  * Otherwise we use the fast cooling rate
-            #    (currently 10 degrees per hour)
-            # We assume that twilight is always shorter than two hours, as
-            # is the case at Cerro Pachón.
-            current_time = time.time()
-            use_slow_cooling_rate = (
-                (not self.dome_model.is_closed)
-                or (self.diurnal_timer.sun_altitude_at(current_time) < 0)
-                or (
-                    self.diurnal_timer.seconds_until_twilight(Time.now())
-                    < SLOW_COOLING_START_TIME * SECONDS_PER_HOUR
-                )
+            self.set_m1m3ts_target(
+                indoor_temperature, self.tracking_rate(indoor_temperature, last_m1m3ts_setpoint)
             )
-            cooling_rate = self.slow_cooling_rate if use_slow_cooling_rate else self.fast_cooling_rate
-
-            if last_m1m3ts_setpoint is None:
-                # No previous setpoint = apply it regardless
-                await self.apply_setpoints(indoor_temperature)
-
-            elif indoor_temperature > last_m1m3ts_setpoint:
-                # Warm the mirror if the setpoint is past the heating deadband.
-                new_setpoint = indoor_temperature
-                delta = new_setpoint - last_m1m3ts_setpoint
-
-                if delta > self.setpoint_deadband_heating:
-                    # Apply the setpoint, limited by maximum_heating_rate
-                    maximum_heating_step = (
-                        self.maximum_heating_rate * self.m1m3_setpoint_cadence / SECONDS_PER_HOUR
-                    )
-                    new_setpoint = min(
-                        new_setpoint,
-                        last_m1m3ts_setpoint + maximum_heating_step,
-                    )
-                    await self.apply_setpoints(new_setpoint)
-                else:
-                    self.log.debug("Heating deadband criterion not met. No M1M3TS setpoint update.")
-
-            elif indoor_temperature < last_m1m3ts_setpoint:
-                # Cool the mirror if the setpoint is past the cooling deadband.
-                new_setpoint = indoor_temperature
-                delta = last_m1m3ts_setpoint - new_setpoint
-
-                if delta > self.setpoint_deadband_cooling:
-                    # Apply the setpoint, limited by maximum_cooling_rate
-                    maximum_cooling_step = cooling_rate * self.m1m3_setpoint_cadence / SECONDS_PER_HOUR
-                    new_setpoint = max(
-                        new_setpoint,
-                        last_m1m3ts_setpoint - maximum_cooling_step,
-                    )
-                    await self.apply_setpoints(new_setpoint)
-                else:
-                    self.log.debug("Cooling deadband criterion not met. No M1M3TS setpoint update.")
-
-            else:
-                # indoor_temperature == last_m1m3ts_setpoint
-                self.log.debug("No M1M3TS setpoint update required.")
-
-            if self.m1m3_setpoints_are_stale and last_m1m3ts_setpoint is not None:
-                await self.apply_setpoints(indoor_temperature)
 
             await asyncio.sleep(self.m1m3_setpoint_cadence)
+
+    def set_m1m3ts_target(
+        self,
+        setpoint: float,
+        rate: float,
+        *,
+        glycol_setpoint_delta: float | None = None,
+        heater_setpoint_delta: float | None = None,
+    ) -> None:
+        """Set the M1M3TS target setpoint and the rate to slew toward it.
+
+        `drive_m1m3ts` sends the commands.
+
+        Parameters
+        ----------
+        setpoint : `float`
+            Target setpoint (°C) before the glycol and heater deltas.
+        rate : `float`
+            Slew rate (°C/hour).
+        glycol_setpoint_delta : `float` | `None`, optional
+            Glycol delta (°C) to use instead of ``glycol_setpoint_delta``.
+        heater_setpoint_delta : `float` | `None`, optional
+            Heater delta (°C) to use instead of ``heater_setpoint_delta``.
+        """
+        self.log.debug(f"M1M3TS target {setpoint:.2f}°C at {rate:.2f}°C/hour")
+        self.m1m3ts_target = setpoint
+        self.m1m3ts_rate = rate
+        self.m1m3ts_glycol_setpoint_delta = glycol_setpoint_delta
+        self.m1m3ts_heater_setpoint_delta = heater_setpoint_delta
+        self.m1m3ts_target_changed.set()
+
+    def clear_m1m3ts_target(self) -> None:
+        """Clear the M1M3TS target so that `drive_m1m3ts` sends nothing."""
+        self.log.debug("M1M3TS target cleared")
+        self.m1m3ts_target = None
+
+    def last_m1m3ts_setpoint(self, heater_setpoint_delta: float | None = None) -> float | None:
+        """Return the setpoint M1M3TS last reported, before deltas.
+
+        Parameters
+        ----------
+        heater_setpoint_delta : `float` | `None`, optional
+            Heater delta (°C) to remove instead of ``heater_setpoint_delta``.
+
+        Returns
+        -------
+        `float` | `None`
+            The setpoint (°C), or `None` if M1M3TS has not reported one.
+        """
+        msg = self.m1m3ts_remote.evt_appliedSetpoints.get()
+        if msg is None:
+            return None
+        if heater_setpoint_delta is None:
+            heater_setpoint_delta = self.heater_setpoint_delta
+        return msg.heatersSetpoint - heater_setpoint_delta
+
+    def tracking_rate(self, target: float, last_m1m3ts_setpoint: float | None) -> float:
+        """Return the normal slew rate (°C/hour) from the last setpoint
+        toward ``target``.
+
+        Heating is limited to ``maximum_heating_rate``. The cooling rate
+        depends on conditions:
+          * If the dome is open or
+            sunrise time > current time > twilight-2hours
+            then we use the slow cooling rate
+          * Otherwise we use the fast cooling rate
+        We assume that twilight is always shorter than two hours, as
+        is the case at Cerro Pachón.
+        """
+        if last_m1m3ts_setpoint is not None and target > last_m1m3ts_setpoint:
+            return self.maximum_heating_rate
+
+        current_time = time.time()
+        use_slow_cooling_rate = (
+            (not self.dome_model.is_closed)
+            or (self.diurnal_timer.sun_altitude_at(current_time) < 0)
+            or (
+                self.diurnal_timer.seconds_until_twilight(Time.now())
+                < SLOW_COOLING_START_TIME * SECONDS_PER_HOUR
+            )
+        )
+        return self.slow_cooling_rate if use_slow_cooling_rate else self.fast_cooling_rate
+
+    async def step_m1m3ts(self) -> bool:
+        """Send one step of the M1M3TS setpoint toward the target.
+
+        The step starts from the setpoint M1M3TS last reported and is at most
+        one cadence's worth of the slew rate. Nothing is sent if the target is
+        within the heating or cooling deadband, unless the setpoints are
+        stale.
+
+        Returns
+        -------
+        `bool`
+            True if setpoints were sent.
+        """
+        target = self.m1m3ts_target
+        if target is None:
+            return False
+
+        last_m1m3ts_setpoint = self.last_m1m3ts_setpoint(self.m1m3ts_heater_setpoint_delta)
+        if last_m1m3ts_setpoint is None:
+            # No previous setpoint, so go straight to the target.
+            new_setpoint = target
+        else:
+            difference = target - last_m1m3ts_setpoint
+            deadband = self.setpoint_deadband_heating if difference > 0 else self.setpoint_deadband_cooling
+            if abs(difference) <= deadband:
+                if not self.m1m3_setpoints_are_stale:
+                    return False
+                new_setpoint = last_m1m3ts_setpoint
+            else:
+                step = self.m1m3ts_rate * self.m1m3_setpoint_cadence / SECONDS_PER_HOUR
+                new_setpoint = last_m1m3ts_setpoint + max(-step, min(step, difference))
+
+        await self.apply_setpoints(
+            new_setpoint,
+            glycol_setpoint_delta=self.m1m3ts_glycol_setpoint_delta,
+            heater_setpoint_delta=self.m1m3ts_heater_setpoint_delta,
+        )
+        return True
+
+    async def drive_m1m3ts(self) -> None:
+        """Send M1M3TS setpoints, slewing toward the target.
+
+        This is the only sender of applySetpoints. After sending, wait one
+        cadence before the next step. Otherwise, step as soon as the target
+        changes, or after one cadence.
+        """
+        while self.diurnal_timer.is_running:
+            if await self.step_m1m3ts():
+                await asyncio.sleep(self.m1m3_setpoint_cadence)
+                continue
+            try:
+                await asyncio.wait_for(self.m1m3ts_target_changed.wait(), timeout=self.m1m3_setpoint_cadence)
+            except asyncio.TimeoutError:
+                pass
+            self.m1m3ts_target_changed.clear()
 
     async def wait_for_sunrise(self) -> None:
         """Wait for sunrise and then sets the room temperature.
@@ -836,7 +935,7 @@ additionalProperties: false
                         f"{last_twilight_temperature:.2f}°C"
                     )
                     self.glycol_setpoint_delta_adjustment = 0.0
-                    await self.apply_setpoints(last_twilight_temperature)
+                    self.set_m1m3ts_target(last_twilight_temperature, self.sunrise_rate)
 
                     if "top_end" not in self.features_to_disable:
                         chiller_setpoint = last_twilight_temperature + self.top_end_setpoint_delta
@@ -876,10 +975,8 @@ additionalProperties: false
                         warned_no_temperature = True
                 else:
                     warned_no_temperature = False
-                    await self.apply_setpoints(
-                        outdoor_temperature,
-                        delta_adjustment=self.m1m3_extra_delta_closed_at_night,
-                    )
+                    target = outdoor_temperature + self.m1m3_extra_delta_closed_at_night
+                    self.set_m1m3ts_target(target, self.tracking_rate(target, self.last_m1m3ts_setpoint()))
 
                     if "top_end" not in self.features_to_disable:
                         await self.send_set_thermal(
@@ -942,13 +1039,14 @@ additionalProperties: false
                         glycol_setpoint_delta=self.forecast_glycol_setpoint_delta,
                         heater_setpoint_delta=self.forecast_heater_setpoint_delta,
                     )
-                await self.apply_setpoints(
+                last_m1m3ts_setpoint = self.last_m1m3ts_setpoint(self.forecast_heater_setpoint_delta)
+                self.set_m1m3ts_target(
                     predicted_temperature,
+                    self.tracking_rate(predicted_temperature, last_m1m3ts_setpoint),
                     glycol_setpoint_delta=self.forecast_glycol_setpoint_delta,
                     heater_setpoint_delta=self.forecast_heater_setpoint_delta,
                 )
                 m1m3_forecast_engaged = True
-            self.m1m3_setpoints_are_stale = False
 
         if (
             "forecast" not in self.features_to_disable

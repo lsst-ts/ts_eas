@@ -36,8 +36,6 @@ import math
 from dataclasses import dataclass
 from typing import Awaitable, Callable
 
-import astropy.units as u
-
 from lsst.ts.utils import current_tai
 
 from .dome_model import DomeModel
@@ -45,8 +43,10 @@ from .dome_model import DomeModel
 # Polling frequency to wait for an initial state report from the dome.
 POLL_INTERVAL = 10.0
 
-# A callback type for reporting back that new setpoints should be applied.
-ApplySetpointsCallback = Callable[[float], Awaitable[None]]
+# A callback type for setting M1M3TS target setpoints. Such a callback
+# takes two arguments: the target setpoint (°C) and the slew rate
+# (°C/hour) to be used.
+ApplySetpointsCallback = Callable[[float, float], None]
 
 
 class DelayState(enum.Enum):
@@ -89,7 +89,8 @@ class DelayPolicy:
          * `cadence` : `float`
            Cadence between checks, seconds.
          * `apply_setpoints_callback` : `ApplySetpointsCallback` | None
-           Callback for applying setpoints, or `None` if not applicable.
+           Callback for setting the target setpoint and slew rate, or `None`
+           if not applicable.
     """
 
     is_ready: Callable[[float | None, float | None, float, float], bool]
@@ -299,27 +300,15 @@ def make_evening_controlled_convergence_policy(
         cadence: float,
         apply_setpoints_callback: ApplySetpointsCallback | None,
     ) -> None:
-        """Slew the setpoint temperature while WAITING."""
+        """Slew toward the target at ``slew_rate`` while WAITING."""
 
         if apply_setpoints_callback is None:
             raise ValueError("apply_setpoints_callback must be set.")
 
         if target_setpoint is None or not math.isfinite(target_setpoint):
             return
-        if last_m1m3ts_setpoint is None or not math.isfinite(last_m1m3ts_setpoint):
-            await apply_setpoints_callback(target_setpoint)
-            return
 
-        rate_c_per_hour = slew_rate * u.deg_C / u.hour
-        rate_c_per_sec = rate_c_per_hour.to(u.deg_C / u.second)
-        step = float(rate_c_per_sec.value) * cadence
-
-        if target_setpoint > last_m1m3ts_setpoint:
-            new_setpoint = min(target_setpoint, last_m1m3ts_setpoint + step)
-        else:
-            new_setpoint = max(target_setpoint, last_m1m3ts_setpoint - step)
-
-        await apply_setpoints_callback(new_setpoint)
+        apply_setpoints_callback(target_setpoint, slew_rate)
 
     return DelayPolicy(is_ready=is_ready, on_hold=on_hold)
 
@@ -450,8 +439,8 @@ class DelayController:
         cadence : `float`
             Cadence in seconds between checks.
         apply_setpoints_callback : `Callable` or `None`
-            Coroutine to apply a new M1M3TS setpoint, or `None` if not
-            applicable.
+            Callback to set the M1M3TS target setpoint and slew rate, or
+            `None` if not applicable.
 
         Returns
         -------
