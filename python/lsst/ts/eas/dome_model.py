@@ -360,13 +360,13 @@ additionalProperties: false
         ]
 
         # Avoid excessive setLouver commands. Only command louvers whose
-        # position differs from what EAS last commanded, and send nothing if
-        # there are none. MTDome moves a louver whenever it is commanded, even
-        # to the same position.
+        # position differs from MTDome's commanded position, and send nothing
+        # if there are none. MTDome moves a louver whenever it is commanded,
+        # even to the same position.
         if self.louver_eas_command is not None:
             louver_command = [
-                (command if command >= 0 and abs(command - previous) > LOUVER_COMMAND_TOLERANCE else -1.0)
-                for command, previous in zip(louver_command, self.louver_eas_command)
+                (command if command >= 0 and abs(command - commanded) > LOUVER_COMMAND_TOLERANCE else -1.0)
+                for command, commanded in zip(louver_command, position_commanded)
             ]
             if all(command < 0 for command in louver_command):
                 return
