@@ -1,0 +1,1 @@
+Gated setLouver commands to prevent the same command from being sent twice.
