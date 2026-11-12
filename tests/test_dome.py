@@ -262,7 +262,9 @@ class TestDomeModel(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(STD_SLEEP)
             self.assertEqual(len(self.fake_remote.cmd_setLouvers.calls), initial)
 
-            await self.model.azimuth_callback(SimpleNamespace(positionActual=10.5))
+            # Rotate far enough to change which louvers face the sun, so that
+            # the update has a new command to send.
+            await self.model.azimuth_callback(SimpleNamespace(positionActual=100.0))
             await asyncio.sleep(STD_SLEEP)
             self.assertGreater(len(self.fake_remote.cmd_setLouvers.calls), initial)
 
@@ -317,6 +319,22 @@ class TestDomeModel(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(position[0], -1.0)
         self.assertTrue(all(p == 50.0 for p in position[1:14]))
         self.assertTrue(all(p == 100.0 for p in position[14:]))
+
+    async def test_adjust_louvers_does_not_repeat_unchanged_command(self) -> None:
+        """Repeated passes with nothing changed send setLouvers only once."""
+        self.model.dome_azimuth = 0.0
+        self.model.louvers_telemetry = SimpleNamespace(positionCommanded=[100.0] * 34)
+        self.fake_remote.evt_summaryState.set_state(salobj.State.ENABLED)
+
+        for _ in range(3):
+            await self.model.adjust_louvers(90.0)
+            await asyncio.sleep(STD_SLEEP)
+            # MTDome echoes the command EAS sent.
+            self.model.louvers_telemetry = SimpleNamespace(
+                positionCommanded=list(self.model.louver_eas_command)
+            )
+
+        self.assertEqual(len(self.fake_remote.cmd_setLouvers.calls), 1)
 
     async def test_adjust_louvers_dome_opposite_sun_exposes_f1(self) -> None:
         """Geometric sanity check: when the slit points opposite the sun,
