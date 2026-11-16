@@ -158,7 +158,7 @@ class EasCsc(salobj.ConfigurableCsc):
         self.mtm1m3ts_remote = salobj.Remote(
             domain=self.domain,
             name="MTM1M3TS",
-            include=["appliedSetpoints", "summaryState"],
+            include=["appliedSetpoints", "fcuTargets", "summaryState"],
         )
         self.mtmount_remote = salobj.Remote(
             domain=self.domain,

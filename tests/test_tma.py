@@ -20,6 +20,7 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 import asyncio
+import contextlib
 import logging
 import math
 import typing
@@ -53,17 +54,35 @@ class M1M3TSMock(salobj.BaseCsc):
         self.glycol_setpoint: float | None = None
         self.heater_setpoint: float | None = None
         self.fan_rpm: list[int] | None = None
+        self.apply_setpoints_count = 0
+        self.heater_fan_demand_count = 0
+
+    async def start(self) -> None:
+        await super().start()
+        # A running MTM1M3TS has already published these events, so EAS's
+        # aget() returns immediately. Use values EAS would never command so
+        # the first applySetpoints/heaterFanDemand is not gated.
+        await self.evt_appliedSetpoints.set_write(glycolSetpoint=-100.0, heatersSetpoint=-100.0)
+        await self.evt_fcuTargets.set_write(fanRPM=[0] * 96)
 
     async def do_applySetpoints(self, data: salobj.BaseMsgType) -> None:
+        self.apply_setpoints_count += 1
         self.glycol_setpoint = data.glycolSetpoint
         self.heater_setpoint = data.heatersSetpoint
+        await self.evt_appliedSetpoints.set_write(
+            glycolSetpoint=data.glycolSetpoint,
+            heatersSetpoint=data.heatersSetpoint,
+        )
 
     async def do_applySetpoint(self, data: salobj.BaseMsgType) -> None:
         self.glycol_setpoint = data.glycolSetpoint
         self.heater_setpoint = data.heatersSetpoint
 
     async def do_heaterFanDemand(self, data: salobj.BaseMsgType) -> None:
+        self.heater_fan_demand_count += 1
         self.fan_rpm = data.fanRPM
+        # Like MTM1M3TS, report fan targets in RPM (10x the commanded value).
+        await self.evt_fcuTargets.set_write(fanRPM=[rpm * 10 for rpm in data.fanRPM])
 
 
 class MTMountMock(salobj.BaseCsc):
@@ -345,6 +364,81 @@ class TestTma(salobj.BaseCscTestCase, unittest.IsolatedAsyncioTestCase):
             + self.tma_model.fan_glycol_heater_offset_min,
             places=4,
         )
+
+    @contextlib.asynccontextmanager
+    async def m1m3ts_model(
+        self,
+        state: salobj.State = salobj.State.ENABLED,
+    ) -> typing.AsyncIterator[tuple[M1M3TSMock, eas.tma_model.TmaModel]]:
+        """Yield a TmaModel whose MTM1M3TS reports the given state.
+
+        While MTM1M3TS is not ENABLED, commands wait in their command task.
+        """
+        diurnal_timer = eas.diurnal_timer.DiurnalTimer()
+        diurnal_timer.is_running = True
+        async with (
+            M1M3TSMock() as mock_m1m3ts,
+            salobj.Remote(name="MTM1M3TS", domain=mock_m1m3ts.domain) as m1m3ts_remote,
+            salobj.Remote(name="MTMount", domain=mock_m1m3ts.domain) as mtmount_remote,
+        ):
+            tma_model = eas.tma_model.TmaModel(
+                log=mock_m1m3ts.log,
+                diurnal_timer=diurnal_timer,
+                dome_model=DomeModelMock(is_closed=False),
+                glass_temperature_model=SimpleNamespace(median_temperature=0.0),
+                weather_model=WeatherModelMock(self.last_twilight_temperature),
+                weatherforecast_model=WeatherForecastModel(log=mock_m1m3ts.log),
+                m1m3ts_remote=m1m3ts_remote,
+                mtmount_remote=mtmount_remote,
+                glycol_setpoint_delta=-2,
+                heater_setpoint_delta=-1,
+                top_end_setpoint_delta=-1,
+                m1m3_extra_delta_closed_at_night=0.0,
+                top_end_setpoint_delta_closed_at_night=-1,
+                m1m3_setpoint_cadence=10,
+                setpoint_deadband_heating=0,
+                setpoint_deadband_cooling=0,
+                maximum_heating_rate=100,
+                slow_cooling_rate=1,
+                fast_cooling_rate=10,
+                glass_offset_limit_low=-1000.0,
+                glass_offset_limit_high=1000.0,
+                fan_speed={
+                    "fan_speed_min": 700.0,
+                    "fan_speed_max": 2000.0,
+                    "fan_glycol_heater_offset_min": -1.0,
+                    "fan_glycol_heater_offset_max": -4.0,
+                    "fan_throttle_turn_on_temp_diff": 0.0,
+                    "fan_throttle_max_temp_diff": 1.0,
+                },
+                m1m3ts_delay_mode={"mode": "time_delay", "delay": 0.0},
+                features_to_disable=[],
+            )
+            await mock_m1m3ts.evt_summaryState.set_write(summaryState=state)
+            yield mock_m1m3ts, tma_model
+            await eas.cmdwrapper.close_command_tasks(tma_model)
+
+    async def test_apply_setpoints_does_not_repeat_unchanged_command(self) -> None:
+        """Requesting the same setpoints twice sends applySetpoints once."""
+        async with self.m1m3ts_model() as (mock_m1m3ts, tma_model):
+            # The mock MTM1M3TS echoes each command into appliedSetpoints.
+            for _ in range(2):
+                await tma_model.apply_setpoints(10.0)
+                await asyncio.wait([tma_model._send_apply_setpoints_command_task], timeout=STD_TIMEOUT)
+                await asyncio.sleep(STD_SLEEP)
+
+            self.assertEqual(mock_m1m3ts.apply_setpoints_count, 1)
+
+    async def test_heater_fan_demand_does_not_repeat_unchanged_command(self) -> None:
+        """Requesting the same fan speed twice sends heaterFanDemand once."""
+        async with self.m1m3ts_model() as (mock_m1m3ts, tma_model):
+            # The mock MTM1M3TS echoes each command into fcuTargets.
+            for _ in range(2):
+                await tma_model.set_fan_speed(setpoint=1.0)
+                await asyncio.wait([tma_model._send_heater_fan_demand_command_task], timeout=STD_TIMEOUT)
+                await asyncio.sleep(STD_SLEEP)
+
+            self.assertEqual(mock_m1m3ts.heater_fan_demand_count, 1)
 
     async def test_glass_offset_clamp_high(self) -> None:
         """Heater setpoint above glass + high limit is clamped to the limit."""
