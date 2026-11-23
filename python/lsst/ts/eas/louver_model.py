@@ -53,10 +53,10 @@ DORMANT_TIME = 30  # Time to wait while sleeping, seconds
 # from the azimuth callback.
 AZIMUTH_CHANGE_THRESHOLD = 0.1
 
-# Tolerance (percent-open) within which a reported positionCommanded is
-# considered equal to the position EAS last commanded. A larger difference is
-# treated as a freshly sent command rather than EAS's own command echoed back.
-LOUVER_COMMAND_TOLERANCE = 0.1
+# Tolerance (percent-open) within which a louver's measured positionActual is
+# considered to be at the position EAS would command, so that no setLouvers
+# command is needed for it.
+LOUVER_POSITION_TOLERANCE = 1.0
 
 # Atmospheric pressure used in the sun-altitude refraction correction.
 SUN_ALTITUDE_PRESSURE = 700 * u.hPa
@@ -662,7 +662,7 @@ additionalProperties: false
             for index, (commanded, eas_value) in enumerate(
                 zip(louvers_telemetry.positionCommanded[: len(LouverTable)], expected)
             )
-            if abs(commanded - eas_value) > LOUVER_COMMAND_TOLERANCE
+            if abs(commanded - eas_value) > LOUVER_POSITION_TOLERANCE
         }
 
     def record_command(self, command: list[float]) -> None:
@@ -728,6 +728,22 @@ additionalProperties: false
             )
             for base, is_open, sd in zip(self.louver_observer_command, opened, sun_distance)
         ]
+
+        # Avoid excessive setLouver commands. Only command louvers whose
+        # measured position differs from the target, and send nothing if
+        # there are none.
+        if self.expected_commanded is not None:
+            position_actual = louvers_telemetry.positionActual[: len(LouverTable)]
+            louver_command = [
+                (
+                    command
+                    if command != DO_NOT_MOVE and abs(command - actual) > LOUVER_POSITION_TOLERANCE
+                    else DO_NOT_MOVE
+                )
+                for command, actual in zip(louver_command, position_actual)
+            ]
+            if all(command == DO_NOT_MOVE for command in louver_command):
+                return
 
         self.record_command(louver_command)
         await self.set_louvers(position=louver_command)

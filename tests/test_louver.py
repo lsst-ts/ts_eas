@@ -48,6 +48,13 @@ except ImportError:
 STD_SLEEP = 0.2
 
 
+def louvers_telemetry(position: list[float]) -> SimpleNamespace:
+    """Make MTDome louvers telemetry with the louvers at their commanded
+    positions.
+    """
+    return SimpleNamespace(positionCommanded=list(position), positionActual=list(position))
+
+
 class FakeEvtSummaryState:
     def __init__(self) -> None:
         self._msg: SimpleNamespace | None = None
@@ -101,6 +108,10 @@ class FakeDomeLouverCommand:
         telemetry = self.dome_model.louvers_telemetry
         telemetry.positionCommanded = [
             old if new == DO_NOT_MOVE else new for old, new in zip(telemetry.positionCommanded, position)
+        ]
+        # The louvers reach their commanded positions immediately.
+        telemetry.positionActual = [
+            old if new == DO_NOT_MOVE else new for old, new in zip(telemetry.positionActual, position)
         ]
 
     def check_command_range(self, position: list[float]) -> None:
@@ -261,7 +272,7 @@ class TestLouverModel(unittest.IsolatedAsyncioTestCase):
         command : `list` [`float`]
             Observer-commanded position per louver.
         """
-        self.dome_model.louvers_telemetry = SimpleNamespace(positionCommanded=list(command))
+        self.dome_model.louvers_telemetry = louvers_telemetry(command)
         self.fake_remote.cmd_setLouvers.observer_command = list(command)
 
     async def run_monitor_until(self, pred: Any) -> None:
@@ -863,6 +874,93 @@ class TestLouverModel(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(p == 50.0 for p in position[1:14]))
         self.assertTrue(all(p == 100.0 for p in position[14:]))
 
+    async def test_adjust_louvers_does_not_repeat_unchanged_command(self) -> None:
+        """Repeated passes with nothing changed send setLouvers only once."""
+        self.model.dome_azimuth = 0.0
+        self.declare_observer_command([100.0] * 34)
+        self.fake_remote.evt_summaryState.set_state(salobj.State.ENABLED)
+
+        # The fake MTDome echoes each command into positionCommanded.
+        for _ in range(3):
+            await self.model.adjust_louvers(90.0)
+            await asyncio.sleep(STD_SLEEP)
+
+        self.assertEqual(len(self.fake_remote.cmd_setLouvers.calls), 1)
+
+    async def test_adjust_louvers_resends_louver_that_did_not_move(self) -> None:
+        """A louver whose measured position is not the target is re-sent."""
+        sun_az = 73.0
+        f1_index = find_louver("F1").index
+
+        # F1 faces the sun and is capped from 80 to 50.
+        self.model.dome_azimuth = (sun_az + 180.0) % 360.0
+        self.declare_observer_command([80.0] * 34)
+        self.fake_remote.evt_summaryState.set_state(salobj.State.ENABLED)
+        await self.model.adjust_louvers(sun_az)
+        await spin_until(lambda: bool(self.fake_remote.cmd_setLouvers.calls))
+
+        # MTDome reports F1 commanded to 50, but it stayed at 80.
+        assert self.dome_model.louvers_telemetry is not None
+        self.dome_model.louvers_telemetry.positionActual[f1_index] = 80.0
+
+        await self.model.adjust_louvers(sun_az)
+        await asyncio.sleep(STD_SLEEP)
+
+        self.assertEqual(len(self.fake_remote.cmd_setLouvers.calls), 2)
+        position = self.fake_remote.cmd_setLouvers.calls[-1]["position"]
+        self.assertEqual(position[f1_index], 50.0)
+
+    async def test_adjust_louvers_recaps_louver_observer_reopens_in_sun(self) -> None:
+        """A capped louver the observer reopens in the sun is capped again."""
+        sun_az = 73.0
+        f1_index = find_louver("F1").index
+
+        # F1 faces the sun and is capped from 80 to 50.
+        self.model.dome_azimuth = (sun_az + 180.0) % 360.0
+        self.declare_observer_command([80.0] * 34)
+        self.fake_remote.evt_summaryState.set_state(salobj.State.ENABLED)
+
+        await self.model.adjust_louvers(sun_az)
+        await spin_until(lambda: bool(self.fake_remote.cmd_setLouvers.calls))
+        cycle1 = self.fake_remote.cmd_setLouvers.calls[-1]["position"]
+        self.assertEqual(cycle1[f1_index], 50.0)
+
+        # The observer opens F1 to 80 again while it still faces the sun.
+        assert self.dome_model.louvers_telemetry is not None
+        echoed = list(self.dome_model.louvers_telemetry.positionCommanded)
+        echoed[f1_index] = 80.0
+        self.declare_observer_command(echoed)
+
+        await self.model.adjust_louvers(sun_az)
+        await asyncio.sleep(STD_SLEEP)
+
+        self.assertEqual(len(self.fake_remote.cmd_setLouvers.calls), 2)
+        cycle2 = self.fake_remote.cmd_setLouvers.calls[-1]["position"]
+        self.assertEqual(cycle2[f1_index], 50.0)
+
+    async def test_adjust_louvers_resends_command_that_was_not_sent(self) -> None:
+        """A louver command dropped before it was sent is re-sent."""
+        sun_az = 73.0
+        f1_index = find_louver("F1").index
+
+        self.model.dome_azimuth = (sun_az + 180.0) % 360.0
+        self.declare_observer_command([80.0] * 34)
+        self.fake_remote.evt_summaryState.set_state(salobj.State.ENABLED)
+
+        # EAS is not yet enabled, so the first command is dropped.
+        self.model.allow_send = lambda: False
+        await self.model.adjust_louvers(sun_az)
+        await asyncio.sleep(STD_SLEEP)
+        self.assertEqual(self.fake_remote.cmd_setLouvers.calls, [])
+
+        # MTDome still reports 80 for F1, so the cap must be sent now.
+        self.model.allow_send = lambda: True
+        await self.model.adjust_louvers(sun_az)
+        await spin_until(lambda: bool(self.fake_remote.cmd_setLouvers.calls))
+
+        position = self.fake_remote.cmd_setLouvers.calls[-1]["position"]
+        self.assertEqual(position[f1_index], 50.0)
+
     async def test_adjust_louvers_dome_opposite_sun_exposes_f1(self) -> None:
         """Geometric sanity check: when the slit points opposite the sun,
         the F panel (dome-local offset 180 deg) faces the sun directly,
@@ -992,13 +1090,13 @@ class TestLouverModel(unittest.IsolatedAsyncioTestCase):
         echoed[f1_index] = 30.0
         self.declare_observer_command(echoed)
 
-        # Cycle 2: F1 still faces the sun; min(30, 50) == 30 confirms the
-        # baseline was updated to 30.
+        # Cycle 2: F1 still faces the sun. The baseline is now 30, and since
+        # min(30, 50) == 30 is where MTDome already has F1, nothing is sent.
         await self.model.adjust_louvers(sun_az)
-        await spin_until(lambda: len(self.fake_remote.cmd_setLouvers.calls) >= 2)
+        await asyncio.sleep(STD_SLEEP)
 
-        cycle2 = self.fake_remote.cmd_setLouvers.calls[-1]["position"]
-        self.assertEqual(cycle2[f1_index], 30.0)
+        self.assertEqual(self.model.louver_observer_command[f1_index], 30.0)
+        self.assertEqual(len(self.fake_remote.cmd_setLouvers.calls), 1)
 
     # ----- leaving daytime control -----
 
@@ -1106,7 +1204,9 @@ class TestLouverModel(unittest.IsolatedAsyncioTestCase):
             await self.model.update_louvers()
         await spin_until(lambda: len(calls) > sent_before)
 
-        self.assertEqual(calls[-1]["position"][c1], 30.0)
+        # MTDome already has C1 at the observer's 30, so it is not re-sent.
+        self.assertEqual(calls[-1]["position"][c1], DO_NOT_MOVE)
+        self.assertEqual(self.dome_model.louvers_telemetry.positionCommanded[c1], 30.0)
         self.assertEqual(self.model.louver_observer_command[c1], 30.0)
 
     def set_up_direct_day_to_night(self) -> tuple[int, int, int, int]:
@@ -1128,7 +1228,7 @@ class TestLouverModel(unittest.IsolatedAsyncioTestCase):
         eas_command = [80.0] * 34
         eas_command[a1] = eas_command[c1] = 50.0
 
-        self.dome_model.louvers_telemetry = SimpleNamespace(positionCommanded=list(eas_command))
+        self.dome_model.louvers_telemetry = louvers_telemetry(eas_command)
         self.fake_remote.cmd_setLouvers.observer_command = [80.0] * 34
         self.model.mode = LouverControlMode.DAYTIME_LOUVER_CONTROL
         self.model.louver_observer_command = [80.0] * 34

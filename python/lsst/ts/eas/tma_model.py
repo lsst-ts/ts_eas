@@ -46,6 +46,10 @@ DORMANT_TIME = 100  # Time to wait while sleeping, seconds
 
 MAX_TEMPERATURE_FAILURES = 10
 
+# Tolerance (°C) within which a setpoint reported by MTM1M3TS
+# appliedSetpoints is considered equal to the setpoint EAS would command.
+SETPOINT_COMMAND_TOLERANCE = 0.01
+
 SECONDS_PER_HOUR = 3600.0  # Number of seconds in one hour
 SLOW_COOLING_START_TIME = 2  # Time (in hours) before twilight to begin using the slow cooling rate.
 
@@ -584,11 +588,25 @@ additionalProperties: false
                     "without glass-relative offset clamping."
                 )
 
-            self.log.debug(f"Setting MTM1MTS: {glycol_setpoint=:+.2f}°C {heaters_setpoint=:+.2f}°C")
-            await self.send_apply_setpoints(
-                glycol_setpoint=glycol_setpoint,
-                heaters_setpoint=heaters_setpoint,
-            )
+            # Avoid excessive applySetpoints commands. Send nothing if
+            # MTM1M3TS already reports the setpoints EAS would command.
+            try:
+                applied = await self.m1m3ts_remote.evt_appliedSetpoints.aget(timeout=STD_TIMEOUT)
+            except asyncio.TimeoutError:
+                self.log.warning(
+                    "Timed out waiting for MTM1M3TS appliedSetpoints; sending applySetpoints anyway."
+                )
+                applied = None
+            if (
+                applied is None
+                or abs(applied.glycolSetpoint - glycol_setpoint) > SETPOINT_COMMAND_TOLERANCE
+                or abs(applied.heatersSetpoint - heaters_setpoint) > SETPOINT_COMMAND_TOLERANCE
+            ):
+                self.log.debug(f"Setting MTM1MTS: {glycol_setpoint=:+.2f}°C {heaters_setpoint=:+.2f}°C")
+                await self.send_apply_setpoints(
+                    glycol_setpoint=glycol_setpoint,
+                    heaters_setpoint=heaters_setpoint,
+                )
 
         self.m1m3_setpoints_are_stale = False
 
@@ -643,10 +661,21 @@ additionalProperties: false
         fan_speed = max(min(fan_speed, self.fan_speed_max), self.fan_speed_min)
 
         fan_rpm = int(round(0.1 * fan_speed))
-        await self.send_heater_fan_demand(
-            heater_pwm=[-1] * 96,
-            fan_rpm=[fan_rpm] * 96,
-        )
+
+        # Avoid excessive heaterFanDemand commands. Send nothing if every fan
+        # target MTM1M3TS reports already matches. MTM1M3TS reports fanRPM in
+        # RPM, 10x the commanded value. A heaterPWM of -1 leaves the heaters
+        # unchanged, so only the fans need to be compared.
+        try:
+            fcu_targets = await self.m1m3ts_remote.evt_fcuTargets.aget(timeout=STD_TIMEOUT)
+        except asyncio.TimeoutError:
+            self.log.warning("Timed out waiting for MTM1M3TS fcuTargets; sending heaterFanDemand anyway.")
+            fcu_targets = None
+        if fcu_targets is None or any(rpm != fan_rpm * 10 for rpm in fcu_targets.fanRPM):
+            await self.send_heater_fan_demand(
+                heater_pwm=[-1] * 96,
+                fan_rpm=[fan_rpm] * 96,
+            )
 
         if glass_temperature > control_setpoint:
             # Adjust glycol offset based on fan speed:
