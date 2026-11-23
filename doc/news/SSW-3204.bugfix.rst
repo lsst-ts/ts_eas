@@ -1,1 +1,0 @@
-Gated applySetpoints and heaterFanDemand commands to prevent the same setpoints from being sent to MTM1M3TS twice.

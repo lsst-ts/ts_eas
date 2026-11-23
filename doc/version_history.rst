@@ -8,6 +8,16 @@ Version History
 
 .. towncrier release notes start
 
+v0.18.1 (2026-11-23)
+====================
+
+Bug Fixes
+---------
+
+- Gated setLouver commands to prevent the same command from being sent twice. (`SSW-3180 <https://rubinobs.atlassian.net//browse/SSW-3180>`_)
+- Gated applySetpoints and heaterFanDemand commands to prevent the same setpoints from being sent to MTM1M3TS twice. (`SSW-3204 <https://rubinobs.atlassian.net//browse/SSW-3204>`_)
+
+
 v0.18.0 (2026-10-15)
 ====================
 
